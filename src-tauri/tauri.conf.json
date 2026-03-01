@@ -1,0 +1,35 @@
+{
+  "$schema": "https://schema.tauri.app/config/2.json",
+  "productName": "PaperGraph",
+  "version": "0.2.0",
+  "identifier": "com.papergraph.viewer",
+  "build": {
+    "frontendDist": "../src"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "PaperGraph — Research Relationship Viewer",
+        "width": 1400,
+        "height": 860,
+        "minWidth": 1000,
+        "minHeight": 640,
+        "resizable": true,
+        "decorations": true,
+        "transparent": false
+      }
+    ],
+    "withGlobalTauri": true,
+    "security": {
+      "csp": {
+        "default-src": "'self' customprotocol: asset:"
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": []
+  }
+}

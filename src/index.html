@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PaperGraph — Research Relationship Viewer</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Serif+Display:ital@0;1&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+  <!-- ══════════════════════════════════════════════════
+       LEFT PROJECT SIDEBAR
+  ══════════════════════════════════════════════════ -->
+  <aside id="project-sidebar">
+    <div id="project-sidebar-header">
+      <span class="proj-sidebar-title">Projects</span>
+    </div>
+
+    <div id="project-list"><!-- rendered by projects.js --></div>
+
+    <!-- New project input row -->
+    <div id="project-new-row" style="display:none">
+      <input id="project-new-input" class="proj-input" placeholder="Project name…" />
+      <div class="proj-new-actions">
+        <button id="project-new-confirm" class="proj-action-btn proj-confirm">✓</button>
+        <button id="project-new-cancel"  class="proj-action-btn proj-cancel">✕</button>
+      </div>
+    </div>
+
+    <button id="project-new-btn">+ New Project</button>
+  </aside>
+
+  <!-- ── SIDEBAR EDGE TOGGLE ── -->
+  <button id="sidebar-edge-toggle" title="Collapse sidebar">‹</button>
+  <header id="header">
+    <h1>Paper<span>Graph</span></h1>
+    <input id="search-input" type="text" placeholder="Search papers…" />
+    <div id="controls">
+      <button class="btn active" id="btn-force">Force</button>
+      <button class="btn" id="btn-radial">Radial</button>
+      <button class="btn" id="btn-reset">Reset</button>
+      <button class="btn btn-new-paper" id="btn-new-paper">+ New Paper</button>
+    </div>
+  </header>
+
+  <!-- ── CANVAS ── -->
+  <div id="canvas-container">
+    <canvas id="graph-canvas"></canvas>
+  </div>
+
+  <!-- ── ZOOM ── -->
+  <div id="zoom-controls">
+    <button class="zoom-btn" id="zoom-in">+</button>
+    <button class="zoom-btn" id="zoom-out">−</button>
+    <button class="zoom-btn" id="zoom-fit" style="font-size:0.55rem">FIT</button>
+  </div>
+
+  
+
+  <!-- ══════════════════════════════════════════════════
+       QUICK DETAIL SIDEBAR (right)
+  ══════════════════════════════════════════════════ -->
+  <div id="detail-panel">
+    <div style="display:flex;align-items:center;justify-content:space-between;flex-shrink:0">
+      <button id="pp-delete-btn-overview" class="pp-btn pp-btn-danger"
+              style="font-size:.6rem;padding:4px 10px">Delete Paper</button>
+      <button class="dp-close" id="close-panel">✕</button>
+    </div>
+
+    <div id="detail-tag">— Research Paper</div>
+
+    <!-- Node color customiser -->
+    <div id="node-color-row">
+      <span class="node-color-label">Node color</span>
+      <div id="node-color-swatches"></div>
+      <input type="color" id="node-color-custom" title="Custom color" />
+      <button id="node-color-reset" title="Reset to default">↺</button>
+    </div>
+    <div id="detail-title">—</div>
+    <div id="detail-authors">—</div>
+
+    <!-- Toggle buttons -->
+    <div id="detail-toggle-row">
+      <button class="btn" id="abstract-btn">Abstract</button>
+      <button class="btn" id="note-btn">Notes</button>
+      <button class="btn" id="sidebar-pdf-btn">PDF</button>
+    </div>
+
+    <!-- Expandable text panel (abstract / notes) -->
+    <div id="detail-container"></div>
+
+    <!-- Inline PDF viewer (preview only — upload via Open Paper Page) -->
+    <div id="sidebar-pdf-wrap" style="display:none">
+      <div id="sidebar-pdf-bar">
+        <span id="sidebar-pdf-status"></span>
+      </div>
+      <div id="sidebar-pdf-dropzone">
+        <div class="pp-drop-icon">📄</div>
+        <div style="font-size:.68rem;text-align:center;color:var(--text-secondary);line-height:1.6">
+          No PDF attached.<br>
+          <span style="color:var(--accent2);cursor:pointer" id="sidebar-pdf-open-page">Open Paper Page ↗</span>
+          to upload one.
+        </div>
+      </div>
+      <iframe id="sidebar-pdf-iframe" title="PDF"></iframe>
+    </div>
+
+    <div id="detail-meta"></div>
+
+    <div id="detail-connections" class="detail-section">
+      <div class="connections-label">Other Attributes</div>
+      <div id="attributes-meta"></div>
+    </div>
+
+    <button id="dp-open-page">Open Paper Page ↗</button>
+
+    <div id="detail-connections-similar" class="detail-section">
+      <div class="connections-label">Similar Papers</div>
+      <div id="connection-chips"></div>
+    </div>
+  </div>
+
+  <!-- ── TOOLTIP ── -->
+  <div id="tooltip">
+    <div class="t-title" id="tt-title"></div>
+    <div class="t-year"  id="tt-year"></div>
+  </div>
+
+  <!-- ── SIMILARITY THRESHOLD ── -->
+  <div id="sim-threshold-panel">
+    <div id="sim-threshold-label">
+      <span>Similarity</span>
+      <span id="sim-threshold-value">0.38</span>
+    </div>
+    <input id="sim-threshold-range" type="range" min="0.1" max="0.95" step="0.01" value="0.38" />
+  </div>
+
+  <!-- ── STATS ── -->
+  <div id="stats">
+    <div class="stat-item">
+      <div class="stat-value" id="stat-papers">0</div>
+      <div class="stat-label">Papers</div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-value" id="stat-connections">0</div>
+      <div class="stat-label">Links</div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-value" id="stat-topics">0</div>
+      <div class="stat-label">Tags</div>
+    </div>
+  </div>
+
+
+  <!-- ══════════════════════════════════════════════════
+       PAPER PAGE OVERLAY
+  ══════════════════════════════════════════════════ -->
+  <div id="paper-page-overlay">
+    <div id="pp-overlay-bg"></div>
+    <div id="pp-panel">
+
+      <div id="pp-header">
+        <div id="pp-header-left">
+          <div id="pp-topic-badge">—</div>
+          <div id="pp-main-title">—</div>
+          <div id="pp-main-authors">—</div>
+        </div>
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px;flex-shrink:0">
+          <button id="pp-close-btn">✕</button>
+          <button id="pp-delete-btn-detail" class="pp-btn pp-btn-danger"
+                  style="font-size:.6rem;padding:4px 10px">Delete Paper</button>
+        </div>
+      </div>
+
+      <div id="pp-tabs">
+        <button class="pp-tab-btn active" data-tab="info">
+          <span class="pp-tab-icon">📄</span> Info
+        </button>
+        <button class="pp-tab-btn" data-tab="notes">
+          <span class="pp-tab-icon">✏️</span> Notes
+        </button>
+        <button class="pp-tab-btn" data-tab="pdf">
+          <span class="pp-tab-icon">📎</span> PDF
+        </button>
+        <button class="pp-tab-btn" data-tab="connections">
+          <span class="pp-tab-icon">🔗</span> Connections
+        </button>
+      </div>
+
+      <div id="pp-body">
+
+        <div class="pp-tab-pane active" id="pp-tab-info">
+          <div id="pp-info-content"></div>
+        </div>
+
+        <div class="pp-tab-pane" id="pp-tab-notes">
+          <div class="pp-notes-toolbar">
+            <button class="pp-notes-tool" id="pp-notes-bold"  title="Bold"><b>B</b></button>
+            <button class="pp-notes-tool" id="pp-notes-italic" title="Italic"><i>I</i></button>
+            <button class="pp-notes-tool" id="pp-notes-head"  title="Heading">H2</button>
+            <button class="pp-notes-tool" id="pp-notes-code"  title="Inline code">`·`</button>
+            <div class="pp-notes-sep"></div>
+            <button class="pp-notes-view-btn active" id="pp-view-edit"   title="Edit only">Edit</button>
+            <button class="pp-notes-view-btn"         id="pp-view-split"  title="Split view">Split</button>
+            <button class="pp-notes-view-btn"         id="pp-view-preview" title="Preview only">Preview</button>
+            <div class="pp-notes-sep"></div>
+            <button class="pp-notes-tool" id="pp-notes-export">Export</button>
+            <button class="pp-notes-tool pp-btn-danger" id="pp-notes-clear">Clear</button>
+            <div class="pp-notes-meta">
+              <span id="pp-notes-count">0 words</span>
+              <span id="pp-notes-status"></span>
+            </div>
+          </div>
+          <div id="pp-notes-panes">
+            <textarea id="pp-notes-textarea"
+              placeholder="Your notes, thoughts, and annotations for this paper…&#10;&#10;Supports **bold**, _italic_, ## headings, `code`, > blockquotes, - lists, and more."></textarea>
+            <div id="pp-notes-preview" class="pp-md-preview"></div>
+          </div>
+        </div>
+
+        <div class="pp-tab-pane" id="pp-tab-pdf">
+          <input type="file" id="pp-pdf-file-input" accept="application/pdf" />
+          <div id="pp-pdf-dropzone">
+            <div class="pp-drop-icon">📂</div>
+            <div class="pp-drop-title">Click or drag a PDF here</div>
+            <div class="pp-drop-hint">PDF will be copied to project storage folder</div>
+          </div>
+          <div id="pp-pdf-viewer">
+            <div class="pp-pdf-bar">
+              <span id="pp-pdf-name">document.pdf</span>
+              <span id="pp-pdf-db-status"
+                    style="font-size:.62rem;color:var(--text-secondary);margin-left:auto;margin-right:12px"></span>
+              <button class="pp-btn pp-btn-danger" id="pp-pdf-remove">Remove PDF</button>
+            </div>
+            <iframe id="pp-pdf-iframe" title="PDF Viewer"></iframe>
+          </div>
+        </div>
+
+        <div class="pp-tab-pane" id="pp-tab-connections">
+          <div id="pp-connections-list"></div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/9.1.6/marked.min.js"></script>
+  <script src="graph.js" type="module" defer></script>
+  <script src="paper-page.js" type="module" defer></script>
+  <script src="projects.js" type="module" defer></script> 
+
+
+  <!-- ══════════════════════════════════════════════════
+       NEW PAPER MODAL
+  ══════════════════════════════════════════════════ -->
+  <div id="new-paper-modal">
+    <div id="npm-panel">
+      <div id="npm-title-bar">
+        <div id="npm-heading">Add New Paper</div>
+        <button id="npm-close">✕</button>
+      </div>
+
+      <div class="npm-grid">
+        <div class="npm-field npm-field-full">
+          <label class="npm-label">Title</label>
+          <input class="npm-input" id="npm-title" placeholder="Paper title">
+        </div>
+        <div class="npm-field npm-field-full">
+          <label class="npm-label">Authors
+            <span style="color:var(--text-dim)"> — comma separated</span>
+          </label>
+          <input class="npm-input" id="npm-authors" placeholder="He, K., Zhang, X., Ren, S.">
+        </div>
+        <div class="npm-field">
+          <label class="npm-label">Year</label>
+          <input class="npm-input" id="npm-year" type="number" value="2024">
+        </div>
+        <div class="npm-field">
+          <label class="npm-label">Venue</label>
+          <input class="npm-input" id="npm-venue" placeholder="NeurIPS, CVPR, arXiv…">
+        </div>
+        <div class="npm-field npm-field-full">
+          <label class="npm-label">Hashtags
+            <span style="color:var(--text-dim)"> — space or comma separated</span>
+          </label>
+          <input class="npm-input" id="npm-hashtags" placeholder="classification transformer">
+        </div>
+        <div class="npm-field npm-field-full">
+          <label class="npm-label">Abstract</label>
+          <textarea class="npm-input npm-textarea" id="npm-abstract"
+                    placeholder="Brief paper abstract…"></textarea>
+        </div>
+      </div>
+
+      <div id="npm-footer">
+        <span id="npm-status"></span>
+        <button class="btn" id="npm-cancel-btn">Cancel</button>
+        <button class="btn btn-new-paper" id="npm-submit-btn">Add to Graph</button>
+      </div>
+    </div>
+  </div>
+
+
+  <!-- ══════════════════════════════════════════════════
+       CUSTOM CONFIRM / ALERT DIALOG
+       (replaces window.confirm / window.alert which
+        Tauri v2 webview blocks and always returns false)
+  ══════════════════════════════════════════════════ -->
+  <div id="pg-dialog-backdrop">
+    <div id="pg-dialog">
+      <div id="pg-dialog-title"></div>
+      <div id="pg-dialog-message"></div>
+      <div id="pg-dialog-btns">
+        <button id="pg-dialog-cancel" class="btn">Cancel</button>
+        <button id="pg-dialog-ok"     class="btn btn-new-paper">OK</button>
+      </div>
+    </div>
+  </div>
+
+</body>
+</html>

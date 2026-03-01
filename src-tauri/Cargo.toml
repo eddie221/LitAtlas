@@ -1,0 +1,25 @@
+[package]
+name = "paper-graph"
+version = "0.3.0"
+edition = "2021"
+
+[lib]
+name = "paper_graph_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri      = { version = "2", features = [] }
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio      = { version = "1", features = ["full"] }
+sqlx       = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+
+[profile.release]
+panic         = "abort"
+codegen-units = 1
+lto           = true
+opt-level     = "s"
+strip         = true
