@@ -68,11 +68,6 @@ function pgAlert(message, title) {
   return pgDialog(title || "Notice", message, false);
 }
 
-// ── PDF blob loader ───────────────────────────────────────────────────────────
-// Reads PDF bytes via Rust (avoids asset:// protocol issues in Tauri v2) and
-// sets the iframe src to a local blob URL.
-let _ppPdfBlobUrl = null;
-
 // ── Helpers ───────────────────────────────────────────────────────────────────
 let _saveTimer = null;
 function debounce(fn, ms = 700) { clearTimeout(_saveTimer); _saveTimer = setTimeout(fn, ms); }
@@ -595,7 +590,7 @@ function renderConnectionsTab(connected) {
 
 async function delectPaper() {
   const paper = getCurrentPaperCache();
-    console.log(paper);
+    console.log("delete : ", paper);
     if (!paper) return;
     if (!await pgConfirm(`Permanently delete "${paper.title}"?\n\nThis cannot be undone.`, "Delete Paper")) return;
 

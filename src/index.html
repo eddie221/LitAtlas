@@ -42,6 +42,7 @@
       <button class="btn" id="btn-radial">Radial</button>
       <button class="btn" id="btn-reset">Reset</button>
       <button class="btn btn-new-paper" id="btn-new-paper">+ New Paper</button>
+      <button class="btn" id="btn-sim-settings" title="Similarity Settings">⚙ Similarity</button>
     </div>
   </header>
 
@@ -126,6 +127,7 @@
   <div id="tooltip">
     <div class="t-title" id="tt-title"></div>
     <div class="t-year"  id="tt-year"></div>
+    <div class="t-tag"  id="tt-tag"></div>
   </div>
 
   <!-- ── SIMILARITY THRESHOLD ── -->
@@ -134,7 +136,7 @@
       <span>Similarity</span>
       <span id="sim-threshold-value">0.38</span>
     </div>
-    <input id="sim-threshold-range" type="range" min="0.1" max="0.95" step="0.01" value="0.38" />
+    <input id="sim-threshold-range" type="range" min="0.0" max="0.95" step="0.01" value="0.38" />
   </div>
 
   <!-- ── STATS ── -->
@@ -247,6 +249,25 @@
   </div>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/9.1.6/marked.min.js"></script>
+
+  <!-- ══════════════════════════════════════════════════
+       SIMILARITY SETTINGS PANEL
+  ══════════════════════════════════════════════════ -->
+  <div id="sim-settings-backdrop"></div>
+  <div id="sim-settings-panel">
+    <div id="sim-settings-header">
+      <div id="sim-settings-title">
+        <span style="font-family:'DM Serif Display',serif;font-size:1.1rem">Similarity Settings</span>
+        <span style="font-size:.65rem;color:var(--text-secondary);margin-left:8px">How paper edges are computed</span>
+      </div>
+      <button id="sim-settings-close">✕</button>
+    </div>
+    <div id="sim-settings-body">
+      <!-- rendered by similarity-settings.js -->
+    </div>
+  </div>
+
+  <script src="similarity_settings.js" type="module" defer></script>
   <script src="graph.js" type="module" defer></script>
   <script src="paper-page.js" type="module" defer></script>
   <script src="projects.js" type="module" defer></script> 

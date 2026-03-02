@@ -1,138 +1,221 @@
 /**
- * similarity.js
+ * similarity.js  —  PaperGraph similarity engine (strategy pattern)
  *
- * Lightweight similarity engine for PaperGraph.
+ * Two strategies, swappable at runtime:
  *
- * With the v3 schema, papers no longer carry a fixed feature vector
- * (task / architecture / supervision / embedding_dim).  Similarity is
- * now computed from the fields that are always present:
+ *   "js-cosine"     — Lightweight in-JS cosine engine.
+ *                     Uses hashtags (tag-space vector) + custom attribution
+ *                     attributes (author/institution overlap). No abstract.
  *
- *   • year_norm     (linear 2012 → 2024)          weight 0.25
- *   • venue_match   (1 if same venue, else 0)      weight 0.30
- *   • tag_overlap   (Jaccard on hashtag sets)       weight 0.45
+ *   "hf-embeddings" — HuggingFace sentence-transformers via Python sidecar.
+ *                     User picks model + fields + weights.
  *
- * All dimensions are pre-multiplied by sqrt(weight) so cosine similarity
- * equals weighted cosine similarity after normalisation.
- *
- * Custom attributes (abstract, citations, …) are not used for similarity
- * because they are user-defined and not guaranteed to be present.
+ * Public API:
+ *   computeEdges(papers, config?)              → Promise<EdgeInput[]>
+ *   computeEdgesForNewPaper(p, existing, cfg?) → Promise<EdgeInput[]>
+ *   getDefaultConfig()                         → SimilarityConfig
+ *   SIMILARITY_THRESHOLD, MAX_EDGES_PER_NODE
  */
 
 // ── Weights ───────────────────────────────────────────────────────────────────
-const W_YEAR  = 0.25;
-const W_VENUE = 0.30;
-const W_TAGS  = 0.45;
+// JS-cosine strategy blends two sub-vectors:
+//   TAG_WEIGHT        — one-hot hashtag presence (primary signal)
+//   ATTRIBUTION_WEIGHT — Jaccard-style author/institution overlap (secondary signal)
+const W_TAGS        = 0.70;
 
-// ── Known tag vocabulary (order defines vector positions) ────────────────────
-// Tags not in this list are ignored for similarity — they still display fine.
-const TAG_VOCAB = [
+// ── Tag vocabulary (loaded from SQL hashtags table at runtime) ───────────────
+// graph.js calls setTagVocab() after loading papers so the vector space always
+// reflects the actual tags in the current project's database.
+// The fallback list is used only if setTagVocab() has not been called yet.
+let TAG_VOCAB = [
   "classification", "object-detection", "segmentation", "generative",
   "3d-vision", "self-supervised", "video", "depth-estimation", "optical-flow",
   "cnn", "transformer", "diffusion", "gan", "vae", "mlp", "nerf",
   "contrastive", "masked-autoencoder", "imagenet", "real-time",
 ];
 
-export const VECTOR_DIM = TAG_VOCAB.length + 2; // tags + year + venue
-
-// ── Encoding ──────────────────────────────────────────────────────────────────
-
-function yearNorm(year) {
-  return (Number(year) - 2012) / (2024 - 2012);
-}
-
 /**
- * Encode a paper into a fixed-length Float64 vector.
- * paper must have: year (number), venue (string), hashtags (string[]).
+ * Replace the tag vocabulary with tags from the database.
+ * Call this whenever the project changes or new tags are added.
+ * Accepts HashtagRow[] ({ id, name }) or plain string[].
  */
-export function encode(paper) {
-  const vec = new Array(VECTOR_DIM).fill(0);
-
-  // Tag multi-hot  [0 .. TAG_VOCAB.length-1]
-  const tagW = Math.sqrt(W_TAGS);
-  const tagSet = new Set((paper.hashtags ?? []).map(t => t.replace(/^#/, "")));
-  for (let i = 0; i < TAG_VOCAB.length; i++) {
-    if (tagSet.has(TAG_VOCAB[i])) vec[i] = tagW;
-  }
-
-  // Year scalar  [TAG_VOCAB.length]
-  vec[TAG_VOCAB.length]     = yearNorm(paper.year) * Math.sqrt(W_YEAR);
-
-  // Venue one-hot is handled via cosine — same venue → high dot product.
-  // We encode it as a normalised hash bucket to keep the vector fixed-length.
-  // Two papers with the same venue string will get vec[last] = sqrt(W_VENUE);
-  // different venues → orthogonal → dot = 0 on that dimension.
-  // We use a simple collision-tolerant string hash mod 1 → [0,1] scalar.
-  const venueHash = venueScalar(paper.venue ?? "");
-  vec[TAG_VOCAB.length + 1] = venueHash * Math.sqrt(W_VENUE);
-
-  return vec;
+export function setTagVocab(tags) {
+  TAG_VOCAB = tags.map(t => (typeof t === "string" ? t : t.name).replace(/^#/, "").toLowerCase());
 }
 
-// Map a venue string to a stable scalar in [0, 1].
-// Same venue → same value; different venues → different values (usually).
-function venueScalar(venue) {
-  const KNOWN = [
-    "NeurIPS","ICML","ICLR","CVPR","ICCV","ECCV","SIGGRAPH","TMLR","arXiv",
-    "AAAI","ACL","EMNLP","ICRA","RSS","CoRL",
-  ];
-  const idx = KNOWN.indexOf(venue.trim());
-  if (idx !== -1) return (idx + 1) / KNOWN.length;
-  // Unknown venue: hash it to a fixed bucket
-  let h = 0;
-  for (let i = 0; i < venue.length; i++) h = (h * 31 + venue.charCodeAt(i)) >>> 0;
-  return (h % 1000) / 1000;
+export function setAttrVocab(tags) {
+  TAG_VOCAB = tags.map(t => (typeof t === "string" ? t : t.name).replace(/^#/, "").toLowerCase());
 }
 
-// ── Cosine similarity ─────────────────────────────────────────────────────────
+export function getTagVocab() { return [...TAG_VOCAB]; }
 
-export function cosine(a, b) {
-  let dot = 0, na = 0, nb = 0;
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i];
-    na  += a[i] * a[i];
-    nb  += b[i] * b[i];
-  }
-  if (na === 0 || nb === 0) return 0;
-  return dot / (Math.sqrt(na) * Math.sqrt(nb));
-}
-
-// ── Edge metadata ─────────────────────────────────────────────────────────────
-
-export function edgeType(a, b) {
-  const aTags = new Set((a.hashtags ?? []).map(t => t.replace(/^#/, "")));
-  const bTags = new Set((b.hashtags ?? []).map(t => t.replace(/^#/, "")));
-  for (const t of aTags) { if (bTags.has(t)) return "same_tag"; }
-  if ((a.venue ?? "") === (b.venue ?? "") && a.venue) return "same_venue";
-  return "related";
-}
-
-export function edgeWeight(sim) {
-  if (sim >= 0.75) return 3;
-  if (sim >= 0.55) return 2;
-  return 1;
-}
+// Vector dim = TAG_VOCAB slots + 1 attribution scalar
+export function getVectorDim() { return TAG_VOCAB.length + 1; }
 
 // ── Thresholds ────────────────────────────────────────────────────────────────
 export const SIMILARITY_THRESHOLD = 0.38;
 export const MAX_EDGES_PER_NODE   = 7;
 
-// ── Full graph computation ────────────────────────────────────────────────────
+export function getDefaultConfig() {
+  return {
+    strategy:  "js-cosine",
+    model:     "sentence-transformers/all-MiniLM-L6-v2",
+    fields:    ["hashtags", "attribution"],
+    weights:   { hashtags: 1.0},
+    threshold: SIMILARITY_THRESHOLD,
+    max_edges: MAX_EDGES_PER_NODE,
+  };
+}
+
+
+// ── Attribution helpers ───────────────────────────────────────────────────────
 
 /**
- * Compute all similarity edges for an array of paper objects.
- * Returns edge objects ready for the Rust `recompute_edges` command:
- *   { source_id, target_id, similarity, weight, edge_type }
+ * Extract a normalised set of attribution tokens from a paper.
+ *
+ * "attribution" is sourced from the paper's custom attributes whose key is
+ * "attribution", "author", "authors", or "institution" (case-insensitive).
+ * Values are split on commas/semicolons and lowercased so that
+ * "He, K." and "he, k." are treated as the same token.
+ *
+ * Returns a Set<string>.
  */
-export function computeEdges(papers) {
-  const n    = papers.length;
-  const vecs = papers.map(encode);
+// function _attributionTokens(paper) {
+//   const tokens = new Set();
+//   const ATTR_KEYS = new Set(["attribution", "author", "authors", "institution"]);
+//   console.log("paper attr : ", paper.attributes)
+//   for (const a of (paper.attributes ?? [])) {
+//     console.log(a);
+//     if (!ATTR_KEYS.has((a.key ?? "").toLowerCase())) continue;
+//     const val = (a.value ?? "").trim();
+//     if (!val) continue;
+//     for (const part of val.split(/[,;]+/)) {
+//       const t = part.trim().toLowerCase();
+//       if (t) tokens.add(t);
+//     }
+//   }
 
-  const candidates = [];
-  for (let i = 0; i < n; i++) {
-    for (let j = i + 1; j < n; j++) {
-      const sim = cosine(vecs[i], vecs[j]);
-      if (sim >= SIMILARITY_THRESHOLD) {
-        candidates.push({
+//   // Also accept top-level `authors` field (array of strings or plain string)
+//   const topAuthors = paper.authors ?? paper.author;
+//   if (Array.isArray(topAuthors)) {
+//     for (const a of topAuthors) {
+//       const t = String(a).trim().toLowerCase();
+//       if (t) tokens.add(t);
+//     }
+//   } else if (typeof topAuthors === "string" && topAuthors.trim()) {
+//     for (const part of topAuthors.split(/[,;]+/)) {
+//       const t = part.trim().toLowerCase();
+//       if (t) tokens.add(t);
+//     }
+//   }
+
+//   return tokens;
+// }
+
+/**
+ * Jaccard similarity between two attribution token sets → [0, 1].
+ * Returns 0 when both sets are empty (no signal) rather than 1.
+ */
+// function _jaccardAttribution(setA, setB) {
+//   if (setA.size === 0 && setB.size === 0) return 0;
+//   let inter = 0;
+//   for (const t of setA) if (setB.has(t)) inter++;
+//   const union = setA.size + setB.size - inter;
+//   return union === 0 ? 0 : inter / union;
+// }
+
+
+// ── Encoding ──────────────────────────────────────────────────────────────────
+
+/**
+ * Encode a paper into a fixed-length Float64 vector suitable for cosine
+ * similarity.
+ *
+ * Vector layout:
+ *   [0 … TAG_VOCAB.length-1]  — Weighted hashtag one-hot  (weight √W_TAGS)
+ *   [TAG_VOCAB.length]         — Attribution Jaccard scalar (weight √W_ATTRIBUTION)
+ *                                NOTE: attribution is a *pairwise* measure so we
+ *                                store the raw token set separately and inject the
+ *                                scalar when building candidate pairs (see _jsEdges).
+ *
+ * For the cosine path we approximate by encoding each paper independently.
+ * The attribution component is set to √W_ATTRIBUTION so that when two papers
+ * share all authors the dot product contribution equals W_ATTRIBUTION and when
+ * they share none it equals 0.  Actual Jaccard is computed pairwise below.
+ */
+export function encode(paper) {
+  const dim = getVectorDim();
+  const vec = new Float64Array(dim);
+
+  // ── Hashtag sub-vector ──
+  const ts = new Set((paper.hashtags ?? []).map(t => t.replace(/^#/, "").toLowerCase()));
+  for (let i = 0; i < TAG_VOCAB.length; i++) {
+    if (ts.has(TAG_VOCAB[i])) vec[i] = 1.0;
+  }
+
+  // ── Attribution sub-scalar (placeholder — refined pairwise in _jsEdges) ──
+  // We use a binary "has attribution?" signal here so the encoding is
+  // paper-independent.  The real Jaccard overlap is injected pairwise.
+  // const attrTokens = _attributionTokens(paper);
+  // vec[TAG_VOCAB.length] = attrTokens.size > 0 ? Math.sqrt(W_ATTRIBUTION) : 0;
+
+  return { vec: Array.from(vec) };
+}
+
+
+// ── Cosine similarity ─────────────────────────────────────────────────────────
+export function cosine(a, b) {
+  let dot = 0, na = 0, nb = 0;
+  for (let i = 0; i < a.length; i++) { dot += a[i]*b[i]; na += a[i]*a[i]; nb += b[i]*b[i]; }
+  return (na === 0 || nb === 0) ? 0 : dot / (Math.sqrt(na) * Math.sqrt(nb));
+}
+
+/**
+ * Refined similarity that blends tag-cosine with pairwise attribution Jaccard.
+ *
+ * sim = W_TAGS * tagCosine(a, b) + W_ATTRIBUTION * jaccardAttribution(a, b)
+ *
+ * When a paper has no attribution data the attribution term contributes 0,
+ * so tag similarity alone determines the score.
+ */
+function _blendedSim(encA, encB) {
+  // Tag cosine: operate only on the TAG_VOCAB slice
+  const tagSliceA = encA.vec.slice(0, TAG_VOCAB.length);
+  const tagSliceB = encB.vec.slice(0, TAG_VOCAB.length);
+  const tagSim    = cosine(tagSliceA, tagSliceB);
+
+  // Attribution Jaccard
+  // const attrSim = _jaccardAttribution(encA.attrTokens, encB.attrTokens);
+
+  return tagSim //+ W_ATTRIBUTION * attrSim;
+}
+
+
+// ── Edge metadata ─────────────────────────────────────────────────────────────
+
+export function edgeType(a, b) {
+  const at = new Set((a.hashtags ?? []).map(t => t.replace(/^#/, "")));
+  const bt = new Set((b.hashtags ?? []).map(t => t.replace(/^#/, "")));
+  for (const t of at) if (bt.has(t)) return "same_tag";
+  if ((a.venue ?? "") === (b.venue ?? "") && a.venue) return "same_venue";
+  return "related";
+}
+
+export function edgeWeight(sim) { return sim >= 0.75 ? 3 : sim >= 0.55 ? 2 : 1; }
+
+
+// ── JS-cosine engine ──────────────────────────────────────────────────────────
+
+function _jsEdges(papers, thr, max) {
+  const encs  = papers.map(encode);
+  const cands = [];
+
+  for (let i = 0; i < papers.length; i++) {
+    for (let j = i + 1; j < papers.length; j++) {
+      const sim = _blendedSim(encs[i], encs[j]);
+      // console.log(i, j, sim, thr);
+      if (sim >= thr) {
+        cands.push({
           source_id: papers[i].id,
           target_id: papers[j].id,
           similarity: sim,
@@ -144,15 +227,15 @@ export function computeEdges(papers) {
     }
   }
 
-  candidates.sort((a, b) => b.similarity - a.similarity);
-
-  const edgeCount = new Array(n).fill(0);
-  const result    = [];
-  for (const e of candidates) {
-    if (edgeCount[e._i] < MAX_EDGES_PER_NODE && edgeCount[e._j] < MAX_EDGES_PER_NODE) {
-      edgeCount[e._i]++;
-      edgeCount[e._j]++;
-      result.push({
+  cands.sort((a, b) => b.similarity - a.similarity);
+  // console.log("cands : ", cands);
+  const cnt = new Array(papers.length).fill(0);
+  const res = [];
+  for (const e of cands) {
+    if (cnt[e._i] < max && cnt[e._j] < max) {
+      cnt[e._i]++;
+      cnt[e._j]++;
+      res.push({
         source_id:  e.source_id,
         target_id:  e.target_id,
         similarity: parseFloat(e.similarity.toFixed(6)),
@@ -161,31 +244,75 @@ export function computeEdges(papers) {
       });
     }
   }
-  return result;
+  // console.log("res : ", res);
+  return res;
 }
 
-/**
- * Compute edges for one new paper against an existing set.
- * Used when adding a paper so we don't recompute the entire graph.
- */
-export function computeEdgesForNewPaper(newPaper, existingPapers) {
-  const newVec = encode(newPaper);
-  const edges  = [];
+function _jsEdgesForNew(np, existing, thr, max) {
+  const nEnc = encode(np);
+  const edges = [];
 
-  for (const other of existingPapers) {
-    if (other.id === newPaper.id) continue;
-    const sim = cosine(newVec, encode(other));
-    if (sim >= SIMILARITY_THRESHOLD) {
+  for (const o of existing) {
+    if (o.id === np.id) continue;
+    const sim = _blendedSim(nEnc, encode(o));
+    if (sim >= thr) {
       edges.push({
-        source_id:  newPaper.id,
-        target_id:  other.id,
+        source_id:  np.id,
+        target_id:  o.id,
         similarity: parseFloat(sim.toFixed(6)),
         weight:     edgeWeight(sim),
-        edge_type:  edgeType(newPaper, other),
+        edge_type:  edgeType(np, o),
       });
     }
   }
 
   edges.sort((a, b) => b.similarity - a.similarity);
-  return edges.slice(0, MAX_EDGES_PER_NODE);
+  return edges.slice(0, max);
+}
+
+
+// ── HF-Embeddings strategy ────────────────────────────────────────────────────
+
+const _invoke = (
+  window.__TAURI__?.core?.invoke ??
+  window.__TAURI__?.tauri?.invoke ??
+  null
+);
+
+async function _hfEdges(papers, cfg) {
+  if (!_invoke) throw new Error("Tauri invoke not available");
+  const res = await _invoke("hf_compute_similarity", {
+    papers,
+    config: {
+      model:     cfg.model     ?? "sentence-transformers/all-MiniLM-L6-v2",
+      fields:    cfg.fields    ?? ["title", "abstract", "hashtags"],
+      weights:   cfg.weights   ?? {},
+      threshold: cfg.threshold ?? SIMILARITY_THRESHOLD,
+      max_edges: cfg.max_edges ?? MAX_EDGES_PER_NODE,
+    },
+  });
+  return res.edges ?? [];
+}
+
+async function _hfEdgesForNew(np, existing, cfg) {
+  const all   = [...existing.filter(p => p.id !== np.id), np];
+  const edges = await _hfEdges(all, cfg);
+  return edges
+    .filter(e => e.source_id === np.id || e.target_id === np.id)
+    .slice(0, cfg.max_edges ?? MAX_EDGES_PER_NODE);
+}
+
+
+// ── Public API ────────────────────────────────────────────────────────────────
+
+export async function computeEdges(papers, config = {}) {
+  const c = { ...getDefaultConfig(), ...config };
+  if (c.strategy === "hf-embeddings") return _hfEdges(papers, c);
+  return _jsEdges(papers, c.threshold, c.max_edges);
+}
+
+export async function computeEdgesForNewPaper(newPaper, existing, config = {}) {
+  const c = { ...getDefaultConfig(), ...config };
+  if (c.strategy === "hf-embeddings") return _hfEdgesForNew(newPaper, existing, c);
+  return _jsEdgesForNew(newPaper, existing, c.threshold, c.max_edges);
 }

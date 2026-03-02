@@ -18,7 +18,8 @@ Due to the tremendous growth of research, it is hard for us to keep track of eve
     - [X] Edit paper
     - [X] Upload PDF
  - Similarity between Papers
-    - [ ] Using hashtag
+    - [X] Using hashtag (cosine similarity)
     - [ ] Using LLM
+ - Backup
 
 

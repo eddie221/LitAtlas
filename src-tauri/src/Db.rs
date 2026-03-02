@@ -415,7 +415,10 @@ pub async fn delete_relation(pool: &SqlitePool, id: i64) -> Result<(), DbError> 
 pub async fn replace_all_edges(pool: &SqlitePool, edges: Vec<EdgeInput>) -> Result<usize, DbError> {
     sqlx::query("DELETE FROM paper_edges").execute(pool).await?;
     let count = edges.len();
+    // println!("edge count : {}", count);
+    
     for e in &edges {
+        // println!("{} {} {}", e.source_id, e.target_id, e.similarity);
         sqlx::query(
             "INSERT INTO paper_edges (source_id, target_id, similarity, weight, edge_type)
              VALUES (?, ?, ?, ?, ?)"
@@ -423,6 +426,13 @@ pub async fn replace_all_edges(pool: &SqlitePool, edges: Vec<EdgeInput>) -> Resu
         .bind(e.source_id).bind(e.target_id)
         .bind(e.similarity).bind(e.weight).bind(&e.edge_type)
         .execute(pool).await?;
+        // sqlx::query("UPDATE paper_edges 
+        //             SET source_id = ?, target_id = ?, similarity = ?, weight = ?, edge_type = ?
+        //             WHERE source_id = ? AND target_id = ?")
+        //     .bind(e.source_id).bind(e.target_id)
+        //     .bind(e.similarity).bind(e.weight).bind(&e.edge_type)
+        //     .bind(e.source_id).bind(e.target_id)
+        //     .execute(pool).await?;
     }
     Ok(count)
 }

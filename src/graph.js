@@ -21,7 +21,7 @@
 import { colorForPaper, groupForPaper, nodeColorOverrides, COLOR_PALETTE } from "./constant.js";
 import { setPapersCache, getPapersCache, setEdgesCache, getEdgesCache, state, setCurrentPaperCache } from "./cache.js";
 import { openPaperPage, showDropzone } from "./paper-page.js";
-import { computeEdges, computeEdgesForNewPaper } from "./similarity.js";
+import { computeEdges, computeEdgesForNewPaper, getDefaultConfig, setTagVocab } from "./similarity.js";
 import { loadProjects, onProjectSwitch } from "./projects.js";
 
 // ── Tauri bridge ──────────────────────────────────────────────────────────────
@@ -31,6 +31,28 @@ const invoke = (
   (() => { throw new Error("Tauri not found — run with `cargo tauri dev`"); })
 );
 
+// ── Similarity config (loaded from Rust on boot, persisted on change) ─────────
+let _simConfig = getDefaultConfig();
+
+export async function loadSimConfig() {
+  try {
+    const saved = await invoke("get_similarity_config");
+    if (saved && typeof saved === "object") {
+      _simConfig = { ...getDefaultConfig(), ...saved };
+    }
+  } catch (e) {
+    console.warn("[PaperGraph] Could not load similarity config:", e);
+  }
+}
+
+export async function saveSimConfig(cfg) {
+  _simConfig = { ...getDefaultConfig(), ...cfg };
+  try { await invoke("save_similarity_config", { config: _simConfig }); }
+  catch (e) { console.warn("[PaperGraph] Could not save similarity config:", e); }
+}
+
+export function getSimConfig() { return { ..._simConfig }; }
+
 // ── PDF display helper ────────────────────────────────────────────────────────
 // Instead of the broken asset:// protocol (Tauri v2 CSP/scope issues), we ask
 // Rust to read the file bytes and return them as base64, then create a blob URL.
@@ -39,7 +61,6 @@ let _pdfBlobUrl = null; // track so we can revoke the previous one
 
 export async function loadPdfIntoIframe(paperId, iframe, onStatus) {
   // Revoke any previous blob URL to avoid memory leaks
-  console.log("check : ", _pdfBlobUrl);
   if (_pdfBlobUrl) { URL.revokeObjectURL(_pdfBlobUrl); _pdfBlobUrl = null; }
 
   if (onStatus) onStatus("Loading PDF…", "var(--text-secondary)");
@@ -131,15 +152,23 @@ function hideOverlay() {
 async function loadFromDB() {
   showOverlay("Opening database…");
   try {
+    // Load similarity config first so compute uses user's settings
+    await loadSimConfig();
+
     showOverlay("Loading papers…");
     setPapersCache((await invoke("get_papers")).map(adaptPaper));
+
+    // Sync tag vocabulary from DB so similarity vectors reflect the real tag set
+    const dbTags = await invoke("get_hashtags");
+    setTagVocab(dbTags);
 
     showOverlay("Loading similarity graph…");
     let rawEdges = await invoke("get_edges");
 
     if (rawEdges.length === 0) {
-      showOverlay("First run — computing similarity edges…");
-      const computed = computeEdges(getPapersCache());
+      const stratLabel = _simConfig.strategy === "hf-embeddings" ? "HuggingFace embeddings" : "cosine similarity";
+      showOverlay(`First run — computing edges via ${stratLabel}…`);
+      const computed = await computeEdges(getPapersCache(), _simConfig);
       await invoke("recompute_edges", { edges: computed });
       rawEdges = await invoke("get_edges");
     }
@@ -155,7 +184,10 @@ async function loadFromDB() {
 
 // ── Edge recomputation (full rebuild) ─────────────────────────────────────────
 export async function triggerEdgeRecompute() {
-  const computed = computeEdges(getPapersCache());
+  // Refresh vocab in case new tags were added since last load
+  const dbTags = await invoke("get_hashtags");
+  setTagVocab(dbTags);
+  const computed = await computeEdges(getPapersCache(), _simConfig);
   await invoke("recompute_edges", { edges: computed });
   const fresh = await invoke("get_edges");
   setEdgesCache(fresh.map(adaptEdge));
@@ -185,6 +217,7 @@ function rebuildEdgeRefs() {
     sourceNode: state.nodes.find(n => n.id === e.source),
     targetNode: state.nodes.find(n => n.id === e.target),
   }));
+  // console.log("Synchronize DB to app (state.edges) : ", state.edges);
 }
 
 // ── Canvas ────────────────────────────────────────────────────────────────────
@@ -207,8 +240,9 @@ window.addEventListener("resize", resizeCanvas);
 // ── Graph init ────────────────────────────────────────────────────────────────
 function nodeRadius(p) {
   // Size by citation count if available, otherwise uniform
-  const citations = Number(attr(p, "citations", "0"));
-  return 16 + (Math.log(Math.max(citations, 1)) / Math.log(140000)) * 19;
+  const inConnection = getEdgesCache().filter(n => n.target === p.id).length;
+  const outConnection = getEdgesCache().filter(n => n.source === p.id).length;
+  return 16 + (Math.log(Math.max(inConnection + outConnection, 1)) / Math.log(14000)) * 19;
 }
 
 function initGraph() {
@@ -347,8 +381,9 @@ function draw() {
   state.edges.forEach(e => {
     const a = e.sourceNode, b = e.targetNode;
     if (!a || !b) return;
-    if (e.similarity < simThreshold) return;  // threshold filter
-
+    if (e.similarity < simThreshold) {
+      return;  // threshold filter
+    }
     let alpha;
     if (q) {
       // Search mode: only draw an edge if BOTH endpoints match the query.
@@ -531,6 +566,10 @@ canvas.addEventListener("mousemove", e => {
     document.getElementById("tt-title").textContent = n.title;
     document.getElementById("tt-year").textContent  =
       `${n.year} · ${n.venue}`;
+    
+    document.getElementById("tt-tag").innerHTML = [
+      ...n.hashtags
+    ].map(b => b).join(", ");
     tt.style.display = "block";
     tt.style.left    = (e.clientX + 14) + "px";
     tt.style.top     = e.clientY + "px";
@@ -789,6 +828,7 @@ document.getElementById("search-input").addEventListener("input",
 
   function update(val) {
     simThreshold = parseFloat(val);
+    // _simConfig.threshold = simThreshold;
     label.textContent = simThreshold.toFixed(2);
     // Update visible edge count
     const visible = getEdgesCache().filter(e => e.similarity >= simThreshold).length;
@@ -881,7 +921,7 @@ document.getElementById("npm-submit-btn").addEventListener("click", async () => 
     statusEl.textContent = "Computing edges…";
     const existingPapers = getPapersCache();
     const tempPaper = { id: newId, year, venue, hashtags };
-    const newEdges = computeEdgesForNewPaper(tempPaper, existingPapers);
+    const newEdges = await computeEdgesForNewPaper(tempPaper, existingPapers, _simConfig);
     if (newEdges.length > 0) {
       await invoke("append_edges", { edges: newEdges });
     }
@@ -968,3 +1008,12 @@ async function showSidebarPdf(node) {
     }
   });
 }
+
+// ── window.PaperGraph bridge ──────────────────────────────────────────────────
+// Exposes graph functions to non-module scripts (similarity-settings.js).
+window.PaperGraph = {
+  getSimConfig,
+  saveSimConfig,
+  triggerEdgeRecompute,
+  reloadGraph,
+};
