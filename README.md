@@ -12,6 +12,8 @@ Due to the tremendous growth of research, it is hard for us to keep track of eve
     - [X] Present paper as node
     - [X] Present edge as similarity
     - [X] Zoom in/out
+    - [ ] Show HashTag connections in blue color.
+      - If two nodes' don't have similarity from LLM, the viewer will show the similarity from HashTag.
  - Paper information
     - [X] Add paper
     - [X] Delete paper
@@ -20,6 +22,10 @@ Due to the tremendous growth of research, it is hard for us to keep track of eve
  - Similarity between Papers
     - [X] Using hashtag (cosine similarity)
     - [ ] Using LLM
+      - [X] Simple usage. (Concate the selected information in on string.)
+      - [ ] Weighted information.
+      - [ ] Include PDFs.
+
  - Backup
 
 

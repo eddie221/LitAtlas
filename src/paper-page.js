@@ -22,6 +22,28 @@ const invoke = (
   (() => { throw new Error("Tauri not found"); })
 );
 
+// ── Embedding helpers ─────────────────────────────────────────────────────────
+
+/**
+ * Compute and cache the HF embedding for a single paper in the background.
+ * Uses the current similarity config from window.PaperGraph if available,
+ * falling back to sensible defaults.
+ *
+ * The embedding is saved next to the PDF as embedding.json and will be used
+ * automatically by hf_compute_similarity to skip re-encoding.
+ */
+async function _triggerPaperEmbedding(paperId) {
+  const cfg = window.PaperGraph?.getSimConfig?.() ?? {};
+  // Only bother if HF strategy is in use — no-op for js-cosine
+  if (cfg.strategy !== "hf-embeddings") return;
+  const config = {
+    model:   cfg.model   ?? "sentence-transformers/all-MiniLM-L6-v2",
+    fields:  cfg.fields  ?? ["title", "abstract", "hashtags"],
+    weights: cfg.weights ?? {},
+  };
+  await invoke("hf_compute_paper_embedding", { paperId, config });
+}
+
 // ── Custom dialog helpers ─────────────────────────────────────────────────────
 // Tauri v2 blocks window.confirm / window.alert (always returns false / no-op).
 // pgConfirm() and pgAlert() use a DOM modal instead.
@@ -508,6 +530,13 @@ async function handlePdfPick(file, paper, dropzone, viewer, iframe, nameEl, stat
       statusEl.textContent = `✓ ${storedPath.split(/[/\\]/).pop()}`;
       statusEl.style.color = "var(--accent)";
     }
+
+    // Fire-and-forget: pre-compute and cache the embedding for this paper now
+    // that we know its storage directory exists.  This runs in the background
+    // and does not block the PDF display.  Errors are logged only.
+    _triggerPaperEmbedding(paper.id).catch(e =>
+      console.warn("[PaperPage] background embedding failed:", e)
+    );
   } catch (err) {
     console.error("[PaperPage] store_pdf_bytes failed:", err);
     // Last-resort fallback: just remember the original filename so the

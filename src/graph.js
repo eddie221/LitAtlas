@@ -30,6 +30,10 @@ const invoke = (
   window.__TAURI__?.tauri?.invoke ??
   (() => { throw new Error("Tauri not found — run with `cargo tauri dev`"); })
 );
+const tauriListen = (
+  window.__TAURI__?.event?.listen ??
+  null
+);
 
 // ── Similarity config (loaded from Rust on boot, persisted on change) ─────────
 let _simConfig = getDefaultConfig();
@@ -118,7 +122,7 @@ function adaptEdge(r) {
 }
 
 // ── Loading overlay ───────────────────────────────────────────────────────────
-function showOverlay(msg) {
+function _overlayEl() {
   let el = document.getElementById("pg-loading");
   if (!el) {
     el = document.createElement("div");
@@ -133,6 +137,11 @@ function showOverlay(msg) {
     });
     document.body.appendChild(el);
   }
+  return el;
+}
+
+function showOverlay(msg) {
+  const el = _overlayEl();
   el.innerHTML = `
     <div style="font-family:'DM Serif Display',serif;font-size:1.6rem;color:#c8ff00">
       Paper<span style="color:#e8eaf0">Graph</span></div>
@@ -143,9 +152,168 @@ function showOverlay(msg) {
     <style>@keyframes _spin{to{transform:rotate(360deg)}}</style>`;
   el.style.display = "flex";
 }
+
 function hideOverlay() {
   const el = document.getElementById("pg-loading");
   if (el) el.style.display = "none";
+}
+
+// ── Venv setup overlay ────────────────────────────────────────────────────────
+// Shown while Rust is creating the venv and installing sentence-transformers.
+// Each step name maps to a human-readable label shown in a step list.
+const _VENV_STEPS = [
+  { key: "find_python",  label: "Locate system Python" },
+  { key: "create_venv",  label: "Create isolated environment" },
+  { key: "verify_venv",  label: "Verify environment" },
+  { key: "upgrade_pip",  label: "Upgrade pip" },
+  { key: "install_deps", label: "Install sentence-transformers" },
+  { key: "starting",     label: "Start similarity engine" },
+];
+
+// Tracks which steps have completed so the list renders correctly as events arrive.
+const _venvStepsDone   = new Set();
+let   _venvCurrentStep = "";
+let   _venvDetail      = "";
+
+// Rolling pip / pip-upgrade log lines — capped to avoid DOM bloat.
+const _pipLog    = [];
+const _PIP_LOG_MAX = 120;
+
+// Classify a pip output line for colour coding in the terminal widget.
+function _pipLineClass(line) {
+  const l = line.toLowerCase();
+  if (l.includes("error") || l.includes("failed") || l.includes("traceback")) return "venv-log-err";
+  if (l.includes("warn")  || l.includes("notice"))                             return "venv-log-warn";
+  if (l.startsWith("collecting") || l.startsWith("downloading") ||
+      l.startsWith("installing") || l.startsWith("successfully"))              return "venv-log-ok";
+  return "";
+}
+
+// Shared render function — called on every step change AND every pip-log line.
+function _renderVenvOverlay() {
+  const stepRows = _VENV_STEPS.map(s => {
+    const done    = _venvStepsDone.has(s.key) && s.key !== _venvCurrentStep;
+    const current = s.key === _venvCurrentStep;
+    const icon    = done    ? "✓"
+                  : current ? `<span class="venv-spin"></span>`
+                  : "·";
+    const color   = done ? "#c8ff00" : current ? "#e8eaf0" : "#3a3f50";
+    return `<div style="display:flex;align-items:center;gap:10px;color:${color};
+                         font-size:.7rem;padding:3px 0">
+              <span style="width:14px;text-align:center;line-height:1">${icon}</span>
+              <span>${s.label}</span>
+            </div>`;
+  }).join("");
+
+  // Terminal log box — only shown when pip output exists.
+  const showTerminal = _pipLog.length > 0;
+  const logHTML = showTerminal
+    ? `<div id="venv-terminal">
+         <div id="venv-terminal-inner">${
+           _pipLog.map(({ text, cls }) =>
+             `<div class="venv-log-line ${cls}">${
+               text.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+             }</div>`
+           ).join("")
+         }<span class="venv-cursor"></span></div>
+       </div>`
+    : "";
+
+  const el = _overlayEl();
+  el.innerHTML = `
+    <div style="font-family:'DM Serif Display',serif;font-size:1.6rem;color:#c8ff00">
+      Paper<span style="color:#e8eaf0">Graph</span></div>
+    <div style="font-size:.8rem;color:#9ca3af;margin-bottom:4px">
+      Setting up similarity engine — first launch only</div>
+    <div style="background:#0d0f14;border:1px solid #1e2230;border-radius:8px;
+                padding:14px 20px;min-width:300px;text-align:left">
+      ${stepRows}
+    </div>
+    <div style="font-size:.65rem;color:#6b7280;max-width:340px;line-height:1.7;
+                margin-top:4px">${_venvDetail}</div>
+    ${logHTML}
+    <div style="width:28px;height:28px;border:2px solid #1e2230;
+                border-top-color:#c8ff00;border-radius:50%;
+                animation:_spin .75s linear infinite"></div>
+    <style>
+      @keyframes _spin  { to { transform: rotate(360deg); } }
+      @keyframes _blink { 0%,100% { opacity:1; } 50% { opacity:0; } }
+      .venv-spin {
+        display:inline-block; width:10px; height:10px; border-radius:50%;
+        border:2px solid #1e2230; border-top-color:#c8ff00;
+        animation:_spin .75s linear infinite; vertical-align:middle;
+      }
+      #venv-terminal {
+        width:380px; max-width:84vw;
+        background:#050608; border:1px solid #141618; border-radius:6px;
+        overflow:hidden; margin-top:2px;
+      }
+      #venv-terminal-inner {
+        max-height:130px; overflow-y:auto; padding:8px 10px;
+        scroll-behavior:smooth; font-family:'Space Mono',monospace;
+      }
+      #venv-terminal-inner::-webkit-scrollbar { width:3px; }
+      #venv-terminal-inner::-webkit-scrollbar-thumb { background:#1a2a1a; border-radius:2px; }
+      .venv-log-line {
+        font-size:9px; line-height:1.65; color:#2e4a36;
+        white-space:pre-wrap; word-break:break-all;
+      }
+      .venv-log-ok   { color:#00c878; }
+      .venv-log-warn { color:#c8a000; }
+      .venv-log-err  { color:#c84040; }
+      .venv-cursor {
+        display:inline-block; width:6px; height:10px;
+        background:#00c87880; vertical-align:text-bottom;
+        border-radius:1px; animation:_blink 1s step-end infinite;
+      }
+    </style>`;
+  el.style.display = "flex";
+
+  // Auto-scroll terminal to bottom after render.
+  if (showTerminal) {
+    requestAnimationFrame(() => {
+      const inner = document.getElementById("venv-terminal-inner");
+      if (inner) inner.scrollTop = inner.scrollHeight;
+    });
+  }
+}
+
+function _showVenvOverlay(step, detail) {
+  _venvCurrentStep = step;
+  _venvDetail      = detail;
+  _venvStepsDone.add(step);
+  _renderVenvOverlay();
+}
+
+// Register Tauri event listeners once on load.
+// "venv://progress" — step transitions emitted by the Rust orchestrator.
+// "venv://pip-log"  — individual pip/pip-upgrade output lines (streamed).
+if (tauriListen) {
+  tauriListen("venv://progress", ({ payload }) => {
+    // console.log("progress listen", tauriListen);
+    const { step, detail, done } = payload;
+    if (done) {
+      // Mark all steps complete so the checklist renders fully green, then fade out.
+      _VENV_STEPS.forEach(s => _venvStepsDone.add(s.key));
+      _venvCurrentStep = "";
+      _renderVenvOverlay();
+      setTimeout(hideOverlay, 800);
+    } else {
+      _showVenvOverlay(step, detail);
+    }
+  });
+
+  tauriListen("venv://pip-log", ({ payload }) => {
+    // console.log("pip log listen");
+    const line = (payload?.line ?? "").trimEnd();
+    if (!line) return;
+    _pipLog.push({ text: line, cls: _pipLineClass(line) });
+    if (_pipLog.length > _PIP_LOG_MAX) _pipLog.shift();
+    // Only re-render when one of the two pip steps is active.
+    if (_venvCurrentStep === "install_deps" || _venvCurrentStep === "upgrade_pip") {
+      _renderVenvOverlay();
+    }
+  });
 }
 
 // ── Startup load ──────────────────────────────────────────────────────────────
@@ -187,6 +355,7 @@ export async function triggerEdgeRecompute() {
   // Refresh vocab in case new tags were added since last load
   const dbTags = await invoke("get_hashtags");
   setTagVocab(dbTags);
+  console.log("Edge Recompute");
   const computed = await computeEdges(getPapersCache(), _simConfig);
   await invoke("recompute_edges", { edges: computed });
   const fresh = await invoke("get_edges");

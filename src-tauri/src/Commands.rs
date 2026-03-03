@@ -409,27 +409,393 @@ impl PySidecar {
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
-fn find_python() -> Result<String, String> {
-    for bin in &["python3", "python"] {
-        let ok = Command::new(bin)
-            .arg("--version")
-            .stdout(Stdio::null()).stderr(Stdio::null())
-            .status().map(|s| s.success()).unwrap_or(false);
-        if ok { return Ok(bin.to_string()); }
-    }
-    Err("Python 3 not found on PATH. \
-         Please install Python 3 and run: pip install sentence-transformers".into())
+use tauri::Emitter;
+
+fn emit_progress(app: &tauri::AppHandle, step: &str, detail: &str, done: bool) {
+    let _ = app.emit("venv://progress", serde_json::json!({
+        "step":   step,
+        "detail": detail,
+        "done":   done,
+    }));
 }
 
-fn launch_sidecar(script: &str) -> Result<PySidecar, String> {
-    let python = find_python()?;
+/// Emit a pip install log line in real time.
+/// Fires "venv://pip-log" with { line: str } so the frontend can stream it.
+fn emit_pip_log(app: &tauri::AppHandle, line: &str) {
+    let _ = app.emit("venv://pip-log", serde_json::json!({ "line": line }));
+}
+
+fn venv_python(venv_dir: &std::path::Path) -> std::path::PathBuf {
+    if cfg!(target_os = "windows") {
+        venv_dir.join("Scripts").join("python.exe")
+    } else {
+        venv_dir.join("bin").join("python")
+    }
+}
+
+fn venv_pip(venv_dir: &std::path::Path) -> std::path::PathBuf {
+    if cfg!(target_os = "windows") {
+        venv_dir.join("Scripts").join("pip.exe")
+    } else {
+        venv_dir.join("bin").join("pip")
+    }
+}
+
+// ── Process 1 of 5 : find a system Python 3.8+ ───────────────────────────────
+//
+// Scans well-known binary names on PATH, skipping any that resolve inside an
+// active conda or venv prefix (those would break isolation).
+// Emits granular status so the UI can show which candidate is being tried.
+fn step_find_python(app: &tauri::AppHandle) -> Result<String, String> {
+    let conda_prefix = std::env::var("CONDA_PREFIX").unwrap_or_default();
+    let venv_prefix  = std::env::var("VIRTUAL_ENV").unwrap_or_default();
+
+    emit_progress(app, "find_python", "Scanning PATH for Python 3.8+…", false);
+
+    let candidates = [
+        "python3.13","python3.12","python3.11",
+        "python3.10","python3.9","python3.8",
+        "python3","python",
+    ];
+
+    for &bin in &candidates {
+        emit_progress(app, "find_python", &format!("Trying {bin}…"), false);
+
+        let exe_out = Command::new(bin)
+            .args(["-c", "import sys; print(sys.executable)"])
+            .stdout(Stdio::piped()).stderr(Stdio::null()).output();
+
+        let exe_path = match exe_out {
+            Ok(o) if o.status.success() =>
+                String::from_utf8_lossy(&o.stdout).trim().to_string(),
+            _ => continue,   // binary not on PATH
+        };
+
+        if !conda_prefix.is_empty() && exe_path.starts_with(&conda_prefix) {
+            eprintln!("[PaperGraph] Skipping {bin} — inside conda: {exe_path}");
+            emit_progress(app, "find_python",
+                &format!("Skipped {bin} (conda env — needs isolation)"), false);
+            continue;
+        }
+        if !venv_prefix.is_empty() && exe_path.starts_with(&venv_prefix) {
+            eprintln!("[PaperGraph] Skipping {bin} — inside venv: {exe_path}");
+            emit_progress(app, "find_python",
+                &format!("Skipped {bin} (active venv — needs isolation)"), false);
+            continue;
+        }
+
+        let ver_ok = Command::new(bin)
+            .args(["-c",
+                "import sys; v=sys.version_info; \
+                 assert v.major==3 and v.minor>=8, \
+                 f'need 3.8+, got {v.major}.{v.minor}'"])
+            .stdout(Stdio::null()).stderr(Stdio::null())
+            .status().map(|s| s.success()).unwrap_or(false);
+
+        if ver_ok {
+            emit_progress(app, "find_python",
+                &format!("Found {bin} → {exe_path}"), false);
+            eprintln!("[PaperGraph] Using Python: {exe_path}");
+            return Ok(bin.to_string());
+        }
+    }
+
+    Err("Python 3.8+ not found on PATH (every candidate was either missing or \
+         inside an active conda / venv environment).\n\
+         Install Python 3 from https://python.org and restart PaperGraph.".into())
+}
+
+// ── Process 2 of 5 : create isolated venv ────────────────────────────────────
+//
+// Runs `<system_python> -m venv --clear <venv_dir>`.
+// Skipped if the venv binary already exists (idempotent on subsequent launches).
+fn step_create_venv(
+    venv_dir:  &std::path::Path,
+    system_py: &str,
+    app:       &tauri::AppHandle,
+) -> Result<(), String> {
+    let py_bin = venv_python(venv_dir);
+
+    if py_bin.exists() {
+        emit_progress(app, "create_venv", "Existing environment found — skipping creation", false);
+        return Ok(());
+    }
+
+    emit_progress(app, "create_venv",
+        &format!("Creating venv at {}", venv_dir.display()), false);
+
+    // println!("system_py : {}", system_py);    
+    // println!("venv_dir : {}", venv_dir.display());
+    let status = Command::new(system_py)
+        .args(["-m", "venv", "--clear"])
+        .arg(venv_dir)
+        .status()
+        .map_err(|e| format!("Failed to spawn venv process: {e}"))?;
+
+    if !status.success() {
+        return Err(format!(
+            "Could not create venv at '{}'.\n\
+             On Debian/Ubuntu you may need: sudo apt install python3-venv\n\
+             On Fedora/RHEL: sudo dnf install python3-virtualenv",
+            venv_dir.display()));
+    }
+
+    emit_progress(app, "create_venv",
+        &format!("Venv created at {}", venv_dir.display()), false);
+    Ok(())
+}
+
+// ── Process 3 of 5 : verify the venv is self-contained ───────────────────────
+//
+// Queries `sys.prefix` inside the venv Python and canonically compares it to
+// venv_dir.  Catches the rare case where the binary exists but points elsewhere
+// (e.g. a broken symlink left over from a partial install).
+fn step_verify_venv(
+    venv_dir: &std::path::Path,
+    app:      &tauri::AppHandle,
+) -> Result<std::path::PathBuf, String> {
+    let py_bin = venv_python(venv_dir);
+    
+    emit_progress(app, "verify_venv",
+        "Verifying venv isolation (sys.prefix check)…", false);
+
+    let out = Command::new(&py_bin)
+        .args(["-c", "import sys; print(sys.prefix)"])
+        .stdout(Stdio::piped()).stderr(Stdio::null()).output()
+        .map_err(|e| format!("Cannot query venv sys.prefix: {e}"))?;
+
+    let reported_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let expected = venv_dir.canonicalize().unwrap_or_else(|_| venv_dir.to_path_buf());
+    let reported = std::path::Path::new(&reported_str)
+        .canonicalize()
+        .unwrap_or_else(|_| std::path::PathBuf::from(&reported_str));
+
+    if reported != expected {
+        return Err(format!(
+            "Venv sanity check failed — prefix mismatch.\n\
+             Expected : {}\n\
+             Got      : {}\n\n\
+             Delete '{}' and restart to recreate it.",
+            expected.display(), reported.display(), venv_dir.display()));
+    }
+
+    // Also check the Python version inside the venv matches expectations
+    let ver_out = Command::new(&py_bin)
+        .args(["-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"])
+        .stdout(Stdio::piped()).stderr(Stdio::null()).output()
+        .unwrap_or_else(|_| std::process::Output {
+            status: std::process::ExitStatus::default(),
+            stdout: vec![], stderr: vec![],
+        });
+    let ver_str = String::from_utf8_lossy(&ver_out.stdout).trim().to_string();
+    emit_progress(app, "verify_venv",
+        &format!("Venv OK — Python {ver_str} at {}", py_bin.display()), false);
+
+    Ok(py_bin)
+}
+
+// ── Process 4 of 5 : upgrade pip inside the venv ─────────────────────────────
+//
+// A fresh venv ships with the pip version bundled into the Python installer,
+// which may be months or years old.  Running `pip install --upgrade pip` before
+// installing sentence-transformers avoids resolver bugs and improves download
+// reliability.  This step streams its output exactly like the main install.
+// Skipped if pip is already reasonably modern (≥ 23).
+fn step_upgrade_pip(
+    py_bin:   &std::path::Path,
+    app:      &tauri::AppHandle,
+) -> Result<(), String> {
+    // Query current pip version — e.g. "24.0"
+    let ver_out = Command::new(py_bin)
+        .args(["-m", "pip", "--version"])
+        .stdout(Stdio::piped()).stderr(Stdio::null()).output()
+        .unwrap_or_else(|_| std::process::Output {
+            status: std::process::ExitStatus::default(),
+            stdout: vec![], stderr: vec![],
+        });
+    let ver_line = String::from_utf8_lossy(&ver_out.stdout).trim().to_string();
+    // "pip 23.3.1 from /…" — parse the version number after "pip "
+    let current_major: u32 = ver_line
+        .strip_prefix("pip ")
+        .and_then(|s| s.split('.').next())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+
+    if current_major >= 23 {
+        emit_progress(app, "upgrade_pip",
+            &format!("pip {current_major} is current — skipping upgrade"), false);
+        return Ok(());
+    }
+
+    emit_progress(app, "upgrade_pip",
+        &format!("Upgrading pip (currently {ver_line})…"), false);
+
+    let mut child = Command::new(py_bin)
+        .args(["-m", "pip", "install", "--upgrade",
+               "--no-color", "--progress-bar", "off",
+               "pip"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("pip upgrade failed to start: {e}"))?;
+
+    // Stream stderr on a background thread (pip writes warnings/progress there)
+    let app_err = app.clone();
+    let stderr  = BufReader::new(child.stderr.take().ok_or("no pip stderr")?);
+    std::thread::spawn(move || {
+        for line in stderr.lines().flatten() { emit_pip_log(&app_err, &line); }
+    });
+
+    // Stream stdout on the current thread
+    let stdout = BufReader::new(child.stdout.take().ok_or("no pip stdout")?);
+    for line in stdout.lines().flatten() { emit_pip_log(app, &line); }
+
+    let status = child.wait()
+        .map_err(|e| format!("pip upgrade wait failed: {e}"))?;
+
+    if !status.success() {
+        // Non-fatal: log a warning but do not abort the install
+        eprintln!("[PaperGraph] pip upgrade exited non-zero — continuing anyway");
+        emit_progress(app, "upgrade_pip",
+            "pip upgrade failed (non-fatal) — continuing…", false);
+    } else {
+        // Re-query version to confirm the upgrade
+        let new_ver = Command::new(py_bin)
+            .args(["-m", "pip", "--version"])
+            .stdout(Stdio::piped()).stderr(Stdio::null()).output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default();
+        emit_progress(app, "upgrade_pip",
+            &format!("pip upgraded → {new_ver}"), false);
+    }
+
+    // Small gap so the UI can show the "upgraded" message before moving on
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    Ok(())
+}
+
+// ── Process 5 of 5 : install sentence-transformers ───────────────────────────
+//
+// Checks whether the package is already importable first; if so the step is
+// skipped entirely (fast path on every launch after the first).
+// When installation IS needed, pip stdout and stderr are forwarded line-by-line
+// as "venv://pip-log" events so the UI can render a live terminal.
+fn step_install_deps(
+    venv_dir: &std::path::Path,
+    py_bin:   &std::path::Path,
+    app:      &tauri::AppHandle,
+) -> Result<(), String> {
+    // Fast path: package already installed
+    let already = Command::new(py_bin)
+        .args(["-c", "import sentence_transformers; print(sentence_transformers.__version__)"])
+        .stdout(Stdio::piped()).stderr(Stdio::null())
+        .output()
+        .map(|o| o.status.success()
+            .then(|| String::from_utf8_lossy(&o.stdout).trim().to_string()))
+        .unwrap_or(None);
+
+    if let Some(ver) = already {
+        emit_progress(app, "install_deps",
+            &format!("sentence-transformers {ver} already installed — skipping"), false);
+        return Ok(());
+    }
+
+    emit_progress(app, "install_deps",
+        "Installing sentence-transformers (first time — may take a minute)…", false);
+
+    let mut child = Command::new(venv_pip(venv_dir))
+        .args([
+            "install",
+            "--no-color",
+            "--progress-bar", "off",
+            "sentence-transformers",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("pip install failed to start: {e}"))?;
+
+    // stderr on a background thread — pip writes download progress there
+    let app_err    = app.clone();
+    let stderr_buf = BufReader::new(child.stderr.take().ok_or("no pip stderr")?);
+    std::thread::spawn(move || {
+        for line in stderr_buf.lines().flatten() { emit_pip_log(&app_err, &line); }
+    });
+
+    // stdout on the current thread
+    let stdout_buf = BufReader::new(child.stdout.take().ok_or("no pip stdout")?);
+    for line in stdout_buf.lines().flatten() { emit_pip_log(app, &line); }
+
+    let status = child.wait()
+        .map_err(|e| format!("pip install wait failed: {e}"))?;
+
+    if !status.success() {
+        return Err(
+            "sentence-transformers installation failed.\n\
+             Check the terminal log above for details.\n\
+             Common causes: no internet connection, disk full, outdated pip.".into()
+        );
+    }
+
+    // Confirm by importing and reading the installed version
+    let ver = Command::new(py_bin)
+        .args(["-c",
+            "import sentence_transformers; print(sentence_transformers.__version__)"])
+        .stdout(Stdio::piped()).stderr(Stdio::null()).output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|_| "unknown".into());
+
+    emit_progress(app, "install_deps",
+        &format!("sentence-transformers {ver} installed successfully"), false);
+    Ok(())
+}
+
+// ── Orchestrator ──────────────────────────────────────────────────────────────
+//
+// Calls each step in sequence.  Returns the path to the venv Python binary on
+// success so `launch_sidecar` can spawn the server with the right interpreter.
+fn ensure_venv(
+    venv_dir: &std::path::Path,
+    app:      &tauri::AppHandle,
+) -> Result<std::path::PathBuf, String> {
+    // 1 — Locate a suitable system Python
+    let system_py = step_find_python(app)?;
+
+    // 2 — Create the venv (no-op if it already exists)
+    step_create_venv(venv_dir, &system_py, app)?;
+
+    // 3 — Verify the venv is self-contained
+    let py_bin = step_verify_venv(venv_dir, app)?;
+
+    // 4 — Upgrade pip inside the venv
+    step_upgrade_pip(&py_bin, app)?;
+
+    // 5 — Install sentence-transformers (no-op if already present)
+    step_install_deps(venv_dir, &py_bin, app)?;
+
+    Ok(py_bin)
+}
+
+
+fn launch_sidecar(
+    script:   &str,
+    venv_dir: &std::path::Path,
+    app:      &tauri::AppHandle,
+) -> Result<PySidecar, String> {
+    emit_progress(app, "starting", "Starting similarity engine…", false);
+
+    let python = ensure_venv(venv_dir, app)?;
 
     let mut child = Command::new(&python)
-        .arg("-u")               // unbuffered stdout — essential for the protocol
+        .arg("-u")
         .arg(script)
+        .env_remove("CONDA_PREFIX")
+        .env_remove("CONDA_DEFAULT_ENV")
+        .env_remove("VIRTUAL_ENV")
+        .env_remove("VIRTUAL_ENV_PROMPT")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit()) // Python errors surface in the Tauri dev console
+        .stderr(Stdio::inherit())
         .spawn()
         .map_err(|e| format!("Failed to spawn sidecar at '{script}': {e}"))?;
 
@@ -438,8 +804,6 @@ fn launch_sidecar(script: &str) -> Result<PySidecar, String> {
 
     let mut sc = PySidecar { child, stdin, stdout, next_id: 1 };
 
-    // Python emits one handshake line before entering the request loop:
-    //   {"id": 0, "ok": true, "result": "ready"}
     let mut handshake = String::new();
     sc.stdout.read_line(&mut handshake)
         .map_err(|e| format!("sidecar handshake read: {e}"))?;
@@ -451,12 +815,12 @@ fn launch_sidecar(script: &str) -> Result<PySidecar, String> {
         return Err(format!("sidecar startup failed: {}", v["error"]));
     }
 
+    emit_progress(app, "ready", "Similarity engine ready.", true);
     eprintln!("[PaperGraph] Python sidecar started (pid {})", sc.child.id());
     Ok(sc)
 }
 
-/// Ensure the sidecar is running; (re)start it if it crashed or was never started.
-fn ensure_running(s: &AppState) -> Result<std::sync::MutexGuard<'_, Option<PySidecar>>, String> {
+fn ensure_running<'a>(s: &'a AppState, app: &tauri::AppHandle) -> Result<std::sync::MutexGuard<'a, Option<PySidecar>>, String> {
     let mut guard = s.sidecar.lock().unwrap();
     let dead = match guard.as_mut() {
         None     => true,
@@ -466,7 +830,7 @@ fn ensure_running(s: &AppState) -> Result<std::sync::MutexGuard<'_, Option<PySid
         if guard.is_some() {
             eprintln!("[PaperGraph] Sidecar crashed — restarting…");
         }
-        *guard = Some(launch_sidecar(&s.sidecar_script())?);
+        *guard = Some(launch_sidecar(&s.sidecar_script(), &s.venv_dir(), app)?);
     }
     Ok(guard)
 }
@@ -481,13 +845,26 @@ fn ensure_running(s: &AppState) -> Result<std::sync::MutexGuard<'_, Option<PySid
 ///   { model, fields, weights, threshold, max_edges }
 ///
 /// Returns: { edges: EdgeInput[], count: number }
+///
+/// Before sending to Python, cached embedding vectors are injected as
+/// "_embedding" fields so the sidecar can skip re-encoding those papers.
 #[tauri::command]
 pub fn hf_compute_similarity(
+    app:    tauri::AppHandle,
     s:      State<'_, AppState>,
-    papers: Vec<serde_json::Value>,
+    mut papers: Vec<serde_json::Value>,
     config: serde_json::Value,
 ) -> CmdResult<serde_json::Value> {
-    let mut guard = ensure_running(&s)?;
+    // Inject any cached embeddings to avoid redundant encoding in Python
+    let model = config["model"].as_str()
+        .unwrap_or("sentence-transformers/all-MiniLM-L6-v2");
+    let fields: Vec<String> = config["fields"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_else(|| vec!["title".into(), "abstract".into(), "hashtags".into()]);
+    inject_cached_embeddings(&s, &mut papers, model, &fields);
+
+    let mut guard = ensure_running(&s, &app)?;
     guard.as_mut().unwrap()
         .call("compute", serde_json::json!({ "papers": papers, "config": config }))
 }
@@ -497,8 +874,8 @@ pub fn hf_compute_similarity(
 /// Called from JS as: invoke("hf_list_models")
 /// Returns: { models: [...], fields: [...] }
 #[tauri::command]
-pub fn hf_list_models(s: State<'_, AppState>) -> CmdResult<serde_json::Value> {
-    let mut guard = ensure_running(&s)?;
+pub fn hf_list_models(app: tauri::AppHandle, s: State<'_, AppState>) -> CmdResult<serde_json::Value> {
+    let mut guard = ensure_running(&s, &app)?;
     guard.as_mut().unwrap().call("list_models", serde_json::Value::Null)
 }
 
@@ -517,6 +894,332 @@ pub fn hf_sidecar_status(s: State<'_, AppState>) -> CmdResult<serde_json::Value>
     match guard.as_mut().unwrap().call("status", serde_json::Value::Null) {
         Ok(v)  => Ok(serde_json::json!({ "running": true, "details": v })),
         Err(e) => Ok(serde_json::json!({ "running": true, "error": e })),
+    }
+}
+
+// ── Model cache check + download ──────────────────────────────────────────────
+
+/// Check whether a HuggingFace model is already cached locally.
+/// Fast — the sidecar only inspects the filesystem, no network call.
+///
+/// Called from JS as: invoke("hf_check_model", { model })
+/// Returns: { cached: bool, path?: str }
+#[tauri::command]
+pub fn hf_check_model(
+    app:   tauri::AppHandle,
+    s:     State<'_, AppState>,
+    model: String,
+) -> CmdResult<serde_json::Value> {
+    let mut guard = ensure_running(&s, &app)?;
+    guard.as_mut().unwrap()
+        .call("check_model", serde_json::json!({ "model": model }))
+}
+
+/// Download a HuggingFace model to the local cache, streaming per-file
+/// progress as "venv://model-progress" Tauri events so the JS UI can
+/// render a live progress bar.
+///
+/// The Python sidecar writes intermediate JSON lines:
+///   { "id": N, "ok": true, "progress": { filename, downloaded, total, pct } }
+/// …followed by the final reply:
+///   { "id": N, "ok": true, "result": { path, done: true } }
+///
+/// This command reads those lines in a loop, forwarding progress events
+/// until the final reply arrives.
+///
+/// Also emits "venv://progress" with step="download_model" so the full-screen
+/// venv overlay shows the download step as active.
+///
+/// Called from JS as: invoke("hf_download_model", { model })
+/// Returns (on success): { path: str, done: true }
+#[tauri::command]
+pub fn hf_download_model(
+    app:   tauri::AppHandle,
+    s:     State<'_, AppState>,
+    model: String,
+) -> CmdResult<serde_json::Value> {
+    // Show the download step in the venv overlay immediately.
+    // emit_progress(&app, "download_model",
+    //     &format!("Downloading {}…", model), false);
+
+    let mut guard = ensure_running(&s, &app)?;
+    let sc = guard.as_mut().unwrap();
+
+    // Build and send the JSON-RPC request manually (not via sc.call()) so we
+    // can intercept the intermediate progress lines before the final reply.
+    let id = sc.next_id;
+    sc.next_id += 1;
+
+    let mut req = serde_json::json!({
+        "id": id,
+        "method": "download_model",
+        "params": { "model": model }
+    }).to_string();
+    req.push('\n');
+
+    sc.stdin.write_all(req.as_bytes())
+        .map_err(|e| format!("sidecar write: {e}"))?;
+    sc.stdin.flush()
+        .map_err(|e| format!("sidecar flush: {e}"))?;
+
+    // Read lines until we receive the final reply.
+    loop {
+        let mut line = String::new();
+        sc.stdout.read_line(&mut line)
+            .map_err(|e| format!("sidecar read: {e}"))?;
+
+        let v: serde_json::Value = serde_json::from_str(line.trim())
+            .map_err(|e| format!("sidecar parse: {e} — got: {line}"))?;
+
+        // Intermediate progress notification — forward to JS and keep reading.
+        if let Some(prog) = v.get("progress") {
+            let _ = app.emit("venv://model-progress", prog);
+            continue;
+        }
+
+        // Final reply.
+        if v["ok"].as_bool() != Some(true) {
+            return Err(v["error"].as_str()
+                .unwrap_or("download failed").to_string());
+        }
+        return Ok(v["result"].clone());
+    }
+}
+
+// ── Per-paper embedding cache ─────────────────────────────────────────────────
+//
+// Embeddings are stored as JSON next to the PDF:
+//   projects/<slug>/pdfs/<paper_id>/embedding.json
+//
+// File format:
+//   { "model": "<hf-id>", "fields": [...], "vector": [f32...] }
+//
+// If no PDF has been uploaded for a paper, the embedding is stored in a
+// fallback location:
+//   projects/<slug>/embeddings/<paper_id>.json
+//
+// This means embeddings persist across PDF replacements and don't require a
+// PDF to exist at all.
+
+fn embedding_path_for_paper(s: &AppState, paper_id: i64) -> std::path::PathBuf {
+    // Primary: alongside the PDF directory
+    let pdf_sibling = s.pdfs_dir().join(paper_id.to_string()).join("embedding.json");
+    if pdf_sibling.parent().map(|p| p.exists()).unwrap_or(false) {
+        return pdf_sibling;
+    }
+    // Fallback: dedicated embeddings directory (created lazily)
+    let embeddings_dir = s.projects_dir
+        .join(s.current_slug())
+        .join("embeddings");
+    std::fs::create_dir_all(&embeddings_dir).ok();
+    embeddings_dir.join(format!("{paper_id}.json"))
+}
+
+fn read_embedding_cache(path: &std::path::Path) -> Option<serde_json::Value> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+fn embedding_cache_matches(cache: &serde_json::Value, model: &str, fields: &[String]) -> bool {
+    cache["model"].as_str() == Some(model) && {
+        let cached_fields: Vec<String> = cache["fields"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        cached_fields == fields
+    }
+}
+
+/// Compute and persist the embedding vector for a single paper.
+///
+/// The vector is saved as embedding.json next to the PDF (or in a fallback
+/// embeddings/ directory if no PDF has been uploaded yet).
+///
+/// Called from JS as: invoke("hf_compute_paper_embedding", { paperId, config })
+///
+/// config shape: { model, fields, weights }
+///
+/// Returns: { paper_id, path, dim, cached: false }
+#[tauri::command]
+pub fn hf_compute_paper_embedding(
+    app:      tauri::AppHandle,
+    s:        State<'_, AppState>,
+    paper_id: i64,
+    config:   serde_json::Value,
+) -> CmdResult<serde_json::Value> {
+    // Load the paper from DB so Python has all fields (title, abstract, hashtags…)
+    let paper: serde_json::Value = {
+        let pool   = s.pool();
+        let p = tauri::async_runtime::block_on(
+            crate::db::get_paper(&pool, paper_id)
+        ).map_err(|e| e.to_string())?;
+        serde_json::to_value(p).map_err(|e| e.to_string())?
+    };
+
+    let mut guard = ensure_running(&s, &app)?;
+    let result = guard.as_mut().unwrap()
+        .call("compute_embedding", serde_json::json!({ "paper": paper, "config": config }))?;
+
+    let vector = result["vector"].clone();
+    let dim    = result["dim"].as_u64().unwrap_or(0);
+
+    // Persist to embedding.json
+    let path = embedding_path_for_paper(&s, paper_id);
+    // Ensure parent directory exists (for the fallback path)
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Cannot create embedding dir: {e}"))?;
+    }
+
+    let model  = config["model"].as_str().unwrap_or("sentence-transformers/all-MiniLM-L6-v2");
+    let fields: Vec<String> = config["fields"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_else(|| vec!["title".into(), "abstract".into(), "hashtags".into()]);
+
+    let payload = serde_json::json!({
+        "model":  model,
+        "fields": fields,
+        "vector": vector,
+    });
+    std::fs::write(&path, serde_json::to_string(&payload).map_err(|e| e.to_string())?)
+        .map_err(|e| format!("Cannot write embedding: {e}"))?;
+
+    Ok(serde_json::json!({
+        "paper_id": paper_id,
+        "path":     path.to_string_lossy(),
+        "dim":      dim,
+        "cached":   false,
+    }))
+}
+
+/// Read a cached embedding vector for a paper, if it exists and matches the
+/// current model+fields config.
+///
+/// Called from JS as: invoke("hf_get_paper_embedding", { paperId, config })
+/// Returns: { vector: f32[], dim: number, hit: bool }
+#[tauri::command]
+pub fn hf_get_paper_embedding(
+    s:        State<'_, AppState>,
+    paper_id: i64,
+    config:   serde_json::Value,
+) -> CmdResult<serde_json::Value> {
+    let path  = embedding_path_for_paper(&s, paper_id);
+    let model = config["model"].as_str().unwrap_or("sentence-transformers/all-MiniLM-L6-v2");
+    let fields: Vec<String> = config["fields"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+
+    if let Some(cache) = read_embedding_cache(&path) {
+        if embedding_cache_matches(&cache, model, &fields) {
+            let vector = cache["vector"].clone();
+            let dim    = vector.as_array().map(|a| a.len()).unwrap_or(0);
+            return Ok(serde_json::json!({ "vector": vector, "dim": dim, "hit": true }));
+        }
+    }
+    Ok(serde_json::json!({ "hit": false }))
+}
+
+/// Compute (or skip) embeddings for every paper in the current project,
+/// emitting "embedding://progress" events as each paper completes.
+///
+/// Papers whose embedding.json already matches model+fields are skipped.
+///
+/// Called from JS as: invoke("hf_compute_all_embeddings", { config })
+/// Returns: { total, computed, skipped }
+///
+/// Progress events: { paper_id, title, index, total, skipped: bool }
+#[tauri::command]
+pub fn hf_compute_all_embeddings(
+    app:    tauri::AppHandle,
+    s:      State<'_, AppState>,
+    config: serde_json::Value,
+) -> CmdResult<serde_json::Value> {
+    let model = config["model"].as_str()
+        .unwrap_or("sentence-transformers/all-MiniLM-L6-v2")
+        .to_string();
+    let fields: Vec<String> = config["fields"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_else(|| vec!["title".into(), "abstract".into(), "hashtags".into()]);
+
+    // Load all papers
+    let papers: Vec<crate::db::PaperFull> = {
+        let pool = s.pool();
+        tauri::async_runtime::block_on(crate::db::get_all_papers(&pool))
+            .map_err(|e| e.to_string())?
+    };
+
+    let total    = papers.len();
+    let mut computed = 0usize;
+    let mut skipped  = 0usize;
+    
+    for (index, paper) in papers.iter().enumerate() {
+        let path: std::path::PathBuf = embedding_path_for_paper(&s, paper.id);
+
+        // Check if cache is still valid
+        // let needs_compute = match read_embedding_cache(&path) {
+        //     Some(cache) => !embedding_cache_matches(&cache, &model, &fields),
+        //     None        => true,
+        // };
+
+        // let _ = app.emit("embedding://progress", serde_json::json!({
+        //     "paper_id": paper.id,
+        //     "title":    paper.title,
+        //     "index":    index,
+        //     "total":    total,
+        //     "skipped":  !needs_compute,
+        // }));
+
+        // if !needs_compute { skipped += 1; continue; }
+
+        // Compute via sidecar
+        let paper_val = serde_json::to_value(paper.clone()).map_err(|e| e.to_string())?;
+        let mut guard = ensure_running(&s, &app)?;
+        let result = guard.as_mut().unwrap()
+            .call("compute_embedding", serde_json::json!({ "paper": paper_val, "config": config }))?;
+        drop(guard); // release mutex before file I/O
+
+        let vector = result["vector"].clone();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        let payload = serde_json::json!({ "model": model, "fields": fields, "vector": vector });
+        std::fs::write(&path, serde_json::to_string(&payload).map_err(|e| e.to_string())?)
+            .map_err(|e| format!("Cannot write embedding for paper {}: {e}", paper.id))?;
+
+        computed += 1;
+    }
+
+    // Final done event
+    let _ = app.emit("embedding://progress", serde_json::json!({
+        "done": true, "total": total, "computed": computed, "skipped": skipped
+    }));
+
+    Ok(serde_json::json!({ "total": total, "computed": computed, "skipped": skipped }))
+}
+
+/// Inject cached embedding vectors into a papers list before sending to sidecar.
+/// Papers that have a valid cache hit get a "_embedding" field added; those that
+/// don't will be re-encoded by the Python sidecar (no cache miss penalty for the
+/// user — they just get recomputed on the fly as before).
+///
+/// Called internally by hf_compute_similarity when embeddings are available.
+fn inject_cached_embeddings(
+    s:      &AppState,
+    papers: &mut Vec<serde_json::Value>,
+    model:  &str,
+    fields: &[String],
+) {
+    for paper in papers.iter_mut() {
+        let id = match paper["id"].as_i64() { Some(v) => v, None => continue };
+        let path = embedding_path_for_paper(s, id);
+        if let Some(cache) = read_embedding_cache(&path) {
+            if embedding_cache_matches(&cache, model, fields) {
+                paper["_embedding"] = cache["vector"].clone();
+            }
+        }
     }
 }
 

@@ -413,27 +413,66 @@ pub async fn delete_relation(pool: &SqlitePool, id: i64) -> Result<(), DbError> 
 // ── Similarity edges ──────────────────────────────────────────────────────────
 
 pub async fn replace_all_edges(pool: &SqlitePool, edges: Vec<EdgeInput>) -> Result<usize, DbError> {
-    sqlx::query("DELETE FROM paper_edges").execute(pool).await?;
     let count = edges.len();
-    // println!("edge count : {}", count);
-    
+
+    let mut tx = pool.begin().await?;
+
+    // ── 1. Upsert every incoming edge ────────────────────────────────────────
+    // INSERT OR REPLACE honours the PRIMARY KEY (source_id, target_id) and
+    // updates similarity / weight / edge_type in-place when the pair already
+    // exists — no row is deleted and re-inserted unnecessarily.
     for e in &edges {
-        // println!("{} {} {}", e.source_id, e.target_id, e.similarity);
         sqlx::query(
             "INSERT INTO paper_edges (source_id, target_id, similarity, weight, edge_type)
-             VALUES (?, ?, ?, ?, ?)"
+             VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT (source_id, target_id) DO UPDATE SET
+               similarity = excluded.similarity,
+               weight     = excluded.weight,
+               edge_type  = excluded.edge_type"
         )
         .bind(e.source_id).bind(e.target_id)
         .bind(e.similarity).bind(e.weight).bind(&e.edge_type)
-        .execute(pool).await?;
-        // sqlx::query("UPDATE paper_edges 
-        //             SET source_id = ?, target_id = ?, similarity = ?, weight = ?, edge_type = ?
-        //             WHERE source_id = ? AND target_id = ?")
-        //     .bind(e.source_id).bind(e.target_id)
-        //     .bind(e.similarity).bind(e.weight).bind(&e.edge_type)
-        //     .bind(e.source_id).bind(e.target_id)
-        //     .execute(pool).await?;
+        .execute(&mut *tx).await?;
     }
+
+    // ── 2. Prune edges that are no longer in the new set ─────────────────────
+    // Build a temporary table of (source_id, target_id) pairs to keep, then
+    // delete everything not in that set.  For the common case (full recompute)
+    // this removes stale edges without touching any valid row.
+    if count == 0 {
+        sqlx::query("DELETE FROM paper_edges").execute(&mut *tx).await?;
+    } else {
+        // SQLite doesn't support DELETE … WHERE (a,b) NOT IN (VALUES …) with
+        // large value lists via bound params, so we stage into a temp table.
+        sqlx::query(
+            "CREATE TEMPORARY TABLE IF NOT EXISTS _keep_edges
+             (source_id INTEGER NOT NULL, target_id INTEGER NOT NULL,
+              PRIMARY KEY (source_id, target_id))"
+        ).execute(&mut *tx).await?;
+
+        sqlx::query("DELETE FROM _keep_edges").execute(&mut *tx).await?;
+
+        for e in &edges {
+            sqlx::query(
+                "INSERT OR IGNORE INTO _keep_edges (source_id, target_id) VALUES (?, ?)"
+            )
+            .bind(e.source_id).bind(e.target_id)
+            .execute(&mut *tx).await?;
+        }
+
+        sqlx::query(
+            "DELETE FROM paper_edges
+             WHERE NOT EXISTS (
+               SELECT 1 FROM _keep_edges k
+               WHERE k.source_id = paper_edges.source_id
+                 AND k.target_id = paper_edges.target_id
+             )"
+        ).execute(&mut *tx).await?;
+
+        sqlx::query("DROP TABLE IF EXISTS _keep_edges").execute(&mut *tx).await?;
+    }
+
+    tx.commit().await?;
     Ok(count)
 }
 

@@ -60,7 +60,7 @@ export function getDefaultConfig() {
   return {
     strategy:  "js-cosine",
     model:     "sentence-transformers/all-MiniLM-L6-v2",
-    fields:    ["hashtags", "attribution"],
+    fields:    ["hashtags"],
     weights:   { hashtags: 1.0},
     threshold: SIMILARITY_THRESHOLD,
     max_edges: MAX_EDGES_PER_NODE,
@@ -272,6 +272,24 @@ function _jsEdgesForNew(np, existing, thr, max) {
 
 
 // ── HF-Embeddings strategy ────────────────────────────────────────────────────
+//
+// Similarity is computed from cached per-paper embedding vectors whenever
+// possible.  This avoids round-tripping through the Python sidecar entirely —
+// once every paper has an embedding.json on disk the whole operation runs in JS
+// at microsecond speed.
+//
+// Flow for computeEdges (full recompute):
+//   1. Fetch all embeddings in parallel via hf_get_paper_embedding.
+//   2a. ALL hit  → cosine in JS (no Python, instant).
+//   2b. ANY miss → fall back to hf_compute_similarity (Rust+Python), which
+//                  itself injects the cache hits to minimise sidecar work.
+//
+// Flow for computeEdgesForNewPaper (single paper added):
+//   1. Fetch embeddings for all existing papers in parallel.
+//   2. Compute the new paper's embedding via hf_compute_paper_embedding
+//      (saves it to disk as a side-effect).
+//   3. All cosine done in JS.
+//   Falls back to sidecar only if fetching embeddings fails outright.
 
 const _invoke = (
   window.__TAURI__?.core?.invoke ??
@@ -279,27 +297,146 @@ const _invoke = (
   null
 );
 
+/**
+ * Fetch the cached embedding for one paper.
+ * Returns the float[] vector, or null on cache miss / error.
+ */
+async function _getCachedEmbedding(paperId, config) {
+  if (!_invoke) return null;
+  try {
+    // console.log("_getCachedEmbedding : {}", config);
+    const res = await _invoke("hf_get_paper_embedding", { paperId, config });
+    return res?.hit ? (res.vector ?? null) : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
+ * Pure-JS cosine over HF embedding vectors.
+ * Identical edge logic to _jsEdges but uses the provided float[] vectors
+ * instead of the one-hot tag encoding.
+ */
+function _cosineEdgesFromVectors(papers, vectors, thr, max) {
+  const n = papers.length;
+  const cands = [];
+  console.log(vectors);
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      const sim = cosine(vectors[i], vectors[j]);
+      if (sim >= thr) {
+        cands.push({
+          source_id:  papers[i].id,
+          target_id:  papers[j].id,
+          similarity: parseFloat(sim.toFixed(6)),
+          weight:     edgeWeight(sim),
+          edge_type:  edgeType(papers[i], papers[j]),
+          _i: i, _j: j,
+        });
+      }
+    }
+  }
+  cands.sort((a, b) => b.similarity - a.similarity);
+  const cnt = new Array(n).fill(0);
+  const res = [];
+  for (const e of cands) {
+    if (cnt[e._i] < max && cnt[e._j] < max) {
+      cnt[e._i]++; cnt[e._j]++;
+      res.push({ source_id: e.source_id, target_id: e.target_id,
+                 similarity: e.similarity, weight: e.weight, edge_type: e.edge_type });
+    }
+  }
+  return res;
+}
+
+/**
+ * Build the minimal config object sent to embedding commands.
+ * Strips threshold / max_edges (not relevant for encoding).
+ */
+function _embConfig(cfg) {
+  return {
+    model:   cfg.model   ?? "sentence-transformers/all-MiniLM-L6-v2",
+    fields:  cfg.fields  ?? ["title", "abstract", "hashtags"],
+    weights: cfg.weights ?? {},
+  };
+}
+
 async function _hfEdges(papers, cfg) {
   if (!_invoke) throw new Error("Tauri invoke not available");
+
+  const embCfg = _embConfig(cfg);
+  const thr    = cfg.threshold ?? SIMILARITY_THRESHOLD;
+  const max    = cfg.max_edges ?? MAX_EDGES_PER_NODE;
+
+  // ── Try all-cache path ────────────────────────────────────────────────────
+  const vectors = await Promise.all(
+    papers.map(p => _getCachedEmbedding(p.id, embCfg))
+  );
+
+  if (vectors.every(v => v !== null)) {
+    // All embeddings cached → pure JS, no Python involved
+    return _cosineEdgesFromVectors(papers, vectors, thr, max);
+  }
+
+  // ── Partial or no cache → sidecar fallback ────────────────────────────────
+  // Rust's hf_compute_similarity will inject the cache hits it can find
+  // (reducing Python encoding work) and delegate the rest to the sidecar.
   const res = await _invoke("hf_compute_similarity", {
     papers,
-    config: {
-      model:     cfg.model     ?? "sentence-transformers/all-MiniLM-L6-v2",
-      fields:    cfg.fields    ?? ["title", "abstract", "hashtags"],
-      weights:   cfg.weights   ?? {},
-      threshold: cfg.threshold ?? SIMILARITY_THRESHOLD,
-      max_edges: cfg.max_edges ?? MAX_EDGES_PER_NODE,
-    },
+    config: { ...embCfg, threshold: thr, max_edges: max },
   });
   return res.edges ?? [];
 }
 
 async function _hfEdgesForNew(np, existing, cfg) {
-  const all   = [...existing.filter(p => p.id !== np.id), np];
-  const edges = await _hfEdges(all, cfg);
-  return edges
+  if (!_invoke) throw new Error("Tauri invoke not available");
+
+  const embCfg = _embConfig(cfg);
+  const thr    = cfg.threshold ?? SIMILARITY_THRESHOLD;
+  const max    = cfg.max_edges ?? MAX_EDGES_PER_NODE;
+
+  console.log("cfg : ", cfg);
+  try {
+    // Fetch existing embeddings in parallel
+    const others  = existing.filter(p => p.id !== np.id);
+    const othVecs = await Promise.all(
+      others.map(p => _getCachedEmbedding(p.id, embCfg))
+    );
+    console.log(others);
+    console.log(othVecs);
+
+    // Compute (and cache) the new paper's embedding via sidecar
+    const newRes = await _invoke("hf_compute_paper_embedding", {
+      paperId: np.id,
+      config:  embCfg,
+    });
+    console.log("newRes");
+    const newVec = newRes?.vector ?? null;
+    console.log("newVec");
+
+    if (newVec && othVecs.every(v => v !== null)) {
+      // All vectors available — cosine in JS
+      const allPapers  = [...others, np];
+      const allVectors = [...othVecs, newVec];
+      const allEdges   = _cosineEdgesFromVectors(allPapers, allVectors, thr, max);
+      console.log("allEdges :", allEdges);
+      return allEdges
+        .filter(e => e.source_id === np.id || e.target_id === np.id)
+        .slice(0, max);
+    }
+  } catch (e) {
+    console.warn("[similarity] cache-path failed, falling back to sidecar:", e);
+  }
+
+  // Fallback: send everything to sidecar
+  const all = [...existing.filter(p => p.id !== np.id), np];
+  const res = await _invoke("hf_compute_similarity", {
+    papers: all,
+    config: { ...embCfg, threshold: thr, max_edges: max },
+  });
+  return (res.edges ?? [])
     .filter(e => e.source_id === np.id || e.target_id === np.id)
-    .slice(0, cfg.max_edges ?? MAX_EDGES_PER_NODE);
+    .slice(0, max);
 }
 
 

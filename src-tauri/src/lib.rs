@@ -35,6 +35,12 @@ impl AppState {
     pub fn projects_json(&self) -> PathBuf {
         self.data_dir.join("projects.json")
     }
+    /// Directory for the isolated Python venv used by the similarity sidecar.
+    /// Created automatically on the first hf_* call via ensure_venv().
+    /// Safe to delete — the app recreates it on next launch.
+    pub fn venv_dir(&self) -> PathBuf {
+        self.data_dir.join("similarity_venv")
+    }
     /// Absolute path to similarity_server.py.
     ///
     /// Resolution order:
@@ -42,16 +48,16 @@ impl AppState {
     ///   2. <workspace_root>/similarity_server.py  (dev — next to src-tauri/)
     pub fn sidecar_script(&self) -> String {
         // 1. Bundled location (production)
+        // println!("Bundled {}", self.data_dir.display());
         let bundled = self.data_dir.join("similarity_server.py");
         if bundled.exists() {
             return bundled.to_string_lossy().into_owned();
         }
         // 2. Dev location: two directories up from src-tauri/src/ == workspace root
+        // println!(env!("CARGO_MANIFEST_DIR"));
         let dev = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()                               // src-tauri/
-            .and_then(|p| p.parent())              // workspace root
-            .unwrap_or(std::path::Path::new("."))
-            .join("similarity_server.py");
+            .join("src/similarity_server.py");
+        // println!("Dev {}", dev.display());
         dev.to_string_lossy().into_owned()
     }
 }
@@ -160,6 +166,8 @@ pub fn run() {
             delete_project, switch_project, get_current_project,
             // HuggingFace similarity (Rust owns Python sidecar)
             hf_compute_similarity, hf_list_models, hf_sidecar_status,
+            hf_check_model, hf_download_model,
+            hf_compute_paper_embedding, hf_get_paper_embedding, hf_compute_all_embeddings,
             // Similarity config persistence
             get_similarity_config, save_similarity_config,
         ])

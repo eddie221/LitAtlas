@@ -1259,3 +1259,203 @@
 .sim-recompute-hint {
   font-size: .6rem; color: var(--text-dim, #4b5060); line-height: 1.6;
 }
+/* ═══════════════════════════════════════════════════
+   MODEL DOWNLOAD AREA  (similarity-settings panel)
+══════════════════════════════════════════════════ */
+
+#sim-dl-area {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* Status row */
+.sim-dl-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* Shared badge base */
+.sim-dl-badge {
+  display: inline-flex;
+  align-items: center;
+  font-size: .6rem;
+  font-family: 'Space Mono', monospace;
+  letter-spacing: .07em;
+  padding: 3px 9px;
+  border-radius: 3px;
+  font-weight: 600;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* Badge states */
+.sim-dl-ok      { background: rgba(200,255,0,.10); color: #c8ff00; border: 1px solid rgba(200,255,0,.28); }
+.sim-dl-needed  { background: rgba(200,140,0,.10); color: #c89000; border: 1px solid rgba(200,140,0,.28); }
+.sim-dl-unknown { background: rgba(100,110,140,.12); color: #8890a8; border: 1px solid rgba(100,110,140,.25); }
+.sim-dl-active  { background: rgba(0,212,255,.10); color: #00d4ff; border: 1px solid rgba(0,212,255,.28); }
+.sim-dl-err     { background: rgba(255,80,80,.10); color: #c84040; border: 1px solid rgba(255,80,80,.28); }
+
+.sim-dl-hint {
+  font-size: .6rem;
+  color: var(--text-secondary);
+}
+
+/* Checking animation */
+.sim-dl-checking {
+  font-size: .6rem;
+  font-family: 'Space Mono', monospace;
+  color: var(--text-dim);
+  padding: 4px 0;
+  animation: _sim-blink .9s ease-in-out infinite alternate;
+}
+@keyframes _sim-blink { from { opacity: .35; } to { opacity: 1; } }
+
+/* Download button */
+.sim-dl-btn {
+  font-size: .62rem;
+  padding: 6px 14px;
+  background: rgba(0,212,255,.08);
+  border-color: rgba(0,212,255,.35);
+  color: #00d4ff;
+  letter-spacing: .05em;
+  transition: background .15s, border-color .15s, color .15s;
+  align-self: flex-start;
+}
+.sim-dl-btn:hover {
+  background: rgba(0,212,255,.18);
+  border-color: #00d4ff;
+  color: #fff;
+}
+
+/* Progress bar */
+.sim-dl-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 4px 0;
+}
+.sim-dl-progress-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.sim-dl-pct {
+  font-size: .65rem;
+  font-family: 'Space Mono', monospace;
+  color: #00d4ff;
+  min-width: 38px;
+  text-align: right;
+}
+.sim-dl-track {
+  height: 4px;
+  background: var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.sim-dl-bar {
+  height: 100%;
+  background: linear-gradient(90deg, #00c878, #00d4ff);
+  border-radius: 2px;
+  min-width: 4px;
+  transition: width .25s ease;
+}
+.sim-dl-file {
+  font-size: .58rem;
+  font-family: 'Space Mono', monospace;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sim-dl-bytes {
+  font-size: .57rem;
+  font-family: 'Space Mono', monospace;
+  color: var(--text-dim);
+}
+
+/* Error message */
+.sim-dl-errmsg {
+  font-size: .58rem;
+  font-family: 'Space Mono', monospace;
+  color: #c84040;
+  line-height: 1.55;
+  word-break: break-all;
+  max-height: 64px;
+  overflow-y: auto;
+  background: rgba(200,64,64,.05);
+  border: 1px solid rgba(200,64,64,.18);
+  border-radius: 3px;
+  padding: 5px 7px;
+  margin-top: 2px;
+}
+/* ═══════════════════════════════════════════════════
+   EMBEDDING CACHE SECTION  (similarity-settings panel)
+══════════════════════════════════════════════════ */
+
+.sim-emb-hint {
+  font-size: .6rem;
+  color: var(--text-dim);
+  line-height: 1.65;
+  margin-bottom: 8px;
+}
+
+#sim-emb-area {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sim-emb-btn {
+  font-size: .62rem;
+  padding: 6px 14px;
+  align-self: flex-start;
+  background: rgba(200,255,0,.06);
+  border-color: rgba(200,255,0,.25);
+  color: var(--accent);
+  letter-spacing: .05em;
+  transition: background .15s, border-color .15s;
+}
+.sim-emb-btn:hover:not(:disabled) {
+  background: rgba(200,255,0,.14);
+  border-color: var(--accent);
+}
+.sim-emb-btn:disabled {
+  opacity: .45;
+  cursor: not-allowed;
+}
+
+.sim-emb-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.sim-emb-progress-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.sim-emb-count {
+  font-size: .62rem;
+  font-family: 'Space Mono', monospace;
+  color: var(--text-secondary);
+}
+.sim-emb-paper {
+  font-size: .58rem;
+  font-family: 'Space Mono', monospace;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-height: 1.4em;
+}
+
+.sim-emb-done {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}

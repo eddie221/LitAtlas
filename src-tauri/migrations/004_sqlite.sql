@@ -264,7 +264,7 @@ INSERT INTO paper_tags (paper_id, tag_id) VALUES
 INSERT INTO paper_attributes (paper_id, attr_key, attr_value, display_order) VALUES
 (1,'abstract','We trained a large, deep CNN to classify 1.2 million ImageNet images into 1000 classes using ReLU activations, dropout, and data augmentation, achieving top-5 error of 15.3% and sparking the modern deep learning era.',0),
 (1,'citations','120000',1),
-(2,'abstract','We investigated the effect of network depth with 3×3 convolution filters; 16-19 weight layers significantly improve accuracy. VGGNet became a canonical transfer-learning baseline.',0),
+(2,'abstract','We investigated the effect of network depth with 3×3 convolution filters. 16-19 weight layers significantly improve accuracy. VGGNet became a canonical transfer-learning baseline.',0),
 (2,'citations','80000',1),
 (3,'abstract','Residual connections allow gradients to flow through hundreds of layers without vanishing. ResNet won ILSVRC and COCO 2015.',0),
 (3,'citations','140000',1),
