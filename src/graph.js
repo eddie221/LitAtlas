@@ -555,6 +555,39 @@ export async function refreshPaper(id) {
   }
 }
 
+// ── Re-compute edges for a single edited paper ───────────────────────────────
+// Drops all edges touching paperId, computes fresh ones via the active
+// similarity strategy, persists the merged set, then rebuilds canvas refs.
+export async function recomputeEdgesForPaper(paperId) {
+  const allPapers = getPapersCache();
+  const paper     = allPapers.find(p => p.id === paperId);
+  if (!paper) return;
+
+  // 1. Compute new edges for this paper against all others
+  const others   = allPapers.filter(p => p.id !== paperId);
+  const newEdges = await computeEdgesForNewPaper(paper, others, _simConfig);
+
+  // 2. Keep cached edges that don't involve this paper
+  const retained = getEdgesCache()
+    .filter(e => e.source !== paperId && e.target !== paperId)
+    .map(e => ({
+      source_id:  e.source,
+      target_id:  e.target,
+      similarity: e.similarity,
+      weight:     e.weight,
+      edge_type:  e.type,
+    }));
+
+  // 3. Atomic replace — retained edges + newly computed ones
+  await invoke("recompute_edges", { edges: [...retained, ...newEdges] });
+
+  // 4. Sync cache and rebuild canvas refs
+  const fresh = await invoke("get_edges");
+  setEdgesCache(fresh.map(adaptEdge));
+  rebuildEdgeRefs();
+  document.getElementById("stat-connections").textContent = getEdgesCache().length;
+}
+
 function rebuildEdgeRefs() {
   state.edges = getEdgesCache().map(e => ({
     ...e,
@@ -1373,6 +1406,7 @@ window.PaperGraph = {
   getSimConfig,
   saveSimConfig,
   triggerEdgeRecompute,
+  recomputeEdgesForPaper,
   reloadGraph,
   isHfEnabled: () => _hfEnabled,
   enableHf:    () => _runLlmConsentFlow(),

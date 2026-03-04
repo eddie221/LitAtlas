@@ -67,6 +67,17 @@ export function getDefaultConfig() {
   };
 }
 
+export function getEmbeddingConfig() {
+  return {
+    strategy:  "js-cosine",
+    model:     "sentence-transformers/all-MiniLM-L6-v2",
+    fields:    ["title", "abstract", "hashtags", "venue", "notes", "year"],
+    weights:   { hashtags: 1.0},
+    threshold: SIMILARITY_THRESHOLD,
+    max_edges: MAX_EDGES_PER_NODE,
+  };
+}
+
 
 // ── Attribution helpers ───────────────────────────────────────────────────────
 
