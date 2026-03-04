@@ -1,5 +1,6 @@
 // src-tauri/src/commands.rs
 
+use tauri::Manager;
 use tauri::State;
 use crate::AppState;
 use crate::db::{
@@ -931,10 +932,25 @@ pub fn hf_setup_venv(
         }
     }
 
-    // Launch (runs ensure_venv + spawns Python) and store the handle.
-    let sc = launch_sidecar(&s.sidecar_script(), &s.venv_dir(), &app)?;
-    *s.sidecar.lock().unwrap() = Some(sc);
-    Ok(serde_json::json!({ "ok": true }))
+    // Spawn setup on a background thread so the Tauri command returns
+    // immediately and the JS event loop can process progress events.
+    let script  = s.sidecar_script();
+    let venv    = s.venv_dir();
+    std::thread::spawn(move || {
+        match launch_sidecar(&script, &venv, &app) {
+            Ok(sc) => {
+                let state = app.state::<AppState>();
+                *state.sidecar.lock().unwrap() = Some(sc);
+                // launch_sidecar already emits the "ready" done event
+            }
+            Err(e) => {
+                eprintln!("[PaperGraph] hf_setup_venv background error: {e}");
+                let _ = app.emit("venv://error", serde_json::json!({ "error": e }));
+            }
+        }
+    });
+
+    Ok(serde_json::json!({ "ok": true, "background": true }))
 }
 
 /// Compute similarity edges using a HuggingFace sentence-transformer model.
@@ -1328,6 +1344,8 @@ pub fn hf_compute_all_embeddings(
     s:      State<'_, AppState>,
     config: serde_json::Value,
 ) -> CmdResult<serde_json::Value> {
+    // Load papers and resolve paths synchronously before spawning the thread,
+    // to avoid passing the State<'_> reference (non-Send) across thread boundary.
     let model = config["model"].as_str()
         .unwrap_or("sentence-transformers/all-MiniLM-L6-v2")
         .to_string();
@@ -1335,61 +1353,103 @@ pub fn hf_compute_all_embeddings(
         .as_array()
         .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
         .unwrap_or_else(|| vec!["title".into(), "abstract".into(), "hashtags".into()]);
-    
-    // Load all papers from DB.
+
     let papers: Vec<crate::db::PaperFull> = {
         let pool = s.pool();
         tauri::async_runtime::block_on(crate::db::get_all_papers(&pool))
             .map_err(|e| e.to_string())?
     };
 
+    let projects_dir = s.projects_dir.clone();
+    let current_slug = s.current_slug();
     let total        = papers.len();
-    let mut computed = 0usize;
 
-    for (index, paper) in papers.iter().enumerate() {
-        // Emit per-paper progress so the UI can show a progress bar.
-        let _ = app.emit("embedding://progress", serde_json::json!({
-            "paper_id": paper.id,
-            "title":    &paper.title,
-            "index":    index,
-            "total":    total,
-        }));
-
-        // Always re-encode — no cache skip on full recompute.
-        let paper_val = serde_json::to_value(paper.clone()).map_err(|e| e.to_string())?;
-        let mut guard = ensure_running(&s, &app)?;
-        let result = guard.as_mut().unwrap()
-            .call("compute_embedding", serde_json::json!({ "paper": paper_val, "config": config }))?;
-        drop(guard); // release mutex before file I/O
-
-        let field_vectors = result.get("field_vectors").cloned()
-            .unwrap_or(serde_json::Value::Object(Default::default()));
-
-        let path = embedding_path_for_paper(&s, paper.id);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).ok();
-        }
-        // Persist raw field_vectors only — no weights, no composite vector.
-        // Weights are applied at edge-computation time via recompose_embedding().
-        let payload = serde_json::json!({
-            "model":         &model,
-            "fields":        &fields,
-            "field_vectors": field_vectors,
-        });
-        std::fs::write(&path, serde_json::to_string(&payload).map_err(|e| e.to_string())?)
-            .map_err(|e| format!("Cannot write embedding for paper {}: {e}", paper.id))?;
-
-        computed += 1;
-    }
-
-    // Final done event
+    // Emit "started" immediately so the JS overlay appears before the thread runs.
     let _ = app.emit("embedding://progress", serde_json::json!({
-        "done":  true,
-        "total": total,
-        "computed": computed,
+        "started": true,
+        "total":   total,
     }));
 
-    Ok(serde_json::json!({ "total": total, "computed": computed }))
+    // Spawn encoding loop on a background thread — command returns immediately
+    // so Tauri can deliver per-paper progress events to the JS event loop.
+    std::thread::spawn(move || {
+        let mut computed = 0usize;
+
+        for (index, paper) in papers.iter().enumerate() {
+            let _ = app.emit("embedding://progress", serde_json::json!({
+                "paper_id": paper.id,
+                "title":    &paper.title,
+                "index":    index,
+                "total":    total,
+            }));
+
+            let paper_val = match serde_json::to_value(paper.clone()) {
+                Ok(v) => v,
+                Err(e) => {
+                    let _ = app.emit("embedding://error", serde_json::json!({ "error": e.to_string() }));
+                    return;
+                }
+            };
+
+            let state = app.state::<AppState>();
+            let result = match ensure_running(&state, &app) {
+                Ok(mut guard) => {
+                    let r = guard.as_mut().unwrap().call(
+                        "compute_embedding",
+                        serde_json::json!({ "paper": paper_val, "config": &config }),
+                    );
+                    drop(guard);
+                    match r {
+                        Ok(v) => v,
+                        Err(e) => {
+                            let _ = app.emit("embedding://error", serde_json::json!({ "error": e }));
+                            return;
+                        }
+                    }
+                }
+                Err(e) => {
+                    let _ = app.emit("embedding://error", serde_json::json!({ "error": e }));
+                    return;
+                }
+            };
+
+            let field_vectors = result.get("field_vectors").cloned()
+                .unwrap_or(serde_json::Value::Object(Default::default()));
+
+            let path = projects_dir
+                .join(&current_slug)
+                .join("pdfs")
+                .join(paper.id.to_string())
+                .join("embedding.json");
+
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
+            let payload = serde_json::json!({
+                "model":         &model,
+                "fields":        &fields,
+                "field_vectors": field_vectors,
+            });
+            if let Err(e) = serde_json::to_string(&payload)
+                .map_err(|e| e.to_string())
+                .and_then(|s| std::fs::write(&path, s).map_err(|e| e.to_string()))
+            {
+                let _ = app.emit("embedding://error", serde_json::json!({ "error": e }));
+                return;
+            }
+            computed += 1;
+        }
+
+        // Final done event — JS resolves its waiting promise on this.
+        let _ = app.emit("embedding://progress", serde_json::json!({
+            "done":     true,
+            "total":    total,
+            "computed": computed,
+        }));
+    });
+
+    // Return immediately — JS awaits embedding://progress { done: true }.
+    Ok(serde_json::json!({ "ok": true, "background": true, "total": total }))
 }
 
 /// Compute similarity edges entirely from cached field_vectors on disk.

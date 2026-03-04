@@ -324,33 +324,121 @@ function _showVenvOverlay(step, detail) {
 }
 
 // Register Tauri event listeners once on load.
-// "venv://progress" — step transitions emitted by the Rust orchestrator.
-// "venv://pip-log"  — individual pip/pip-upgrade output lines (streamed).
+// "venv://progress"     — step transitions emitted by the Rust orchestrator.
+// "venv://pip-log"      — individual pip/pip-upgrade output lines (streamed).
+// "venv://error"        — fatal error from background venv setup thread.
+// "embedding://progress"— per-paper encoding progress from hf_compute_all_embeddings.
+// "embedding://error"   — fatal error from background embedding thread.
+
+// Callbacks registered by waitForVenvDone() / waitForEmbeddingDone() so they
+// can resolve/reject when the background job finishes.
+let _venvDoneResolve   = null;
+let _venvDoneReject    = null;
+let _embedDoneResolve  = null;
+let _embedDoneReject   = null;
+
+// Embedding progress state — mirrors the venv step pattern.
+let _embedTotal    = 0;
+let _embedIndex    = 0;
+let _embedTitle    = "";
+
+function _showEmbeddingOverlay() {
+  const pct     = _embedTotal > 0 ? Math.round((_embedIndex / _embedTotal) * 100) : 0;
+  const barFill = `width:${pct}%`;
+  const el      = _overlayEl();
+  el.innerHTML = `
+    <div style="font-family:'DM Serif Display',serif;font-size:1.6rem;color:#c8ff00">
+      Paper<span style="color:#e8eaf0">Graph</span></div>
+    <div style="font-size:.8rem;color:#9ca3af;margin-bottom:4px">
+      Re-encoding papers for similarity search</div>
+    <div style="background:#0d0f14;border:1px solid #1e2230;border-radius:8px;
+                padding:14px 20px;min-width:300px;text-align:left">
+      <div style="font-size:.68rem;color:#e8eaf0;margin-bottom:8px;white-space:nowrap;
+                  overflow:hidden;text-overflow:ellipsis;max-width:280px"
+           title="${_embedTitle.replace(/"/g,'&quot;')}">${_embedTitle || "Starting…"}</div>
+      <div style="background:#1a1d26;border-radius:4px;height:6px;overflow:hidden">
+        <div style="background:#c8ff00;height:100%;border-radius:4px;transition:width .2s;${barFill}"></div>
+      </div>
+      <div style="font-size:.62rem;color:#6b7280;margin-top:6px;text-align:right">
+        ${_embedIndex} / ${_embedTotal}</div>
+    </div>
+    <div style="width:28px;height:28px;border:2px solid #1e2230;
+                border-top-color:#c8ff00;border-radius:50%;
+                animation:_spin .75s linear infinite"></div>
+    <style>@keyframes _spin{to{transform:rotate(360deg)}}</style>`;
+  el.style.display = "flex";
+}
+
 if (tauriListen) {
   tauriListen("venv://progress", ({ payload }) => {
-    // console.log("progress listen", tauriListen);
     const { step, detail, done } = payload;
     if (done) {
-      // Mark all steps complete so the checklist renders fully green, then fade out.
       _VENV_STEPS.forEach(s => _venvStepsDone.add(s.key));
       _venvCurrentStep = "";
       _renderVenvOverlay();
-      setTimeout(hideOverlay, 800);
+      setTimeout(() => {
+        hideOverlay();
+        if (_venvDoneResolve) { _venvDoneResolve(); _venvDoneResolve = _venvDoneReject = null; }
+      }, 800);
     } else {
       _showVenvOverlay(step, detail);
     }
   });
 
+  tauriListen("venv://error", ({ payload }) => {
+    hideOverlay();
+    if (_venvDoneReject) {
+      _venvDoneReject(payload?.error ?? "Unknown venv error");
+      _venvDoneResolve = _venvDoneReject = null;
+    }
+  });
+
   tauriListen("venv://pip-log", ({ payload }) => {
-    // console.log("pip log listen");
     const line = (payload?.line ?? "").trimEnd();
     if (!line) return;
     _pipLog.push({ text: line, cls: _pipLineClass(line) });
     if (_pipLog.length > _PIP_LOG_MAX) _pipLog.shift();
-    // Only re-render when one of the two pip steps is active.
     if (_venvCurrentStep === "install_deps" || _venvCurrentStep === "upgrade_pip") {
       _renderVenvOverlay();
     }
+  });
+
+  tauriListen("embedding://progress", ({ payload }) => {
+    if (payload?.done) {
+      hideOverlay();
+      if (_embedDoneResolve) { _embedDoneResolve(); _embedDoneResolve = _embedDoneReject = null; }
+    } else if (!payload?.started) {
+      _embedIndex = (payload?.index ?? 0) + 1;
+      _embedTotal = payload?.total ?? _embedTotal;
+      _embedTitle = payload?.title ?? _embedTitle;
+      _showEmbeddingOverlay();
+    }
+  });
+
+  tauriListen("embedding://error", ({ payload }) => {
+    hideOverlay();
+    if (_embedDoneReject) {
+      _embedDoneReject(payload?.error ?? "Unknown embedding error");
+      _embedDoneResolve = _embedDoneReject = null;
+    }
+  });
+}
+
+// Returns a promise that resolves when venv://progress { done } fires,
+// or rejects on venv://error. Always set this up BEFORE calling invoke("hf_setup_venv").
+function _waitForVenvDone() {
+  return new Promise((resolve, reject) => {
+    _venvDoneResolve = resolve;
+    _venvDoneReject  = reject;
+  });
+}
+
+// Returns a promise that resolves when embedding://progress { done } fires,
+// or rejects on embedding://error. Set up BEFORE invoke("hf_compute_all_embeddings").
+function _waitForEmbeddingDone() {
+  return new Promise((resolve, reject) => {
+    _embedDoneResolve = resolve;
+    _embedDoneReject  = reject;
   });
 }
 
@@ -380,16 +468,17 @@ async function _runLlmConsentFlow() {
   _venvCurrentStep = "";
   _venvDetail      = "";
   _pipLog.length   = 0;
+  // Show the overlay BEFORE invoking so it's visible while the background
+  // thread runs — the command now returns immediately.
   _renderVenvOverlay();
 
   try {
-    // hf_setup_venv now:
-    //   • reuses the live sidecar if already running (no-op fast path)
-    //   • re-launches if venv is ready but sidecar is dead/missing
-    //   • runs full ensure_venv + spawn if venv was absent
-    // In all cases the handle is stored in AppState — no orphaned processes.
+    // Register the done-promise BEFORE invoking to avoid any race.
+    const venvDone = _waitForVenvDone();
     await invoke("hf_setup_venv");
-    // overlay hides via the venv://progress "done" event
+    // hf_setup_venv returns immediately; wait for venv://progress { done } event.
+    await venvDone;
+    // Overlay is hidden by the event handler; proceed with enabling HF.
     await _persistHfEnabled(true);
     _applyHfEnabled(true);
     return true;
@@ -495,26 +584,32 @@ export async function triggerEdgeRecompute() {
 
   if (_hfEnabled && _simConfig.strategy === "hf-embeddings") {
     // ── HF two-step recompute ──────────────────────────────────────────────
-    // // Step 1: Re-encode all papers unconditionally → write raw field_vectors
-    // //         to each paper's embedding.json.  Always done on every recompute
-    // //         so the stored vectors reflect current paper content.
-    // showOverlay("Re-encoding papers (step 1/2)…");
     const embCfg = {
       model:   _simConfig.model   ?? "sentence-transformers/all-MiniLM-L6-v2",
       fields:  _simConfig.fields  ?? ["title", "abstract", "hashtags"],
       weights: _simConfig.weights ?? {},
     };
-    // await invoke("hf_compute_all_embeddings", { config: embCfg });
+
+    // Step 1: Re-encode all papers → write field_vectors to embedding.json.
+    // Show the embedding progress overlay BEFORE invoking — the command now
+    // returns immediately and streams per-paper progress via events.
+    _embedIndex = 0;
+    _embedTotal = getPapersCache().length;
+    _embedTitle = "";
+    _showEmbeddingOverlay();
+
+    const embDone = _waitForEmbeddingDone();
+    await invoke("hf_compute_all_embeddings", { config: embCfg });
+    // Wait for embedding://progress { done } — overlay hides itself.
+    await embDone;
 
     // Step 2: Load field_vectors from JSON, apply current weights in Rust,
     //         compute cosine similarity — zero Python in this step.
-    showOverlay("Computing similarity edges (step 2/2)…");
-    console.log("triggerEdgeRecompute : ", getPapersCache());
+    showOverlay("Computing similarity edges…");
     const papers = getPapersCache().map(p => ({
       id: p.id, title: p.title, venue: p.venue, year: p.year,
       hashtags: p.hashtags, notes: p.notes, attributes: p.attributes,
     }));
-    console.log("papers : ", papers);
     const edgeRes = await invoke("hf_compute_edges_from_cache", {
       papers,
       config: {
@@ -523,7 +618,6 @@ export async function triggerEdgeRecompute() {
         max_edges: _simConfig.max_edges ?? 7,
       },
     });
-    console.log(edgeRes);
     const computed = edgeRes.edges ?? [];
     await invoke("recompute_edges", { edges: computed });
   } else {
