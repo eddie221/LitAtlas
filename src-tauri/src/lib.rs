@@ -81,6 +81,7 @@ fn seed_db(pool: &SqlitePool) {
                 .collect::<Vec<_>>().join("\n");
             let stmt = stmt.trim();
             if stmt.is_empty() { continue; }
+            println!("{}", stmt);
             if let Err(e) = sqlx::query(stmt).execute(pool).await {
                 eprintln!("[PaperGraph] seed: {e}");
             }
@@ -168,6 +169,8 @@ pub fn run() {
             hf_compute_similarity, hf_list_models, hf_sidecar_status,
             hf_check_model, hf_download_model,
             hf_compute_paper_embedding, hf_get_paper_embedding, hf_compute_all_embeddings,
+            hf_compute_edges_from_cache,
+            hf_setup_status, hf_setup_venv,
             // Similarity config persistence
             get_similarity_config, save_similarity_config,
         ])

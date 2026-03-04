@@ -60,7 +60,7 @@ export function getDefaultConfig() {
   return {
     strategy:  "js-cosine",
     model:     "sentence-transformers/all-MiniLM-L6-v2",
-    fields:    ["hashtags"],
+    fields:    ["title", "abstract", "hashtags", "venue", "notes", "year"],
     weights:   { hashtags: 1.0},
     threshold: SIMILARITY_THRESHOLD,
     max_edges: MAX_EDGES_PER_NODE,
@@ -149,6 +149,8 @@ export function encode(paper) {
 
   // ── Hashtag sub-vector ──
   const ts = new Set((paper.hashtags ?? []).map(t => t.replace(/^#/, "").toLowerCase()));
+  console.log("ts : ", ts);
+  console.log("TAG_VOCAB : ", TAG_VOCAB);
   for (let i = 0; i < TAG_VOCAB.length; i++) {
     if (ts.has(TAG_VOCAB[i])) vec[i] = 1.0;
   }
@@ -213,7 +215,8 @@ function _jsEdges(papers, thr, max) {
   for (let i = 0; i < papers.length; i++) {
     for (let j = i + 1; j < papers.length; j++) {
       const sim = _blendedSim(encs[i], encs[j]);
-      // console.log(i, j, sim, thr);
+      console.log(encs[i], encs[j]);
+      console.log(i, j, sim, thr);
       if (sim >= thr) {
         cands.push({
           source_id: papers[i].id,
@@ -273,23 +276,23 @@ function _jsEdgesForNew(np, existing, thr, max) {
 
 // ── HF-Embeddings strategy ────────────────────────────────────────────────────
 //
-// Similarity is computed from cached per-paper embedding vectors whenever
-// possible.  This avoids round-tripping through the Python sidecar entirely —
-// once every paper has an embedding.json on disk the whole operation runs in JS
-// at microsecond speed.
+// Recompute flow (triggered by the "Recompute Graph" button):
+//   Step 1 — graph.js calls hf_compute_all_embeddings (Rust+Python):
+//              • Re-encodes every paper unconditionally via the Python sidecar.
+//              • Writes raw per-field vectors to embedding.json next to each paper.
+//              • No composite, no weights stored — only the raw field encodings.
+//   Step 2 — graph.js calls computeEdges → _hfEdges → hf_compute_edges_from_cache (Rust):
+//              • Reads field_vectors from each paper's embedding.json.
+//              • Recomposes the weighted composite in Rust using current weights.
+//              • Computes pairwise cosine similarity and returns edges.
+//              • Zero Python calls in this step — pure Rust arithmetic.
 //
-// Flow for computeEdges (full recompute):
-//   1. Fetch all embeddings in parallel via hf_get_paper_embedding.
-//   2a. ALL hit  → cosine in JS (no Python, instant).
-//   2b. ANY miss → fall back to hf_compute_similarity (Rust+Python), which
-//                  itself injects the cache hits to minimise sidecar work.
-//
-// Flow for computeEdgesForNewPaper (single paper added):
-//   1. Fetch embeddings for all existing papers in parallel.
-//   2. Compute the new paper's embedding via hf_compute_paper_embedding
-//      (saves it to disk as a side-effect).
-//   3. All cosine done in JS.
-//   Falls back to sidecar only if fetching embeddings fails outright.
+// New-paper flow (single paper added to graph):
+//   1. hf_compute_paper_embedding encodes the new paper's fields → writes JSON.
+//   2. _getCachedFieldVectors loads field_vectors for all papers from disk.
+//   3. _recompose() applies current weights to produce composites in JS.
+//   4. _cosineEdgesFromVectors computes similarity in JS.
+//   Falls back to hf_compute_similarity (sidecar) if any step fails.
 
 const _invoke = (
   window.__TAURI__?.core?.invoke ??
@@ -298,18 +301,48 @@ const _invoke = (
 );
 
 /**
- * Fetch the cached embedding for one paper.
- * Returns the float[] vector, or null on cache miss / error.
+ * Fetch the raw per-field vectors for one paper from its embedding.json.
+ * Returns { field_vectors, dim } on cache hit, or null on miss/error.
  */
-async function _getCachedEmbedding(paperId, config) {
+async function _getCachedFieldVectors(paperId, config) {
   if (!_invoke) return null;
   try {
-    // console.log("_getCachedEmbedding : {}", config);
     const res = await _invoke("hf_get_paper_embedding", { paperId, config });
-    return res?.hit ? (res.vector ?? null) : null;
+    return res?.hit ? { field_vectors: res.field_vectors, dim: res.dim } : null;
   } catch (_) {
     return null;
   }
+}
+
+/**
+ * Recompose a weighted composite vector from raw per-field vectors.
+ * Matches the logic in Rust's recompose_embedding().
+ *
+ * field_vectors: { title: Float64Array | number[], hashtags: [...], ... }
+ * fields:        ["title", "hashtags", ...]
+ * weights:       { title: 0.7, hashtags: 0.2, ... }  (missing → 1.0)
+ *
+ * Returns a normalised Float64Array, or null if no fields have content.
+ */
+function _recompose(field_vectors, fields, weights) {
+  let composite = null;
+  let any = false;
+  for (const field of fields) {
+    const vec = field_vectors[field];
+    if (!vec || vec.length === 0) continue;
+    const w = weights?.[field] ?? 1.0;
+    if (w === 0) continue;
+    if (!composite) composite = new Float64Array(vec.length);
+    for (let k = 0; k < vec.length; k++) composite[k] += w * vec[k];
+    any = true;
+  }
+  if (!any || !composite) return null;
+  // L2-normalise
+  let norm = 0;
+  for (let k = 0; k < composite.length; k++) norm += composite[k] * composite[k];
+  norm = Math.sqrt(norm);
+  if (norm > 0) for (let k = 0; k < composite.length; k++) composite[k] /= norm;
+  return composite;
 }
 
 /**
@@ -320,7 +353,6 @@ async function _getCachedEmbedding(paperId, config) {
 function _cosineEdgesFromVectors(papers, vectors, thr, max) {
   const n = papers.length;
   const cands = [];
-  console.log(vectors);
   for (let i = 0; i < n; i++) {
     for (let j = i + 1; j < n; j++) {
       const sim = cosine(vectors[i], vectors[j]);
@@ -368,20 +400,9 @@ async function _hfEdges(papers, cfg) {
   const thr    = cfg.threshold ?? SIMILARITY_THRESHOLD;
   const max    = cfg.max_edges ?? MAX_EDGES_PER_NODE;
 
-  // ── Try all-cache path ────────────────────────────────────────────────────
-  const vectors = await Promise.all(
-    papers.map(p => _getCachedEmbedding(p.id, embCfg))
-  );
-
-  if (vectors.every(v => v !== null)) {
-    // All embeddings cached → pure JS, no Python involved
-    return _cosineEdgesFromVectors(papers, vectors, thr, max);
-  }
-
-  // ── Partial or no cache → sidecar fallback ────────────────────────────────
-  // Rust's hf_compute_similarity will inject the cache hits it can find
-  // (reducing Python encoding work) and delegate the rest to the sidecar.
-  const res = await _invoke("hf_compute_similarity", {
+  // Edge computation reads field_vectors from JSON and recomposes with current
+  // weights entirely in Rust — no Python sidecar call needed.
+  const res = await _invoke("hf_compute_edges_from_cache", {
     papers,
     config: { ...embCfg, threshold: thr, max_edges: max },
   });
@@ -395,40 +416,33 @@ async function _hfEdgesForNew(np, existing, cfg) {
   const thr    = cfg.threshold ?? SIMILARITY_THRESHOLD;
   const max    = cfg.max_edges ?? MAX_EDGES_PER_NODE;
 
-  console.log("cfg : ", cfg);
   try {
-    // Fetch existing embeddings in parallel
-    const others  = existing.filter(p => p.id !== np.id);
-    const othVecs = await Promise.all(
-      others.map(p => _getCachedEmbedding(p.id, embCfg))
+    // 1. Encode the new paper's fields and save to disk.
+    await _invoke("hf_compute_paper_embedding", { paperId: np.id, config: embCfg });
+
+    // 2. Load field_vectors for all papers (new + existing) from JSON.
+    const allPapers = [...existing.filter(p => p.id !== np.id), np];
+    const fvResults = await Promise.all(
+      allPapers.map(p => _getCachedFieldVectors(p.id, embCfg))
     );
-    console.log(others);
-    console.log(othVecs);
 
-    // Compute (and cache) the new paper's embedding via sidecar
-    const newRes = await _invoke("hf_compute_paper_embedding", {
-      paperId: np.id,
-      config:  embCfg,
-    });
-    console.log("newRes");
-    const newVec = newRes?.vector ?? null;
-    console.log("newVec");
-
-    if (newVec && othVecs.every(v => v !== null)) {
-      // All vectors available — cosine in JS
-      const allPapers  = [...others, np];
-      const allVectors = [...othVecs, newVec];
-      const allEdges   = _cosineEdgesFromVectors(allPapers, allVectors, thr, max);
-      console.log("allEdges :", allEdges);
-      return allEdges
-        .filter(e => e.source_id === np.id || e.target_id === np.id)
-        .slice(0, max);
+    if (fvResults.every(r => r !== null)) {
+      // 3. Recompose weighted composites from field_vectors + current weights.
+      const vectors = fvResults.map(r =>
+        _recompose(r.field_vectors, embCfg.fields, embCfg.weights)
+      );
+      if (vectors.every(v => v !== null)) {
+        const allEdges = _cosineEdgesFromVectors(allPapers, vectors, thr, max);
+        return allEdges
+          .filter(e => e.source_id === np.id || e.target_id === np.id)
+          .slice(0, max);
+      }
     }
   } catch (e) {
-    console.warn("[similarity] cache-path failed, falling back to sidecar:", e);
+    console.warn("[similarity] new-paper cache-path failed, falling back to sidecar:", e);
   }
 
-  // Fallback: send everything to sidecar
+  // Fallback: let Rust handle everything via sidecar.
   const all = [...existing.filter(p => p.id !== np.id), np];
   const res = await _invoke("hf_compute_similarity", {
     papers: all,

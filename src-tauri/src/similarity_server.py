@@ -27,12 +27,20 @@ import math
 import threading
 import traceback
 from typing import Any
+import torch
 
 # ── Lazy-loaded model ─────────────────────────────────────────────────────────
 _model      = None
 _model_name = None
 _model_lock = threading.Lock()
 
+# if torch.cuda.is_available():
+#     device = "cuda"
+# elif torch.backends.mps.is_available():
+#     device = "mps"
+# else:
+#     device = "cpu"
+# print(f"Using {device} device")
 
 def _get_model(model_name: str):
     global _model, _model_name
@@ -163,21 +171,67 @@ def _attr(paper: dict, key: str, fallback: str = "") -> str:
     return fallback
 
 
-def paper_to_text(paper: dict, fields: list, weights: dict) -> str:
-    parts = []
+def _field_text(paper: dict, field: str) -> str:
+    """Extract the raw text for one field from a paper dict."""
+    if field == "title":    return paper.get("title", "")
+    if field == "abstract": return _attr(paper, "abstract")
+    if field == "venue":    return paper.get("venue", "")
+    if field == "hashtags": return " ".join(t.lstrip("#") for t in paper.get("hashtags", []))
+    if field == "notes":    return paper.get("notes", "") or ""
+    if field == "year":     return str(paper.get("year", ""))
+    return _attr(paper, field)   # custom attribute key
+
+
+def paper_embedding(paper: dict, fields: list, weights: dict, model) -> list:
+    """
+    Compute a paper's embedding as a weighted sum of per-field embeddings,
+    then L2-normalise the result.
+
+    Algorithm:
+      1. For each enabled field, extract its text.
+      2. Batch-encode all non-empty field texts in a single model.encode() call.
+      3. Weighted-sum the resulting vectors using the user-defined weights.
+      4. L2-normalise the composite vector so cosine similarity works correctly.
+
+    This is semantically correct: each field's meaning lives in its own region
+    of the embedding space, and the weight controls how much that region pulls
+    the final vector.  Repeating concatenated text (the old approach) is a
+    crude proxy — it shifts the distribution of tokens but doesn't cleanly
+    decompose field contributions.
+
+    Falls back to encoding just the title if every field is empty.
+    """
+    # Gather (field, text, weight) triples for non-empty fields
+    items = []
     for field in fields:
-        w    = max(1, round(weights.get(field, 1.0)))
-        text = ""
-        if field == "title":       text = paper.get("title", "")
-        elif field == "abstract":  text = _attr(paper, "abstract")
-        elif field == "venue":     text = paper.get("venue", "")
-        elif field == "hashtags":  text = " ".join(t.lstrip("#") for t in paper.get("hashtags", []))
-        elif field == "notes":     text = paper.get("notes", "") or ""
-        elif field == "year":      text = str(paper.get("year", ""))
-        else:                      text = _attr(paper, field)
-        if text.strip():
-            parts.extend([text.strip()] * w)
-    return " ".join(parts) if parts else paper.get("title", "")
+        text = _field_text(paper, field).strip()
+        if text:
+            w = float(weights.get(field, 1.0))
+            if w > 0:
+                items.append((field, text, w))
+
+    # Fallback: always include title with weight 1 if nothing else is available
+    if not items:
+        title = paper.get("title", "").strip()
+        items = [("title", title or "unknown", 1.0)]
+
+    # Batch encode all field texts at once (single GPU/CPU pass)
+    texts = [text for _, text, _ in items]
+    vecs  = model.encode(texts, convert_to_numpy=True, show_progress_bar=False)
+
+    # Weighted sum
+    dim       = vecs.shape[1]
+    composite = [0.0] * dim
+    for (_, _, w), vec in zip(items, vecs):
+        for k in range(dim):
+            composite[k] += w * float(vec[k])
+
+    # L2-normalise so downstream cosine() works correctly on these vectors
+    norm = math.sqrt(sum(x * x for x in composite))
+    if norm > 0:
+        composite = [x / norm for x in composite]
+
+    return composite
 
 
 # ── Cosine / edge helpers ─────────────────────────────────────────────────────
@@ -228,23 +282,47 @@ AVAILABLE_FIELDS = [
 
 # ── Compute ───────────────────────────────────────────────────────────────────
 
-def compute_embedding(paper: dict, config: dict) -> list:
-    # with open('../daconfigta.json', 'w') as f:
-    #     json.dump(config, f)
-    # with open('../paper.json', 'w') as f:
-    #     json.dump(paper, f)
+def compute_embedding(paper: dict, config: dict) -> dict:
+    """
+    Compute and return raw per-field embedding vectors for a single paper.
 
+    Returns:
+      {
+        "field_vectors": { "<field>": [float, ...], ... },  # one raw vector per field
+        "dim":           int,
+      }
+
+    No composite vector is returned here.  The composite is recomposed at query
+    time by Rust (inject_cached_embeddings / recompose_embedding) using whatever
+    weights the user currently has set.  This means embedding.json stays valid
+    across weight changes — only a model or field-set change triggers re-encoding.
     """
-    Encode a single paper into a float vector and return it.
-    Used to pre-compute and cache per-paper embeddings on disk.
-    """
-    model_name = config.get("model", "sentence-transformers/all-MiniLM-L6-v2")
-    fields     = config.get("fields",    ["title", "abstract", "hashtags"])
-    weights    = config.get("weights",   {})
+    model_name = config.get("model",  "sentence-transformers/all-MiniLM-L6-v2")
+    fields     = config.get("fields", ["title", "abstract", "hashtags"])
     model      = _get_model(model_name)
-    text       = paper_to_text(paper, fields, weights)
-    vec        = model.encode([text], convert_to_numpy=True, show_progress_bar=False)[0]
-    return vec.tolist()
+    # Gather non-empty field texts.  Weights are irrelevant here — we encode
+    # every requested field that has content regardless of its weight.
+    items = []
+    for field in fields:
+        text = _field_text(paper, field).strip()
+        if text:
+            items.append((field, text))
+
+    if not items:
+        title = paper.get("title", "").strip()
+        items = [("title", title or "unknown")]
+
+    # Batch-encode all field texts in one GPU/CPU pass
+    texts = [text for _, text in items]
+    vecs  = model.encode(texts, convert_to_numpy=True, show_progress_bar=False)
+
+    # Build field_vectors dict: { field_name -> raw unit vector }
+    field_vectors = {}
+    dim = vecs.shape[1]
+    for (field, _), vec in zip(items, vecs):
+        field_vectors[field] = vec.tolist()
+
+    return {"field_vectors": field_vectors, "dim": dim}
 
 
 def compute(papers: list, config: dict) -> list:
@@ -256,27 +334,29 @@ def compute(papers: list, config: dict) -> list:
     if not papers: return []
     model      = _get_model(model_name)
 
-    # Use pre-computed embedding vectors when available (passed from Rust cache).
-    # papers[i]["_embedding"] is set by Rust if a cached embedding.json exists
-    # with a matching model+fields config.  Saves re-encoding unchanged papers.
-    vecs = []
-    texts_to_encode = []   # (index, text) pairs that need fresh encoding
+    # Build composite embedding vectors for all papers.
+    #
+    # Rust's inject_cached_embeddings pre-processes the papers list before this
+    # call: for each paper whose embedding.json is cached (model+fields match),
+    # it recomposes the weighted composite from the stored raw field_vectors using
+    # the *current* weights, then injects it as paper["_embedding"].
+    #
+    # Here we simply use those pre-recomposed vectors directly.  Papers without
+    # a cache hit (new papers, or after a model/field change) are encoded fresh
+    # via paper_embedding(), which applies weights during encoding.
+    vecs             = []
+    papers_to_encode = []   # (original_index, paper_dict) needing fresh encoding
+
     for i, p in enumerate(papers):
         cached_vec = p.get("_embedding")
         if isinstance(cached_vec, list) and len(cached_vec) > 0:
             vecs.append(cached_vec)
         else:
             vecs.append(None)
-            texts_to_encode.append((i, paper_to_text(p, fields, weights)))
+            papers_to_encode.append((i, p))
 
-    if texts_to_encode:
-        fresh = model.encode(
-            [t for _, t in texts_to_encode],
-            convert_to_numpy=True,
-            show_progress_bar=False,
-        )
-        for idx, (i, _) in enumerate(texts_to_encode):
-            vecs[i] = fresh[idx].tolist()
+    for i, p in papers_to_encode:
+        vecs[i] = paper_embedding(p, fields, weights, model)
 
     n = len(papers)
     candidates = []
@@ -330,10 +410,10 @@ def handle(line: str) -> None:
         elif method == "check_model":    handle_check_model(req_id, params.get("model", ""))
         elif method == "download_model": handle_download_model(req_id, params.get("model", ""))
         elif method == "compute_embedding":
-            # Encode a single paper and return its float vector.
-            # Params: { paper: <PaperFull>, config: { model, fields, weights } }
-            vec = compute_embedding(params.get("paper", {}), params.get("config", {}))
-            ok(req_id, {"vector": vec, "dim": len(vec)})
+            # Encode a single paper; returns { field_vectors, dim }.
+            # Params: { paper: <PaperFull>, config: { model, fields } }
+            result = compute_embedding(params.get("paper", {}), params.get("config", {}))
+            ok(req_id, result)
         elif method == "compute":
             edges = compute(params.get("papers", []), params.get("config", {}))
             ok(req_id, {"edges": edges, "count": len(edges)})

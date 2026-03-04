@@ -341,6 +341,33 @@
     }
 
     /* ═══════════════════════════════════════════════════════════
+       SIMILARITY METHOD BADGE
+    ═══════════════════════════════════════════════════════════ */
+    #sim-method-badge {
+      position: fixed; bottom: 106px; right: 16px;
+      background: rgba(10,12,16,0.82); backdrop-filter: blur(10px);
+      border: 1px solid var(--border);
+      padding: 5px 10px;
+      display: flex; align-items: center; gap: 6px;
+      z-index: 50; pointer-events: none;
+    }
+    #sim-method-icon {
+      font-size: 1rem;
+      color: var(--accent);
+      line-height: 1;
+    }
+    #sim-method-label {
+      font-size: 0.8rem;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--text-secondary);
+      white-space: nowrap;
+    }
+    /* Highlight when HF embeddings are active */
+    #sim-method-badge.hf-active #sim-method-icon { color: #a78bfa; }
+    #sim-method-badge.hf-active #sim-method-label { color: #c4b5fd; }
+
+    /* ═══════════════════════════════════════════════════════════
        STATS
     ═══════════════════════════════════════════════════════════ */
     #stats {
@@ -1458,4 +1485,123 @@
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+}
+/* ── LLM consent dialog ──────────────────────────────────────────────────── */
+#llm-consent-dialog,
+#llm-error-dialog {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 10001;
+  background: rgba(5, 7, 10, 0.88);
+  backdrop-filter: blur(6px);
+  align-items: center;
+  justify-content: center;
+}
+#llm-consent-dialog.open,
+#llm-error-dialog.open {
+  display: flex;
+}
+
+#llm-consent-panel,
+#llm-error-panel {
+  background: var(--panel-bg, #11131a);
+  border: 1px solid #1e2230;
+  border-radius: 12px;
+  padding: 32px 36px;
+  max-width: 480px;
+  width: 90vw;
+  font-family: 'Space Mono', monospace;
+  color: var(--text-primary, #e8eaf0);
+  box-shadow: 0 24px 60px rgba(0,0,0,0.6);
+}
+
+#llm-consent-icon {
+  font-size: 2.4rem;
+  text-align: center;
+  margin-bottom: 12px;
+}
+#llm-consent-title,
+#llm-error-title {
+  font-family: 'DM Serif Display', serif;
+  font-size: 1.3rem;
+  color: #c8ff00;
+  text-align: center;
+  margin-bottom: 18px;
+}
+#llm-error-title {
+  color: #ff8040;
+}
+
+#llm-consent-body {
+  font-size: .72rem;
+  line-height: 1.75;
+  color: #9ca3af;
+  margin-bottom: 20px;
+}
+#llm-consent-body p { margin: 0 0 10px; }
+#llm-consent-body strong { color: #c8d0e0; }
+#llm-consent-body em { color: #c8d0e0; font-style: normal; }
+#llm-consent-body ul {
+  margin: 6px 0 10px 16px;
+  padding: 0;
+  list-style: disc;
+}
+#llm-consent-body li { margin-bottom: 4px; }
+
+.llm-consent-note {
+  font-size: .66rem !important;
+  color: #5a6070 !important;
+  border-top: 1px solid #1e2230;
+  padding-top: 10px;
+  margin-top: 4px !important;
+}
+
+#llm-consent-btns {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+#llm-consent-btns .btn {
+  font-size: .7rem;
+  padding: 8px 16px;
+}
+#llm-consent-no {
+  color: var(--text-secondary, #6b7280);
+}
+#llm-consent-no:hover {
+  color: var(--text-primary, #e8eaf0);
+}
+
+#llm-error-msg {
+  font-size: .68rem;
+  color: #c84040;
+  background: #1a0808;
+  border: 1px solid #3a1010;
+  border-radius: 6px;
+  padding: 10px 12px;
+  max-height: 160px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: 'Space Mono', monospace;
+}
+
+/* ── Disabled ⚙ Similarity button ───────────────────────────────────────── */
+#btn-sim-settings.hf-disabled,
+#btn-sim-settings:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+/* ── HF strategy button locked (HF disabled this session) ───────────────── */
+.sim-strat-btn.hf-locked,
+.sim-strat-btn[disabled] {
+  opacity: 0.38;
+  cursor: not-allowed;
+  pointer-events: none;
+  border-color: transparent;
+  filter: grayscale(0.6);
 }

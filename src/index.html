@@ -139,6 +139,12 @@
     <input id="sim-threshold-range" type="range" min="0.0" max="0.95" step="0.01" value="0.38" />
   </div>
 
+  <!-- ── SIMILARITY METHOD BADGE ── -->
+  <div id="sim-method-badge">
+    <span id="sim-method-icon">⬡</span>
+    <span id="sim-method-label">cosine similarity</span>
+  </div>
+
   <!-- ── STATS ── -->
   <div id="stats">
     <div class="stat-item">
@@ -336,6 +342,50 @@
       <div id="pg-dialog-btns">
         <button id="pg-dialog-cancel" class="btn">Cancel</button>
         <button id="pg-dialog-ok"     class="btn btn-new-paper">OK</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════
+       LLM MODULE CONSENT DIALOG
+       Shown on every launch so the user can choose
+       whether to activate HF embeddings this session.
+  ══════════════════════════════════════════════════ -->
+  <div id="llm-consent-dialog">
+    <div id="llm-consent-panel">
+      <div id="llm-consent-icon">🤖</div>
+      <div id="llm-consent-title">Enable AI Similarity Features?</div>
+      <div id="llm-consent-body">
+        <p>PaperGraph can use a local <strong>HuggingFace sentence-transformer</strong>
+           model to compute semantic similarity between papers.</p>
+        <ul>
+          <li>Runs entirely <strong>on your machine</strong> — no data leaves your device</li>
+          <li>Requires Python 3.8+ on your system PATH</li>
+          <li>First-time setup downloads ~80–440 MB (model dependent)</li>
+          <li>You can change this later in <em>⚙ Similarity Settings</em></li>
+        </ul>
+        <p class="llm-consent-note">
+          Selecting <strong>No</strong> uses the fast built-in cosine similarity engine
+          instead — no Python required. You will be asked again next time you open the app.
+        </p>
+      </div>
+      <div id="llm-consent-btns">
+        <button id="llm-consent-no"  class="btn">No, use built-in engine</button>
+        <button id="llm-consent-yes" class="btn btn-new-paper">Yes, enable AI features</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- LLM setup error dialog -->
+  <div id="llm-error-dialog">
+    <div id="llm-error-panel">
+      <div id="llm-error-title">⚠ AI Setup Failed</div>
+      <div id="llm-error-msg"></div>
+      <p style="font-size:.68rem;color:var(--text-secondary);margin:8px 0 0">
+        AI features have been disabled. You can retry from ⚙ Similarity Settings.
+      </p>
+      <div style="margin-top:16px">
+        <button id="llm-error-ok" class="btn btn-new-paper">OK</button>
       </div>
     </div>
   </div>

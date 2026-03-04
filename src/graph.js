@@ -38,11 +38,35 @@ const tauriListen = (
 // ── Similarity config (loaded from Rust on boot, persisted on change) ─────────
 let _simConfig = getDefaultConfig();
 
+// ── LLM module enable state ───────────────────────────────────────────────────
+// null = not yet checked, true = user opted in, false = user opted out
+let _hfEnabled = null;
+
+/// Apply LLM-enabled state.
+/// The ⚙ Similarity button is always accessible (JS-cosine works without HF).
+/// When disabled, only the HuggingFace strategy option inside the panel is
+/// grayed out — communicated via window.PaperGraph.isHfEnabled().
+function _applyHfEnabled(enabled) {
+  _hfEnabled = enabled;
+  // The ⚙ Similarity button itself stays enabled regardless — the panel
+  // handles HF gating internally via isHfEnabled().
+  const btn = document.getElementById("btn-sim-settings");
+  if (btn) {
+    btn.disabled = false;
+    btn.title    = "Similarity Settings";
+    btn.classList.remove("hf-disabled");
+  }
+}
+
 export async function loadSimConfig() {
   try {
     const saved = await invoke("get_similarity_config");
     if (saved && typeof saved === "object") {
       _simConfig = { ...getDefaultConfig(), ...saved };
+      // Restore the user's previous LLM choice (true/false/null)
+      if (typeof saved.llm_enabled === "boolean") {
+        _hfEnabled = saved.llm_enabled;
+      }
     }
   } catch (e) {
     console.warn("[PaperGraph] Could not load similarity config:", e);
@@ -51,8 +75,22 @@ export async function loadSimConfig() {
 
 export async function saveSimConfig(cfg) {
   _simConfig = { ...getDefaultConfig(), ...cfg };
-  try { await invoke("save_similarity_config", { config: _simConfig }); }
+  try {
+    // Persist llm_enabled alongside the sim config so the choice survives restart
+    await invoke("save_similarity_config", {
+      config: { ..._simConfig, llm_enabled: _hfEnabled }
+    });
+  }
   catch (e) { console.warn("[PaperGraph] Could not save similarity config:", e); }
+}
+
+async function _persistHfEnabled(val) {
+  _hfEnabled = val;
+  try {
+    await invoke("save_similarity_config", {
+      config: { ..._simConfig, llm_enabled: val }
+    });
+  } catch (e) { console.warn("[PaperGraph] Could not persist llm_enabled:", e); }
 }
 
 export function getSimConfig() { return { ..._simConfig }; }
@@ -316,12 +354,111 @@ if (tauriListen) {
   });
 }
 
+// ── LLM consent dialog ───────────────────────────────────────────────────────
+// Shown on every launch so the user can opt in/out of HF embeddings per session.
+// • If the user says Yes and the venv is already ready → start/reuse sidecar.
+// • If the user says Yes and the venv is missing → run full setup with progress UI.
+// • If the user says No → HF strategy is locked; ⚙ Similarity still opens.
+// Returns true if HF was successfully enabled, false otherwise.
+async function _runLlmConsentFlow() {
+  const agreed = await _showLlmConsentDialog();
+  if (!agreed) {
+    await _persistHfEnabled(false);
+    _applyHfEnabled(false);
+    return false;
+  }
+
+  // User said Yes — check whether the venv + sentence-transformers are already
+  // in place so we can skip the (slow) install steps.
+  let venvReady = false;
+  try {
+    const status = await invoke("hf_setup_status");
+    venvReady = status?.ready === true;
+  } catch (_) { /* treat as not ready */ }
+
+  _venvStepsDone.clear();
+  _venvCurrentStep = "";
+  _venvDetail      = "";
+  _pipLog.length   = 0;
+  _renderVenvOverlay();
+
+  try {
+    // hf_setup_venv now:
+    //   • reuses the live sidecar if already running (no-op fast path)
+    //   • re-launches if venv is ready but sidecar is dead/missing
+    //   • runs full ensure_venv + spawn if venv was absent
+    // In all cases the handle is stored in AppState — no orphaned processes.
+    await invoke("hf_setup_venv");
+    // overlay hides via the venv://progress "done" event
+    await _persistHfEnabled(true);
+    _applyHfEnabled(true);
+    return true;
+  } catch (err) {
+    hideOverlay();
+    await _showLlmErrorDialog(String(err));
+    await _persistHfEnabled(false);
+    _applyHfEnabled(false);
+    return false;
+  }
+}
+
+function _showLlmConsentDialog() {
+  return new Promise(resolve => {
+    const dlg = document.getElementById("llm-consent-dialog");
+    if (!dlg) { resolve(false); return; }
+    dlg.classList.add("open");
+    const yes = document.getElementById("llm-consent-yes");
+    const no  = document.getElementById("llm-consent-no");
+    function close(r) {
+      dlg.classList.remove("open");
+      yes.removeEventListener("click", onYes);
+      no.removeEventListener("click",  onNo);
+      resolve(r);
+    }
+    const onYes = () => close(true);
+    const onNo  = () => close(false);
+    yes.addEventListener("click", onYes);
+    no.addEventListener("click",  onNo);
+  });
+}
+
+function _showLlmErrorDialog(msg) {
+  return new Promise(resolve => {
+    const dlg = document.getElementById("llm-error-dialog");
+    if (!dlg) { resolve(); return; }
+    const msgEl = document.getElementById("llm-error-msg");
+    if (msgEl) msgEl.textContent = msg;
+    dlg.classList.add("open");
+    const btn = document.getElementById("llm-error-ok");
+    function close() {
+      dlg.classList.remove("open");
+      btn.removeEventListener("click", close);
+      resolve();
+    }
+    btn.addEventListener("click", close);
+  });
+}
+
 // ── Startup load ──────────────────────────────────────────────────────────────
 async function loadFromDB() {
   showOverlay("Opening database…");
   try {
     // Load similarity config first so compute uses user's settings
     await loadSimConfig();
+
+    // ── LLM module consent ──────────────────────────────────────────────────
+    // Ask on every launch whether the user wants HF active this session.
+    // If the venv is already set up, saying Yes just enables it immediately
+    // with no download/install step. Saying No keeps the ⚙ Similarity panel
+    // accessible but locks the HuggingFace strategy option.
+    try {
+      hideOverlay();
+      await _runLlmConsentFlow();
+      showOverlay("Opening database…");
+    } catch (e) {
+      console.warn("[PaperGraph] LLM consent flow failed:", e);
+      _applyHfEnabled(false);
+    }
 
     showOverlay("Loading papers…");
     setPapersCache((await invoke("get_papers")).map(adaptPaper));
@@ -352,15 +489,53 @@ async function loadFromDB() {
 
 // ── Edge recomputation (full rebuild) ─────────────────────────────────────────
 export async function triggerEdgeRecompute() {
-  // Refresh vocab in case new tags were added since last load
+  // Refresh tag vocabulary in case new hashtags were added since last load.
   const dbTags = await invoke("get_hashtags");
   setTagVocab(dbTags);
-  console.log("Edge Recompute");
-  const computed = await computeEdges(getPapersCache(), _simConfig);
-  await invoke("recompute_edges", { edges: computed });
+
+  if (_hfEnabled && _simConfig.strategy === "hf-embeddings") {
+    // ── HF two-step recompute ──────────────────────────────────────────────
+    // // Step 1: Re-encode all papers unconditionally → write raw field_vectors
+    // //         to each paper's embedding.json.  Always done on every recompute
+    // //         so the stored vectors reflect current paper content.
+    // showOverlay("Re-encoding papers (step 1/2)…");
+    const embCfg = {
+      model:   _simConfig.model   ?? "sentence-transformers/all-MiniLM-L6-v2",
+      fields:  _simConfig.fields  ?? ["title", "abstract", "hashtags"],
+      weights: _simConfig.weights ?? {},
+    };
+    // await invoke("hf_compute_all_embeddings", { config: embCfg });
+
+    // Step 2: Load field_vectors from JSON, apply current weights in Rust,
+    //         compute cosine similarity — zero Python in this step.
+    showOverlay("Computing similarity edges (step 2/2)…");
+    console.log("triggerEdgeRecompute : ", getPapersCache());
+    const papers = getPapersCache().map(p => ({
+      id: p.id, title: p.title, venue: p.venue, year: p.year,
+      hashtags: p.hashtags, notes: p.notes, attributes: p.attributes,
+    }));
+    console.log("papers : ", papers);
+    const edgeRes = await invoke("hf_compute_edges_from_cache", {
+      papers,
+      config: {
+        ...embCfg,
+        threshold: _simConfig.threshold ?? 0.30,
+        max_edges: _simConfig.max_edges ?? 7,
+      },
+    });
+    console.log(edgeRes);
+    const computed = edgeRes.edges ?? [];
+    await invoke("recompute_edges", { edges: computed });
+  } else {
+    // ── JS-cosine strategy ─────────────────────────────────────────────────
+    const computed = await computeEdges(getPapersCache(), _simConfig);
+    await invoke("recompute_edges", { edges: computed });
+  }
+
   const fresh = await invoke("get_edges");
   setEdgesCache(fresh.map(adaptEdge));
   rebuildEdgeRefs();
+  hideOverlay();
   document.getElementById("stat-connections").textContent = getEdgesCache().length;
 }
 
@@ -1086,6 +1261,20 @@ document.getElementById("npm-submit-btn").addEventListener("click", async () => 
     // 1. Persist to SQLite — returns the new integer id
     const newId = await invoke("add_paper", { paper: newPaper });
 
+    // 1b. Auto-compute embedding if HF module is enabled
+    if (_hfEnabled && _simConfig.strategy === "hf-embeddings") {
+      statusEl.textContent = "Computing embedding…";
+      try {
+        await invoke("hf_compute_paper_embedding", {
+          paperId: newId,
+          config:  _simConfig,
+        });
+      } catch (embErr) {
+        // Non-fatal: log the error but continue adding the paper
+        console.warn("[PaperGraph] Auto-embed failed:", embErr);
+      }
+    }
+
     // 2. Compute similarity edges for this new paper
     statusEl.textContent = "Computing edges…";
     const existingPapers = getPapersCache();
@@ -1185,4 +1374,6 @@ window.PaperGraph = {
   saveSimConfig,
   triggerEdgeRecompute,
   reloadGraph,
+  isHfEnabled: () => _hfEnabled,
+  enableHf:    () => _runLlmConsentFlow(),
 };

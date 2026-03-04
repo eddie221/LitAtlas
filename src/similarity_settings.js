@@ -1,4 +1,7 @@
 "use strict";
+
+import { getDefaultConfig } from "./similarity.js";
+
 /**
  * similarity_settings.js
  *
@@ -81,14 +84,15 @@ async function _checkModelCached(modelId) {
 
 // ── Main render ───────────────────────────────────────────────────────────────
 async function renderSettings(panel) {
-  const cfg   = _getSimConfig();
-  const isHF  = cfg.strategy === "hf-embeddings";
+  const cfg    = _getSimConfig();
+  const isHF   = cfg.strategy === "hf-embeddings";
+  const hfOk   = window.PaperGraph?.isHfEnabled?.() === true;
   let   models = _BUILTIN_MODELS;
 
   const body = panel.querySelector("#sim-settings-body");
   if (!body) return;
-  body.innerHTML = buildHTML(cfg, models, isHF);
-  wireEvents(panel, cfg, models);
+  body.innerHTML = buildHTML(cfg, models, isHF, hfOk);
+  wireEvents(panel, cfg, models, hfOk);
 
   // Check cache for the currently selected model.
   if (isHF) {
@@ -116,32 +120,13 @@ async function renderSettings(panel) {
 }
 
 // ── HTML builder ──────────────────────────────────────────────────────────────
-function buildHTML(cfg, models, isHF) {
+function buildHTML(cfg, models, isHF, hfOk) {
   const weights   = cfg.weights ?? {};
   const selFields = new Set(cfg.fields ?? ["title","abstract","hashtags"]);
 
   const modelOptions = models.map(m =>
     `<option value="${m.id}" ${m.id===cfg.model?"selected":""}>${m.label}</option>`
   ).join("");
-
-  // checkbox available
-  // const fieldRows = FIELDS.map(f => {
-  //   const w     = weights[f.key] ?? f.defaultWeight;
-  //   const check = selFields.has(f.key) ? "checked" : "";
-  //   return `
-  //     <div class="sim-field-row" data-field="${f.key}">
-  //       <label class="sim-field-label">
-  //         <input type="checkbox" class="sim-field-check" data-field="${f.key}" ${check}>
-  //         <span>${f.label}</span>
-  //       </label>
-  //       <div class="sim-weight-wrap ${!selFields.has(f.key) ? "disabled" : ""}">
-  //         <input type="range" class="sim-weight-range" data-field="${f.key}"
-  //                min="0.0" max="1" step="0.01" value="${w}"
-  //                ${!selFields.has(f.key) ? "disabled" : ""}>
-  //         <span class="sim-weight-val" data-field="${f.key}">${w.toFixed(1)}</span>
-  //       </div>
-  //     </div>`;
-  // }).join("");
 
   // checkbox available
   const fieldRows = FIELDS.map(f => {
@@ -156,11 +141,30 @@ function buildHTML(cfg, models, isHF) {
         <div class="sim-weight-wrap ${!selFields.has(f.key) ? "disabled" : ""}">
           <input type="range" class="sim-weight-range" data-field="${f.key}"
                  min="0.0" max="1" step="0.01" value="${w}"
-                 disabled >
+                 ${!selFields.has(f.key) ? "disabled" : ""}>
           <span class="sim-weight-val" data-field="${f.key}">${w.toFixed(1)}</span>
         </div>
       </div>`;
   }).join("");
+
+  // checkbox available
+  // const fieldRows = FIELDS.map(f => {
+  //   const w     = weights[f.key] ?? f.defaultWeight;
+  //   const check = selFields.has(f.key) ? "checked" : "";
+  //   return `
+  //     <div class="sim-field-row" data-field="${f.key}">
+  //       <label class="sim-field-label">
+  //         <input type="checkbox" class="sim-field-check" data-field="${f.key}" ${check}>
+  //         <span>${f.label}</span>
+  //       </label>
+  //       <div class="sim-weight-wrap ${!selFields.has(f.key) ? "disabled" : ""}">
+  //         <input type="range" class="sim-weight-range" data-field="${f.key}"
+  //                min="0.0" max="1" step="0.01" value="${w}"
+  //                disabled >
+  //         <span class="sim-weight-val" data-field="${f.key}">${w.toFixed(1)}</span>
+  //       </div>
+  //     </div>`;
+  // }).join("");
 
   return `
     <!-- Strategy toggle -->
@@ -170,15 +174,17 @@ function buildHTML(cfg, models, isHF) {
         <button class="sim-strat-btn ${!isHF?"active":""}" data-strat="js-cosine">
           <span class="sim-strat-icon">⚡</span>
           <div>
-            <div class="sim-strat-name">JS Cosine</div>
-            <div class="sim-strat-desc">Fast · No setup · Year/venue/tags</div>
+            <div class="sim-strat-name">Attributed Cosine</div>
+            <div class="sim-strat-desc">Fast · No setup · Hashtags</div>
           </div>
         </button>
-        <button class="sim-strat-btn ${isHF?"active":""}" data-strat="hf-embeddings">
-          <span class="sim-strat-icon">🤗</span>
+        <button class="sim-strat-btn ${isHF&&hfOk?"active":""} ${!hfOk?"hf-locked":""}"
+                data-strat="hf-embeddings"
+                ${!hfOk?'disabled title="AI features are disabled for this session — restart the app to enable"':''}>
+          <span class="sim-strat-icon">😎</span>
           <div>
-            <div class="sim-strat-name">HuggingFace</div>
-            <div class="sim-strat-desc">Deep embeddings · Requires Python</div>
+            <div class="sim-strat-name">MLLM Model</div>
+            <div class="sim-strat-desc">${hfOk?"Deep embeddings · Requires Python":"Disabled this session · Restart to enable"}</div>
           </div>
         </button>
       </div>
@@ -417,7 +423,7 @@ async function _startEmbeddingCache(body, cfg) {
   try {
     const config = {
       model:   cfg.model   ?? "sentence-transformers/all-MiniLM-L6-v2",
-      fields:  cfg.fields  ?? ["title", "abstract", "hashtags"],
+      fields:  getDefaultConfig().fields,
       weights: cfg.weights ?? {},
     };
     const result = await invoke("hf_compute_all_embeddings", { config });
@@ -452,14 +458,15 @@ async function _startEmbeddingCache(body, cfg) {
 }
 
 
-function wireEvents(panel, initialCfg, models) {
+function wireEvents(panel, initialCfg, models, hfOk) {
   const body = panel.querySelector("#sim-settings-body");
   if (!body) return;
   const cfg = { ...initialCfg };
 
-  // Strategy toggle
+  // Strategy toggle — HF button is a no-op when HF is disabled this session
   body.querySelectorAll(".sim-strat-btn").forEach(btn => {
     btn.addEventListener("click", () => {
+      if (btn.disabled) return; // HF locked
       cfg.strategy = btn.dataset.strat;
       body.querySelectorAll(".sim-strat-btn").forEach(b =>
         b.classList.toggle("active", b.dataset.strat === cfg.strategy));
