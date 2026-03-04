@@ -4,6 +4,7 @@ mod db;
 mod commands;
 
 use commands::*;
+use commands::PySidecar;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::Manager;
@@ -16,6 +17,9 @@ pub struct AppState {
     pub projects_dir: PathBuf,
     pub current_slug: Mutex<String>,
     pub data_dir:     PathBuf,
+    /// Live Python sidecar process.  None = not yet started (lazy init).
+    /// Rust owns the full lifecycle — JS never talks to Python directly.
+    pub sidecar:      Mutex<Option<PySidecar>>,
 }
 
 impl AppState {
@@ -31,9 +35,34 @@ impl AppState {
     pub fn projects_json(&self) -> PathBuf {
         self.data_dir.join("projects.json")
     }
+    /// Directory for the isolated Python venv used by the similarity sidecar.
+    /// Created automatically on the first hf_* call via ensure_venv().
+    /// Safe to delete — the app recreates it on next launch.
+    pub fn venv_dir(&self) -> PathBuf {
+        self.data_dir.join("similarity_venv")
+    }
+    /// Absolute path to similarity_server.py.
+    ///
+    /// Resolution order:
+    ///   1. app_data_dir/similarity_server.py  (bundled release copy)
+    ///   2. <workspace_root>/similarity_server.py  (dev — next to src-tauri/)
+    pub fn sidecar_script(&self) -> String {
+        // 1. Bundled location (production)
+        // println!("Bundled {}", self.data_dir.display());
+        let bundled = self.data_dir.join("similarity_server.py");
+        if bundled.exists() {
+            return bundled.to_string_lossy().into_owned();
+        }
+        // 2. Dev location: two directories up from src-tauri/src/ == workspace root
+        // println!(env!("CARGO_MANIFEST_DIR"));
+        let dev = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/similarity_server.py");
+        // println!("Dev {}", dev.display());
+        dev.to_string_lossy().into_owned()
+    }
 }
 
-// ── Seed + open helpers ───────────────────────────────────────────────────────
+// ── DB helpers ────────────────────────────────────────────────────────────────
 
 fn seed_db(pool: &SqlitePool) {
     let needs_seed = tauri::async_runtime::block_on(async {
@@ -52,6 +81,7 @@ fn seed_db(pool: &SqlitePool) {
                 .collect::<Vec<_>>().join("\n");
             let stmt = stmt.trim();
             if stmt.is_empty() { continue; }
+            println!("{}", stmt);
             if let Err(e) = sqlx::query(stmt).execute(pool).await {
                 eprintln!("[PaperGraph] seed: {e}");
             }
@@ -83,27 +113,28 @@ pub fn run() {
             let projects_dir = data_dir.join("projects");
             std::fs::create_dir_all(&projects_dir).unwrap();
 
-            // Bootstrap projects.json if missing
+            // Bootstrap projects.json on first launch
             let projects_json = data_dir.join("projects.json");
             if !projects_json.exists() {
                 let ts = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default().as_secs();
                 let init = serde_json::json!([{
-                    "id":"default","name":"Default",
-                    "slug":"default","created_at": ts
+                    "id": "default", "name": "Default",
+                    "slug": "default", "created_at": ts
                 }]);
                 std::fs::write(&projects_json,
                     serde_json::to_string_pretty(&init).unwrap()).unwrap();
             }
 
-            // Load first project
+            // Open first project
             let raw = std::fs::read_to_string(&projects_json).unwrap_or("[]".into());
             let projects: Vec<serde_json::Value> =
                 serde_json::from_str(&raw).unwrap_or_default();
             let first_slug = projects.first()
                 .and_then(|p| p["slug"].as_str())
-                .unwrap_or("default").to_string();
+                .unwrap_or("default")
+                .to_string();
 
             let pool = open_project(&projects_dir, &first_slug);
 
@@ -112,21 +143,36 @@ pub fn run() {
                 projects_dir,
                 current_slug: Mutex::new(first_slug),
                 data_dir,
+                sidecar:      Mutex::new(None), // started lazily on first hf_* call
             });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            // Papers
             get_papers, get_paper, add_paper, delete_paper,
             update_paper_core, save_notes, save_pdf_path,
+            // Authors / tags / attributes
             set_authors,
             get_hashtags, set_tags,
             set_attributes, upsert_attribute, delete_attribute,
+            // Relations
             get_relations, get_all_relations, add_relation,
             update_relation_note, delete_relation,
+            // Similarity edges (JS-cosine results committed here)
             get_edges, recompute_edges, append_edges,
+            // PDF
             copy_pdf, get_pdf_url, store_pdf_bytes, read_pdf_bytes,
+            // Projects
             list_projects, create_project, rename_project,
             delete_project, switch_project, get_current_project,
+            // HuggingFace similarity (Rust owns Python sidecar)
+            hf_compute_similarity, hf_list_models, hf_sidecar_status,
+            hf_check_model, hf_download_model,
+            hf_compute_paper_embedding, hf_get_paper_embedding, hf_compute_all_embeddings,
+            hf_compute_edges_from_cache,
+            hf_setup_status, hf_setup_venv,
+            // Similarity config persistence
+            get_similarity_config, save_similarity_config,
         ])
         .run(tauri::generate_context!())
         .expect("error while running PaperGraph");

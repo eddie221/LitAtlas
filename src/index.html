@@ -42,6 +42,7 @@
       <button class="btn" id="btn-radial">Radial</button>
       <button class="btn" id="btn-reset">Reset</button>
       <button class="btn btn-new-paper" id="btn-new-paper">+ New Paper</button>
+      <button class="btn" id="btn-sim-settings" title="Similarity Settings">⚙ Similarity</button>
     </div>
   </header>
 
@@ -126,6 +127,7 @@
   <div id="tooltip">
     <div class="t-title" id="tt-title"></div>
     <div class="t-year"  id="tt-year"></div>
+    <div class="t-tag"  id="tt-tag"></div>
   </div>
 
   <!-- ── SIMILARITY THRESHOLD ── -->
@@ -134,7 +136,13 @@
       <span>Similarity</span>
       <span id="sim-threshold-value">0.38</span>
     </div>
-    <input id="sim-threshold-range" type="range" min="0.1" max="0.95" step="0.01" value="0.38" />
+    <input id="sim-threshold-range" type="range" min="0.0" max="0.95" step="0.01" value="0.38" />
+  </div>
+
+  <!-- ── SIMILARITY METHOD BADGE ── -->
+  <div id="sim-method-badge">
+    <span id="sim-method-icon">⬡</span>
+    <span id="sim-method-label">cosine similarity</span>
   </div>
 
   <!-- ── STATS ── -->
@@ -247,6 +255,25 @@
   </div>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/9.1.6/marked.min.js"></script>
+
+  <!-- ══════════════════════════════════════════════════
+       SIMILARITY SETTINGS PANEL
+  ══════════════════════════════════════════════════ -->
+  <div id="sim-settings-backdrop"></div>
+  <div id="sim-settings-panel">
+    <div id="sim-settings-header">
+      <div id="sim-settings-title">
+        <span style="font-family:'DM Serif Display',serif;font-size:1.1rem">Similarity Settings</span>
+        <span style="font-size:.65rem;color:var(--text-secondary);margin-left:8px">How paper edges are computed</span>
+      </div>
+      <button id="sim-settings-close">✕</button>
+    </div>
+    <div id="sim-settings-body">
+      <!-- rendered by similarity-settings.js -->
+    </div>
+  </div>
+
+  <script src="similarity_settings.js" type="module" defer></script>
   <script src="graph.js" type="module" defer></script>
   <script src="paper-page.js" type="module" defer></script>
   <script src="projects.js" type="module" defer></script> 
@@ -315,6 +342,50 @@
       <div id="pg-dialog-btns">
         <button id="pg-dialog-cancel" class="btn">Cancel</button>
         <button id="pg-dialog-ok"     class="btn btn-new-paper">OK</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════
+       LLM MODULE CONSENT DIALOG
+       Shown on every launch so the user can choose
+       whether to activate HF embeddings this session.
+  ══════════════════════════════════════════════════ -->
+  <div id="llm-consent-dialog">
+    <div id="llm-consent-panel">
+      <div id="llm-consent-icon">🤖</div>
+      <div id="llm-consent-title">Enable AI Similarity Features?</div>
+      <div id="llm-consent-body">
+        <p>PaperGraph can use a local <strong>HuggingFace sentence-transformer</strong>
+           model to compute semantic similarity between papers.</p>
+        <ul>
+          <li>Runs entirely <strong>on your machine</strong> — no data leaves your device</li>
+          <li>Requires Python 3.8+ on your system PATH</li>
+          <li>First-time setup downloads ~80–440 MB (model dependent)</li>
+          <li>You can change this later in <em>⚙ Similarity Settings</em></li>
+        </ul>
+        <p class="llm-consent-note">
+          Selecting <strong>No</strong> uses the fast built-in cosine similarity engine
+          instead — no Python required. You will be asked again next time you open the app.
+        </p>
+      </div>
+      <div id="llm-consent-btns">
+        <button id="llm-consent-no"  class="btn">No, use built-in engine</button>
+        <button id="llm-consent-yes" class="btn btn-new-paper">Yes, enable AI features</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- LLM setup error dialog -->
+  <div id="llm-error-dialog">
+    <div id="llm-error-panel">
+      <div id="llm-error-title">⚠ AI Setup Failed</div>
+      <div id="llm-error-msg"></div>
+      <p style="font-size:.68rem;color:var(--text-secondary);margin:8px 0 0">
+        AI features have been disabled. You can retry from ⚙ Similarity Settings.
+      </p>
+      <div style="margin-top:16px">
+        <button id="llm-error-ok" class="btn btn-new-paper">OK</button>
       </div>
     </div>
   </div>

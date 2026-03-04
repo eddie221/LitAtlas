@@ -14,13 +14,36 @@
 
 import { colorForPaper, groupForPaper } from "./constant.js";
 import { getPapersCache, getEdgesCache, setCurrentPaperCache, setCurrentConnectedCache, getCurrentPaperCache, state } from "./cache.js";
-import { triggerEdgeRecompute, deselectNode, selectNode, refreshPaper, getConnected, attr, loadPdfIntoIframe } from "./graph.js";
+import { triggerEdgeRecompute, deselectNode, selectNode, refreshPaper, recomputeEdgesForPaper, getConnected, attr, loadPdfIntoIframe } from "./graph.js";
+import { getEmbeddingConfig } from "./similarity.js";
 
 const invoke = (
   window.__TAURI__?.core?.invoke ??
   window.__TAURI__?.tauri?.invoke ??
   (() => { throw new Error("Tauri not found"); })
 );
+
+// ── Embedding helpers ─────────────────────────────────────────────────────────
+
+/**
+ * Compute and cache the HF embedding for a single paper in the background.
+ * Uses the current similarity config from window.PaperGraph if available,
+ * falling back to sensible defaults.
+ *
+ * The embedding is saved next to the PDF as embedding.json and will be used
+ * automatically by hf_compute_similarity to skip re-encoding.
+ */
+async function _triggerPaperEmbedding(paperId) {
+  const cfg = window.PaperGraph?.getSimConfig?.() ?? {};
+  // Only bother if HF strategy is in use — no-op for js-cosine
+  if (cfg.strategy !== "hf-embeddings") return;
+  const config = {
+    model:   cfg.model   ?? "sentence-transformers/all-MiniLM-L6-v2",
+    fields:  cfg.fields  ?? ["title", "abstract", "hashtags"],
+    weights: cfg.weights ?? {},
+  };
+  await invoke("hf_compute_paper_embedding", { paperId, config });
+}
 
 // ── Custom dialog helpers ─────────────────────────────────────────────────────
 // Tauri v2 blocks window.confirm / window.alert (always returns false / no-op).
@@ -67,11 +90,6 @@ function pgConfirm(message, title) {
 function pgAlert(message, title) {
   return pgDialog(title || "Notice", message, false);
 }
-
-// ── PDF blob loader ───────────────────────────────────────────────────────────
-// Reads PDF bytes via Rust (avoids asset:// protocol issues in Tauri v2) and
-// sets the iframe src to a local blob URL.
-let _ppPdfBlobUrl = null;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 let _saveTimer = null;
@@ -294,6 +312,17 @@ function renderInfoTab(paper) {
       await invoke("set_tags",          { id: paper.id, tags: hashtags });
       await invoke("set_attributes",    { id: paper.id, attributes });
 
+      // compute new embedding for modification 
+      try {
+        await invoke("hf_compute_paper_embedding", {
+          paperId: paper.id,
+          config:  getEmbeddingConfig(),
+        });
+      } catch (embErr) {
+        // Non-fatal: log the error but continue adding the paper
+        console.warn("[PaperGraph] Auto-embed failed:", embErr);
+      }
+
       // Update in-memory paper
       await refreshPaper(paper.id);
       const cached = getPapersCache().find(p => p.id === paper.id);
@@ -302,6 +331,14 @@ function renderInfoTab(paper) {
         // Refresh sidebar header badge
         document.getElementById("pp-topic-badge").textContent = groupForPaper(paper);
         document.getElementById("pp-topic-badge").style.color = colorForPaper(paper);
+      }
+
+      // Recompute edges between this paper and all others
+      setStatus("pp-info-status", "Updating edges…", "var(--text-secondary)");
+      try {
+        await recomputeEdgesForPaper(paper.id);
+      } catch (edgeErr) {
+        console.warn("[PaperPage] Edge recompute failed:", edgeErr);
       }
 
       setStatus("pp-info-status", "✓ Saved");
@@ -513,6 +550,13 @@ async function handlePdfPick(file, paper, dropzone, viewer, iframe, nameEl, stat
       statusEl.textContent = `✓ ${storedPath.split(/[/\\]/).pop()}`;
       statusEl.style.color = "var(--accent)";
     }
+
+    // Fire-and-forget: pre-compute and cache the embedding for this paper now
+    // that we know its storage directory exists.  This runs in the background
+    // and does not block the PDF display.  Errors are logged only.
+    _triggerPaperEmbedding(paper.id).catch(e =>
+      console.warn("[PaperPage] background embedding failed:", e)
+    );
   } catch (err) {
     console.error("[PaperPage] store_pdf_bytes failed:", err);
     // Last-resort fallback: just remember the original filename so the
@@ -595,7 +639,7 @@ function renderConnectionsTab(connected) {
 
 async function delectPaper() {
   const paper = getCurrentPaperCache();
-    console.log(paper);
+    console.log("delete : ", paper);
     if (!paper) return;
     if (!await pgConfirm(`Permanently delete "${paper.title}"?\n\nThis cannot be undone.`, "Delete Paper")) return;
 

@@ -1122,100 +1122,32 @@ fn read_embedding_cache(path: &std::path::Path) -> Option<serde_json::Value> {
     serde_json::from_str(&raw).ok()
 }
 
-/// Check whether a cached embedding is reusable for the given model+fields.
-///
-/// Weights are intentionally NOT compared here — the cache stores raw per-field
-/// vectors so that reweighting can be done locally in Rust without re-encoding.
-/// Only a model or field-set change requires re-encoding from Python.
 fn embedding_cache_matches(
-    cache:  &serde_json::Value,
-    model:  &str,
-    fields: &[String],
+    cache:   &serde_json::Value,
+    model:   &str,
+    fields:  &[String],
+    weights: &serde_json::Value,
 ) -> bool {
+    // Model and field list must match exactly.
     if cache["model"].as_str() != Some(model) { return false; }
     let cached_fields: Vec<String> = cache["fields"]
         .as_array()
         .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
         .unwrap_or_default();
-    // println!("cached_field : {:?}", cached_fields);
-    // println!("fields : {:?}", fields);
-    cached_fields == fields
+    if cached_fields != fields { return false; }
+
+    // Weights must also match — different weights produce a different vector.
+    // We compare the serialised JSON strings for simplicity; both sides are
+    // produced by serde_json so key order is deterministic within a version.
+    let cached_w = cache["weights"].to_string();
+    let current_w = weights.to_string();
+    cached_w == current_w
 }
 
-/// Check whether a cached embedding is reusable for the given model+fields.
+/// Compute and persist the embedding vector for a single paper.
 ///
-/// Weights are intentionally NOT compared here — the cache stores raw per-field
-/// vectors so that reweighting can be done locally in Rust without re-encoding.
-/// Only a model or field-set change requires re-encoding from Python.
-fn embedding_cache_in_matches(
-    cache:  &serde_json::Value,
-    model:  &str,
-    fields: &[String],
-) -> bool {
-    if cache["model"].as_str() != Some(model) { return false; }
-    let cached_fields: Vec<String> = cache["fields"]
-        .as_array()
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-        .unwrap_or_default();
-    // println!("cached_field : {:?}", cached_fields);
-    // println!("fields : {:?}", fields);
-    for field in fields{
-        if !cached_fields.contains(field){
-            return false;
-        }
-    }
-    return true;
-}
-
-/// Recompose a weighted composite vector from raw per-field vectors and
-/// current weights, then L2-normalise it.
-///
-/// field_vectors: { "title": [f32...], "abstract": [f32...], ... }
-/// weights:       { "title": 0.7, "abstract": 1.0, ... }  (missing key → 1.0)
-///
-/// Returns None if field_vectors is empty or malformed.
-fn recompose_embedding(
-    field_vectors: &serde_json::Value,
-    fields:        &[String],
-    weights:       &serde_json::Value,
-) -> Option<Vec<f64>> {
-    let fv_map = field_vectors.as_object()?;
-    let mut composite: Vec<f64> = Vec::new();
-    let mut any = false;
-    // println!("fv_map {:?}", fv_map);
-    for field in fields {
-        let vec_val = match fv_map.get(field) { Some(v) => v, None => continue };
-        let arr = match vec_val.as_array() { Some(a) => a, None => continue };
-        let w = weights.get(field)
-            .and_then(|v| v.as_f64())
-            .unwrap_or(1.0);
-        if w == 0.0 { continue; }
-
-        if composite.is_empty() {
-            composite = vec![0.0; arr.len()];
-        }
-        for (k, v) in arr.iter().enumerate() {
-            composite[k] += w * v.as_f64().unwrap_or(0.0);
-        }
-        any = true;
-    }
-
-    if !any || composite.is_empty() { return None; }
-
-    // L2-normalise
-    let norm: f64 = composite.iter().map(|x| x * x).sum::<f64>().sqrt();
-    if norm > 0.0 {
-        for x in &mut composite { *x /= norm; }
-    }
-    Some(composite)
-}
-
-/// Compute and persist the raw per-field embedding vectors for a single paper.
-///
-/// The JSON cache stores only model, fields, and field_vectors — no weights
-/// and no composite vector.  This means the cache stays valid whenever only
-/// the weights change; the composite is recomposed from field_vectors at query
-/// time using the current weights (see inject_cached_embeddings).
+/// The vector is saved as embedding.json next to the PDF (or in a fallback
+/// embeddings/ directory if no PDF has been uploaded yet).
 ///
 /// Called from JS as: invoke("hf_compute_paper_embedding", { paperId, config })
 ///
@@ -1241,12 +1173,20 @@ pub fn hf_compute_paper_embedding(
     let mut guard = ensure_running(&s, &app)?;
     let result = guard.as_mut().unwrap()
         .call("compute_embedding", serde_json::json!({ "paper": paper, "config": config }))?;
-    drop(guard);
 
-    // Python returns { field_vectors: { "<field>": [f32, ...], ... }, dim: int }
+    // Python now returns { field_vectors: {...}, vector: [...], dim: int }
     let field_vectors = result.get("field_vectors").cloned()
         .unwrap_or(serde_json::Value::Object(Default::default()));
-    let dim = result["dim"].as_u64().unwrap_or(0);
+    let vector = result["vector"].clone();
+    let dim    = result["dim"].as_u64().unwrap_or(0);
+
+    // Persist to embedding.json
+    let path = embedding_path_for_paper(&s, paper_id);
+    // Ensure parent directory exists (for the fallback path)
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Cannot create embedding dir: {e}"))?;
+    }
 
     let model  = config["model"].as_str().unwrap_or("sentence-transformers/all-MiniLM-L6-v2");
     let fields: Vec<String> = config["fields"]
@@ -1254,17 +1194,16 @@ pub fn hf_compute_paper_embedding(
         .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
         .unwrap_or_else(|| vec!["title".into(), "abstract".into(), "hashtags".into()]);
 
-    // Persist — weights intentionally excluded so cache survives weight changes.
-    let path = embedding_path_for_paper(&s, paper_id);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("Cannot create embedding dir: {e}"))?;
-    }
+    let weights_val = config.get("weights").cloned()
+        .unwrap_or(serde_json::Value::Object(Default::default()));
+
+    // Store per-field vectors so weight changes can be recomposed locally
     let payload = serde_json::json!({
         "model":         model,
         "fields":        fields,
-        "field_vectors": field_vectors,
-        // NOTE: no "weights" key, no "vector" key — composite recomposed at query time.
+        "weights":       weights_val,
+        "field_vectors": field_vectors,   // { "title": [...], "abstract": [...], ... }
+        "vector":        vector,          // composite = weighted_sum(field_vectors), L2-normed
     });
     std::fs::write(&path, serde_json::to_string(&payload).map_err(|e| e.to_string())?)
         .map_err(|e| format!("Cannot write embedding: {e}"))?;
@@ -1277,13 +1216,11 @@ pub fn hf_compute_paper_embedding(
     }))
 }
 
-/// Read cached raw per-field embedding vectors for a paper.
-///
-/// Returns field_vectors if model+fields match; the caller recomposes the
-/// weighted composite using the current weights.
+/// Read a cached embedding vector for a paper, if it exists and matches the
+/// current model+fields config.
 ///
 /// Called from JS as: invoke("hf_get_paper_embedding", { paperId, config })
-/// Returns: { field_vectors: {...}, dim: number, hit: true } | { hit: false }
+/// Returns: { vector: f32[], dim: number, hit: bool }
 #[tauri::command]
 pub fn hf_get_paper_embedding(
     s:        State<'_, AppState>,
@@ -1297,31 +1234,26 @@ pub fn hf_get_paper_embedding(
         .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
         .unwrap_or_default();
 
+    let weights = config.get("weights").cloned().unwrap_or(serde_json::Value::Object(Default::default()));
     if let Some(cache) = read_embedding_cache(&path) {
-        if embedding_cache_matches(&cache, model, &fields) {
-            let field_vectors = cache["field_vectors"].clone();
-            let dim = field_vectors.as_object()
-                .and_then(|m| m.values().next())
-                .and_then(|v| v.as_array())
-                .map(|a| a.len())
-                .unwrap_or(0);
-            return Ok(serde_json::json!({ "field_vectors": field_vectors, "dim": dim, "hit": true }));
+        if embedding_cache_matches(&cache, model, &fields, &weights) {
+            let vector = cache["vector"].clone();
+            let dim    = vector.as_array().map(|a| a.len()).unwrap_or(0);
+            return Ok(serde_json::json!({ "vector": vector, "dim": dim, "hit": true }));
         }
     }
     Ok(serde_json::json!({ "hit": false }))
 }
 
-/// Re-encode every paper in the current project unconditionally.
+/// Compute (or skip) embeddings for every paper in the current project,
+/// emitting "embedding://progress" events as each paper completes.
 ///
-/// Called when the user presses "Recompute Graph" — always writes fresh
-/// field_vectors for every paper regardless of any existing cache.  This
-/// guarantees that the stored raw vectors are up-to-date before
-/// hf_compute_edges_from_cache recomposes them with the current weights.
-///
-/// Progress events: { paper_id, title, index, total, done? }
+/// Papers whose embedding.json already matches model+fields are skipped.
 ///
 /// Called from JS as: invoke("hf_compute_all_embeddings", { config })
-/// Returns: { total, computed }
+/// Returns: { total, computed, skipped }
+///
+/// Progress events: { paper_id, title, index, total, skipped: bool }
 #[tauri::command]
 pub fn hf_compute_all_embeddings(
     app:    tauri::AppHandle,
@@ -1335,27 +1267,38 @@ pub fn hf_compute_all_embeddings(
         .as_array()
         .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
         .unwrap_or_else(|| vec!["title".into(), "abstract".into(), "hashtags".into()]);
-    
-    // Load all papers from DB.
+
+    // Load all papers
     let papers: Vec<crate::db::PaperFull> = {
         let pool = s.pool();
         tauri::async_runtime::block_on(crate::db::get_all_papers(&pool))
             .map_err(|e| e.to_string())?
     };
 
-    let total        = papers.len();
+    let total    = papers.len();
     let mut computed = 0usize;
-
+    let mut skipped  = 0usize;
+    
     for (index, paper) in papers.iter().enumerate() {
-        // Emit per-paper progress so the UI can show a progress bar.
-        let _ = app.emit("embedding://progress", serde_json::json!({
-            "paper_id": paper.id,
-            "title":    &paper.title,
-            "index":    index,
-            "total":    total,
-        }));
+        let path: std::path::PathBuf = embedding_path_for_paper(&s, paper.id);
 
-        // Always re-encode — no cache skip on full recompute.
+        // Check if cache is still valid
+        // let needs_compute = match read_embedding_cache(&path) {
+        //     Some(cache) => !embedding_cache_matches(&cache, &model, &fields),
+        //     None        => true,
+        // };
+
+        // let _ = app.emit("embedding://progress", serde_json::json!({
+        //     "paper_id": paper.id,
+        //     "title":    paper.title,
+        //     "index":    index,
+        //     "total":    total,
+        //     "skipped":  !needs_compute,
+        // }));
+
+        // if !needs_compute { skipped += 1; continue; }
+
+        // Compute via sidecar
         let paper_val = serde_json::to_value(paper.clone()).map_err(|e| e.to_string())?;
         let mut guard = ensure_running(&s, &app)?;
         let result = guard.as_mut().unwrap()
@@ -1364,17 +1307,18 @@ pub fn hf_compute_all_embeddings(
 
         let field_vectors = result.get("field_vectors").cloned()
             .unwrap_or(serde_json::Value::Object(Default::default()));
-
-        let path = embedding_path_for_paper(&s, paper.id);
+        let vector = result["vector"].clone();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
-        // Persist raw field_vectors only — no weights, no composite vector.
-        // Weights are applied at edge-computation time via recompose_embedding().
+        let weights_val = config.get("weights").cloned()
+            .unwrap_or(serde_json::Value::Object(Default::default()));
         let payload = serde_json::json!({
-            "model":         &model,
-            "fields":        &fields,
+            "model":         model,
+            "fields":        fields,
+            "weights":       weights_val,
             "field_vectors": field_vectors,
+            "vector":        vector,
         });
         std::fs::write(&path, serde_json::to_string(&payload).map_err(|e| e.to_string())?)
             .map_err(|e| format!("Cannot write embedding for paper {}: {e}", paper.id))?;
@@ -1384,136 +1328,18 @@ pub fn hf_compute_all_embeddings(
 
     // Final done event
     let _ = app.emit("embedding://progress", serde_json::json!({
-        "done":  true,
-        "total": total,
-        "computed": computed,
+        "done": true, "total": total, "computed": computed, "skipped": skipped
     }));
 
-    Ok(serde_json::json!({ "total": total, "computed": computed }))
+    Ok(serde_json::json!({ "total": total, "computed": computed, "skipped": skipped }))
 }
 
-/// Compute similarity edges entirely from cached field_vectors on disk.
+/// Inject cached embedding vectors into a papers list before sending to sidecar.
+/// Papers that have a valid cache hit get a "_embedding" field added; those that
+/// don't will be re-encoded by the Python sidecar (no cache miss penalty for the
+/// user — they just get recomputed on the fly as before).
 ///
-/// This is the second half of the recompute flow:
-///   1. hf_compute_all_embeddings  — re-encodes every paper → writes field_vectors to JSON
-///   2. hf_compute_edges_from_cache — reads JSON, applies current weights, computes cosines
-///
-/// No Python sidecar call is made here.  For every paper the function:
-///   a. Reads its embedding.json
-///   b. Recomposes the weighted composite with recompose_embedding()
-///   c. Computes pairwise cosine similarity in Rust
-///   d. Applies threshold and max-edges to produce the final edge list
-///
-/// Returns: { edges: [{ source_id, target_id, similarity, weight, edge_type }], count }
-///
-/// Called from JS as: invoke("hf_compute_edges_from_cache", { papers, config })
-#[tauri::command]
-pub fn hf_compute_edges_from_cache(
-    s:      State<'_, AppState>,
-    papers: Vec<serde_json::Value>,
-    config: serde_json::Value,
-) -> CmdResult<serde_json::Value> {
-    let model = config["model"].as_str()
-        .unwrap_or("sentence-transformers/all-MiniLM-L6-v2");
-    let fields: Vec<String> = config["fields"]
-        .as_array()
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-        .unwrap_or_else(|| vec!["title".into(), "abstract".into(), "hashtags".into()]);
-    let weights   = config.get("weights").cloned()
-        .unwrap_or(serde_json::Value::Object(Default::default()));
-    let threshold = config["threshold"].as_f64().unwrap_or(0.38);
-    let max_edges = config["max_edges"].as_u64().unwrap_or(7) as usize;
-
-    // Build (paper_json, composite_vector) pairs.
-    // Papers without a cache file are given an empty vector and will produce
-    // no edges — callers should ensure embeddings exist before calling this.
-    let mut vecs: Vec<Option<Vec<f64>>> = Vec::with_capacity(papers.len());
-    for paper in &papers {
-        let id = match paper["id"].as_i64() { Some(v) => v, None => { vecs.push(None); continue; } };
-        let path = embedding_path_for_paper(&s, id);
-        let composite = read_embedding_cache(&path)
-            .filter(|cache| embedding_cache_in_matches(cache, model, &fields))
-            .and_then(|cache| recompose_embedding(&cache["field_vectors"], &fields, &weights));
-        vecs.push(composite);
-    }
-
-    // Pairwise cosine — identical edge-selection logic to the Python sidecar.
-    let n = papers.len();
-    let mut candidates: Vec<(usize, usize, f64)> = Vec::new();
-    for i in 0..n {
-        for j in (i + 1)..n {
-            let (Some(vi), Some(vj)) = (&vecs[i], &vecs[j]) else { continue };
-            let sim = cosine_f64(vi, vj);
-            if sim >= threshold {
-                candidates.push((i, j, sim));
-            }
-        }
-    }
-    candidates.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
-
-    let mut edge_count = vec![0usize; n];
-    let mut edges: Vec<serde_json::Value> = Vec::new();
-    for (i, j, sim) in candidates {
-        if edge_count[i] < max_edges && edge_count[j] < max_edges {
-            edge_count[i] += 1;
-            edge_count[j] += 1;
-            let weight = if sim >= 0.75 { 3 } else if sim >= 0.55 { 2 } else { 1 };
-            let etype  = edge_type_for(&papers[i], &papers[j]);
-            edges.push(serde_json::json!({
-                "source_id":  papers[i]["id"],
-                "target_id":  papers[j]["id"],
-                "similarity": (sim * 1_000_000.0).round() / 1_000_000.0,
-                "weight":     weight,
-                "edge_type":  etype,
-            }));
-        }
-    }
-
-    let count = edges.len();
-    Ok(serde_json::json!({ "edges": edges, "count": count }))
-}
-
-/// L2-normalised cosine similarity between two f64 slices.
-fn cosine_f64(a: &[f64], b: &[f64]) -> f64 {
-    let dot: f64 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-    let na:  f64 = a.iter().map(|x| x * x).sum::<f64>().sqrt();
-    let nb:  f64 = b.iter().map(|y| y * y).sum::<f64>().sqrt();
-    if na == 0.0 || nb == 0.0 { 0.0 } else { dot / (na * nb) }
-}
-
-/// Edge type classification matching the Python sidecar logic.
-fn edge_type_for(a: &serde_json::Value, b: &serde_json::Value) -> &'static str {
-    let tags_a: std::collections::HashSet<String> = a["hashtags"]
-        .as_array().map(|arr| arr.iter()
-            .filter_map(|v| v.as_str().map(|s| s.trim_start_matches('#').to_string()))
-            .collect())
-        .unwrap_or_default();
-    let tags_b: std::collections::HashSet<String> = b["hashtags"]
-        .as_array().map(|arr| arr.iter()
-            .filter_map(|v| v.as_str().map(|s| s.trim_start_matches('#').to_string()))
-            .collect())
-        .unwrap_or_default();
-    if !tags_a.is_empty() && tags_a.intersection(&tags_b).next().is_some() {
-        return "same_tag";
-    }
-    let venue_a = a["venue"].as_str().unwrap_or("");
-    let venue_b = b["venue"].as_str().unwrap_or("");
-    if !venue_a.is_empty() && venue_a == venue_b {
-        return "same_venue";
-    }
-    "related"
-}
-
-/// Inject composite embedding vectors into a papers list before sending to sidecar.
-///
-/// For each paper whose embedding.json exists and matches model+fields, this
-/// function recomposes the weighted composite from the stored raw field_vectors
-/// using the *current* weights, then injects it as "_embedding".  Python will
-/// use it directly via the cached-vector fast path and skip re-encoding.
-///
-/// Papers without a valid cache miss fall through to Python fresh-encoding.
-///
-/// Called internally by hf_compute_similarity.
+/// Called internally by hf_compute_similarity when embeddings are available.
 fn inject_cached_embeddings(
     s:       &AppState,
     papers:  &mut Vec<serde_json::Value>,
@@ -1525,15 +1351,8 @@ fn inject_cached_embeddings(
         let id = match paper["id"].as_i64() { Some(v) => v, None => continue };
         let path = embedding_path_for_paper(s, id);
         if let Some(cache) = read_embedding_cache(&path) {
-            // Cache is valid when model+fields match; weights are applied fresh below.
-            if embedding_cache_matches(&cache, model, fields) {
-                if let Some(composite) = recompose_embedding(&cache["field_vectors"], fields, weights) {
-                    let json_vec: Vec<serde_json::Value> = composite
-                        .iter()
-                        .map(|x| serde_json::json!(x))
-                        .collect();
-                    paper["_embedding"] = serde_json::Value::Array(json_vec);
-                }
+            if embedding_cache_matches(&cache, model, fields, weights) {
+                paper["_embedding"] = cache["vector"].clone();
             }
         }
     }

@@ -21,7 +21,7 @@
 import { colorForPaper, groupForPaper, nodeColorOverrides, COLOR_PALETTE } from "./constant.js";
 import { setPapersCache, getPapersCache, setEdgesCache, getEdgesCache, state, setCurrentPaperCache } from "./cache.js";
 import { openPaperPage, showDropzone } from "./paper-page.js";
-import { computeEdges, computeEdgesForNewPaper } from "./similarity.js";
+import { computeEdges, computeEdgesForNewPaper, getDefaultConfig, setTagVocab } from "./similarity.js";
 import { loadProjects, onProjectSwitch } from "./projects.js";
 
 // ── Tauri bridge ──────────────────────────────────────────────────────────────
@@ -30,6 +30,70 @@ const invoke = (
   window.__TAURI__?.tauri?.invoke ??
   (() => { throw new Error("Tauri not found — run with `cargo tauri dev`"); })
 );
+const tauriListen = (
+  window.__TAURI__?.event?.listen ??
+  null
+);
+
+// ── Similarity config (loaded from Rust on boot, persisted on change) ─────────
+let _simConfig = getDefaultConfig();
+
+// ── LLM module enable state ───────────────────────────────────────────────────
+// null = not yet checked, true = user opted in, false = user opted out
+let _hfEnabled = null;
+
+/// Apply LLM-enabled state.
+/// The ⚙ Similarity button is always accessible (JS-cosine works without HF).
+/// When disabled, only the HuggingFace strategy option inside the panel is
+/// grayed out — communicated via window.PaperGraph.isHfEnabled().
+function _applyHfEnabled(enabled) {
+  _hfEnabled = enabled;
+  // The ⚙ Similarity button itself stays enabled regardless — the panel
+  // handles HF gating internally via isHfEnabled().
+  const btn = document.getElementById("btn-sim-settings");
+  if (btn) {
+    btn.disabled = false;
+    btn.title    = "Similarity Settings";
+    btn.classList.remove("hf-disabled");
+  }
+}
+
+export async function loadSimConfig() {
+  try {
+    const saved = await invoke("get_similarity_config");
+    if (saved && typeof saved === "object") {
+      _simConfig = { ...getDefaultConfig(), ...saved };
+      // Restore the user's previous LLM choice (true/false/null)
+      if (typeof saved.llm_enabled === "boolean") {
+        _hfEnabled = saved.llm_enabled;
+      }
+    }
+  } catch (e) {
+    console.warn("[PaperGraph] Could not load similarity config:", e);
+  }
+}
+
+export async function saveSimConfig(cfg) {
+  _simConfig = { ...getDefaultConfig(), ...cfg };
+  try {
+    // Persist llm_enabled alongside the sim config so the choice survives restart
+    await invoke("save_similarity_config", {
+      config: { ..._simConfig, llm_enabled: _hfEnabled }
+    });
+  }
+  catch (e) { console.warn("[PaperGraph] Could not save similarity config:", e); }
+}
+
+async function _persistHfEnabled(val) {
+  _hfEnabled = val;
+  try {
+    await invoke("save_similarity_config", {
+      config: { ..._simConfig, llm_enabled: val }
+    });
+  } catch (e) { console.warn("[PaperGraph] Could not persist llm_enabled:", e); }
+}
+
+export function getSimConfig() { return { ..._simConfig }; }
 
 // ── PDF display helper ────────────────────────────────────────────────────────
 // Instead of the broken asset:// protocol (Tauri v2 CSP/scope issues), we ask
@@ -39,7 +103,6 @@ let _pdfBlobUrl = null; // track so we can revoke the previous one
 
 export async function loadPdfIntoIframe(paperId, iframe, onStatus) {
   // Revoke any previous blob URL to avoid memory leaks
-  console.log("check : ", _pdfBlobUrl);
   if (_pdfBlobUrl) { URL.revokeObjectURL(_pdfBlobUrl); _pdfBlobUrl = null; }
 
   if (onStatus) onStatus("Loading PDF…", "var(--text-secondary)");
@@ -97,7 +160,7 @@ function adaptEdge(r) {
 }
 
 // ── Loading overlay ───────────────────────────────────────────────────────────
-function showOverlay(msg) {
+function _overlayEl() {
   let el = document.getElementById("pg-loading");
   if (!el) {
     el = document.createElement("div");
@@ -112,6 +175,11 @@ function showOverlay(msg) {
     });
     document.body.appendChild(el);
   }
+  return el;
+}
+
+function showOverlay(msg) {
+  const el = _overlayEl();
   el.innerHTML = `
     <div style="font-family:'DM Serif Display',serif;font-size:1.6rem;color:#c8ff00">
       Paper<span style="color:#e8eaf0">Graph</span></div>
@@ -122,24 +190,290 @@ function showOverlay(msg) {
     <style>@keyframes _spin{to{transform:rotate(360deg)}}</style>`;
   el.style.display = "flex";
 }
+
 function hideOverlay() {
   const el = document.getElementById("pg-loading");
   if (el) el.style.display = "none";
+}
+
+// ── Venv setup overlay ────────────────────────────────────────────────────────
+// Shown while Rust is creating the venv and installing sentence-transformers.
+// Each step name maps to a human-readable label shown in a step list.
+const _VENV_STEPS = [
+  { key: "find_python",  label: "Locate system Python" },
+  { key: "create_venv",  label: "Create isolated environment" },
+  { key: "verify_venv",  label: "Verify environment" },
+  { key: "upgrade_pip",  label: "Upgrade pip" },
+  { key: "install_deps", label: "Install sentence-transformers" },
+  { key: "starting",     label: "Start similarity engine" },
+];
+
+// Tracks which steps have completed so the list renders correctly as events arrive.
+const _venvStepsDone   = new Set();
+let   _venvCurrentStep = "";
+let   _venvDetail      = "";
+
+// Rolling pip / pip-upgrade log lines — capped to avoid DOM bloat.
+const _pipLog    = [];
+const _PIP_LOG_MAX = 120;
+
+// Classify a pip output line for colour coding in the terminal widget.
+function _pipLineClass(line) {
+  const l = line.toLowerCase();
+  if (l.includes("error") || l.includes("failed") || l.includes("traceback")) return "venv-log-err";
+  if (l.includes("warn")  || l.includes("notice"))                             return "venv-log-warn";
+  if (l.startsWith("collecting") || l.startsWith("downloading") ||
+      l.startsWith("installing") || l.startsWith("successfully"))              return "venv-log-ok";
+  return "";
+}
+
+// Shared render function — called on every step change AND every pip-log line.
+function _renderVenvOverlay() {
+  const stepRows = _VENV_STEPS.map(s => {
+    const done    = _venvStepsDone.has(s.key) && s.key !== _venvCurrentStep;
+    const current = s.key === _venvCurrentStep;
+    const icon    = done    ? "✓"
+                  : current ? `<span class="venv-spin"></span>`
+                  : "·";
+    const color   = done ? "#c8ff00" : current ? "#e8eaf0" : "#3a3f50";
+    return `<div style="display:flex;align-items:center;gap:10px;color:${color};
+                         font-size:.7rem;padding:3px 0">
+              <span style="width:14px;text-align:center;line-height:1">${icon}</span>
+              <span>${s.label}</span>
+            </div>`;
+  }).join("");
+
+  // Terminal log box — only shown when pip output exists.
+  const showTerminal = _pipLog.length > 0;
+  const logHTML = showTerminal
+    ? `<div id="venv-terminal">
+         <div id="venv-terminal-inner">${
+           _pipLog.map(({ text, cls }) =>
+             `<div class="venv-log-line ${cls}">${
+               text.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+             }</div>`
+           ).join("")
+         }<span class="venv-cursor"></span></div>
+       </div>`
+    : "";
+
+  const el = _overlayEl();
+  el.innerHTML = `
+    <div style="font-family:'DM Serif Display',serif;font-size:1.6rem;color:#c8ff00">
+      Paper<span style="color:#e8eaf0">Graph</span></div>
+    <div style="font-size:.8rem;color:#9ca3af;margin-bottom:4px">
+      Setting up similarity engine — first launch only</div>
+    <div style="background:#0d0f14;border:1px solid #1e2230;border-radius:8px;
+                padding:14px 20px;min-width:300px;text-align:left">
+      ${stepRows}
+    </div>
+    <div style="font-size:.65rem;color:#6b7280;max-width:340px;line-height:1.7;
+                margin-top:4px">${_venvDetail}</div>
+    ${logHTML}
+    <div style="width:28px;height:28px;border:2px solid #1e2230;
+                border-top-color:#c8ff00;border-radius:50%;
+                animation:_spin .75s linear infinite"></div>
+    <style>
+      @keyframes _spin  { to { transform: rotate(360deg); } }
+      @keyframes _blink { 0%,100% { opacity:1; } 50% { opacity:0; } }
+      .venv-spin {
+        display:inline-block; width:10px; height:10px; border-radius:50%;
+        border:2px solid #1e2230; border-top-color:#c8ff00;
+        animation:_spin .75s linear infinite; vertical-align:middle;
+      }
+      #venv-terminal {
+        width:380px; max-width:84vw;
+        background:#050608; border:1px solid #141618; border-radius:6px;
+        overflow:hidden; margin-top:2px;
+      }
+      #venv-terminal-inner {
+        max-height:130px; overflow-y:auto; padding:8px 10px;
+        scroll-behavior:smooth; font-family:'Space Mono',monospace;
+      }
+      #venv-terminal-inner::-webkit-scrollbar { width:3px; }
+      #venv-terminal-inner::-webkit-scrollbar-thumb { background:#1a2a1a; border-radius:2px; }
+      .venv-log-line {
+        font-size:9px; line-height:1.65; color:#2e4a36;
+        white-space:pre-wrap; word-break:break-all;
+      }
+      .venv-log-ok   { color:#00c878; }
+      .venv-log-warn { color:#c8a000; }
+      .venv-log-err  { color:#c84040; }
+      .venv-cursor {
+        display:inline-block; width:6px; height:10px;
+        background:#00c87880; vertical-align:text-bottom;
+        border-radius:1px; animation:_blink 1s step-end infinite;
+      }
+    </style>`;
+  el.style.display = "flex";
+
+  // Auto-scroll terminal to bottom after render.
+  if (showTerminal) {
+    requestAnimationFrame(() => {
+      const inner = document.getElementById("venv-terminal-inner");
+      if (inner) inner.scrollTop = inner.scrollHeight;
+    });
+  }
+}
+
+function _showVenvOverlay(step, detail) {
+  _venvCurrentStep = step;
+  _venvDetail      = detail;
+  _venvStepsDone.add(step);
+  _renderVenvOverlay();
+}
+
+// Register Tauri event listeners once on load.
+// "venv://progress" — step transitions emitted by the Rust orchestrator.
+// "venv://pip-log"  — individual pip/pip-upgrade output lines (streamed).
+if (tauriListen) {
+  tauriListen("venv://progress", ({ payload }) => {
+    // console.log("progress listen", tauriListen);
+    const { step, detail, done } = payload;
+    if (done) {
+      // Mark all steps complete so the checklist renders fully green, then fade out.
+      _VENV_STEPS.forEach(s => _venvStepsDone.add(s.key));
+      _venvCurrentStep = "";
+      _renderVenvOverlay();
+      setTimeout(hideOverlay, 800);
+    } else {
+      _showVenvOverlay(step, detail);
+    }
+  });
+
+  tauriListen("venv://pip-log", ({ payload }) => {
+    // console.log("pip log listen");
+    const line = (payload?.line ?? "").trimEnd();
+    if (!line) return;
+    _pipLog.push({ text: line, cls: _pipLineClass(line) });
+    if (_pipLog.length > _PIP_LOG_MAX) _pipLog.shift();
+    // Only re-render when one of the two pip steps is active.
+    if (_venvCurrentStep === "install_deps" || _venvCurrentStep === "upgrade_pip") {
+      _renderVenvOverlay();
+    }
+  });
+}
+
+// ── LLM consent dialog ───────────────────────────────────────────────────────
+// Shown on every launch so the user can opt in/out of HF embeddings per session.
+// • If the user says Yes and the venv is already ready → start/reuse sidecar.
+// • If the user says Yes and the venv is missing → run full setup with progress UI.
+// • If the user says No → HF strategy is locked; ⚙ Similarity still opens.
+// Returns true if HF was successfully enabled, false otherwise.
+async function _runLlmConsentFlow() {
+  const agreed = await _showLlmConsentDialog();
+  if (!agreed) {
+    await _persistHfEnabled(false);
+    _applyHfEnabled(false);
+    return false;
+  }
+
+  // User said Yes — check whether the venv + sentence-transformers are already
+  // in place so we can skip the (slow) install steps.
+  let venvReady = false;
+  try {
+    const status = await invoke("hf_setup_status");
+    venvReady = status?.ready === true;
+  } catch (_) { /* treat as not ready */ }
+
+  _venvStepsDone.clear();
+  _venvCurrentStep = "";
+  _venvDetail      = "";
+  _pipLog.length   = 0;
+  _renderVenvOverlay();
+
+  try {
+    // hf_setup_venv now:
+    //   • reuses the live sidecar if already running (no-op fast path)
+    //   • re-launches if venv is ready but sidecar is dead/missing
+    //   • runs full ensure_venv + spawn if venv was absent
+    // In all cases the handle is stored in AppState — no orphaned processes.
+    await invoke("hf_setup_venv");
+    // overlay hides via the venv://progress "done" event
+    await _persistHfEnabled(true);
+    _applyHfEnabled(true);
+    return true;
+  } catch (err) {
+    hideOverlay();
+    await _showLlmErrorDialog(String(err));
+    await _persistHfEnabled(false);
+    _applyHfEnabled(false);
+    return false;
+  }
+}
+
+function _showLlmConsentDialog() {
+  return new Promise(resolve => {
+    const dlg = document.getElementById("llm-consent-dialog");
+    if (!dlg) { resolve(false); return; }
+    dlg.classList.add("open");
+    const yes = document.getElementById("llm-consent-yes");
+    const no  = document.getElementById("llm-consent-no");
+    function close(r) {
+      dlg.classList.remove("open");
+      yes.removeEventListener("click", onYes);
+      no.removeEventListener("click",  onNo);
+      resolve(r);
+    }
+    const onYes = () => close(true);
+    const onNo  = () => close(false);
+    yes.addEventListener("click", onYes);
+    no.addEventListener("click",  onNo);
+  });
+}
+
+function _showLlmErrorDialog(msg) {
+  return new Promise(resolve => {
+    const dlg = document.getElementById("llm-error-dialog");
+    if (!dlg) { resolve(); return; }
+    const msgEl = document.getElementById("llm-error-msg");
+    if (msgEl) msgEl.textContent = msg;
+    dlg.classList.add("open");
+    const btn = document.getElementById("llm-error-ok");
+    function close() {
+      dlg.classList.remove("open");
+      btn.removeEventListener("click", close);
+      resolve();
+    }
+    btn.addEventListener("click", close);
+  });
 }
 
 // ── Startup load ──────────────────────────────────────────────────────────────
 async function loadFromDB() {
   showOverlay("Opening database…");
   try {
+    // Load similarity config first so compute uses user's settings
+    await loadSimConfig();
+
+    // ── LLM module consent ──────────────────────────────────────────────────
+    // Ask on every launch whether the user wants HF active this session.
+    // If the venv is already set up, saying Yes just enables it immediately
+    // with no download/install step. Saying No keeps the ⚙ Similarity panel
+    // accessible but locks the HuggingFace strategy option.
+    try {
+      hideOverlay();
+      await _runLlmConsentFlow();
+      showOverlay("Opening database…");
+    } catch (e) {
+      console.warn("[PaperGraph] LLM consent flow failed:", e);
+      _applyHfEnabled(false);
+    }
+
     showOverlay("Loading papers…");
     setPapersCache((await invoke("get_papers")).map(adaptPaper));
+
+    // Sync tag vocabulary from DB so similarity vectors reflect the real tag set
+    const dbTags = await invoke("get_hashtags");
+    setTagVocab(dbTags);
 
     showOverlay("Loading similarity graph…");
     let rawEdges = await invoke("get_edges");
 
     if (rawEdges.length === 0) {
-      showOverlay("First run — computing similarity edges…");
-      const computed = computeEdges(getPapersCache());
+      const stratLabel = _simConfig.strategy === "hf-embeddings" ? "HuggingFace embeddings" : "cosine similarity";
+      showOverlay(`First run — computing edges via ${stratLabel}…`);
+      const computed = await computeEdges(getPapersCache(), _simConfig);
       await invoke("recompute_edges", { edges: computed });
       rawEdges = await invoke("get_edges");
     }
@@ -155,11 +489,53 @@ async function loadFromDB() {
 
 // ── Edge recomputation (full rebuild) ─────────────────────────────────────────
 export async function triggerEdgeRecompute() {
-  const computed = computeEdges(getPapersCache());
-  await invoke("recompute_edges", { edges: computed });
+  // Refresh tag vocabulary in case new hashtags were added since last load.
+  const dbTags = await invoke("get_hashtags");
+  setTagVocab(dbTags);
+
+  if (_hfEnabled && _simConfig.strategy === "hf-embeddings") {
+    // ── HF two-step recompute ──────────────────────────────────────────────
+    // // Step 1: Re-encode all papers unconditionally → write raw field_vectors
+    // //         to each paper's embedding.json.  Always done on every recompute
+    // //         so the stored vectors reflect current paper content.
+    // showOverlay("Re-encoding papers (step 1/2)…");
+    const embCfg = {
+      model:   _simConfig.model   ?? "sentence-transformers/all-MiniLM-L6-v2",
+      fields:  _simConfig.fields  ?? ["title", "abstract", "hashtags"],
+      weights: _simConfig.weights ?? {},
+    };
+    // await invoke("hf_compute_all_embeddings", { config: embCfg });
+
+    // Step 2: Load field_vectors from JSON, apply current weights in Rust,
+    //         compute cosine similarity — zero Python in this step.
+    showOverlay("Computing similarity edges (step 2/2)…");
+    console.log("triggerEdgeRecompute : ", getPapersCache());
+    const papers = getPapersCache().map(p => ({
+      id: p.id, title: p.title, venue: p.venue, year: p.year,
+      hashtags: p.hashtags, notes: p.notes, attributes: p.attributes,
+    }));
+    console.log("papers : ", papers);
+    const edgeRes = await invoke("hf_compute_edges_from_cache", {
+      papers,
+      config: {
+        ...embCfg,
+        threshold: _simConfig.threshold ?? 0.30,
+        max_edges: _simConfig.max_edges ?? 7,
+      },
+    });
+    console.log(edgeRes);
+    const computed = edgeRes.edges ?? [];
+    await invoke("recompute_edges", { edges: computed });
+  } else {
+    // ── JS-cosine strategy ─────────────────────────────────────────────────
+    const computed = await computeEdges(getPapersCache(), _simConfig);
+    await invoke("recompute_edges", { edges: computed });
+  }
+
   const fresh = await invoke("get_edges");
   setEdgesCache(fresh.map(adaptEdge));
   rebuildEdgeRefs();
+  hideOverlay();
   document.getElementById("stat-connections").textContent = getEdgesCache().length;
 }
 
@@ -179,12 +555,46 @@ export async function refreshPaper(id) {
   }
 }
 
+// ── Re-compute edges for a single edited paper ───────────────────────────────
+// Drops all edges touching paperId, computes fresh ones via the active
+// similarity strategy, persists the merged set, then rebuilds canvas refs.
+export async function recomputeEdgesForPaper(paperId) {
+  const allPapers = getPapersCache();
+  const paper     = allPapers.find(p => p.id === paperId);
+  if (!paper) return;
+
+  // 1. Compute new edges for this paper against all others
+  const others   = allPapers.filter(p => p.id !== paperId);
+  const newEdges = await computeEdgesForNewPaper(paper, others, _simConfig);
+
+  // 2. Keep cached edges that don't involve this paper
+  const retained = getEdgesCache()
+    .filter(e => e.source !== paperId && e.target !== paperId)
+    .map(e => ({
+      source_id:  e.source,
+      target_id:  e.target,
+      similarity: e.similarity,
+      weight:     e.weight,
+      edge_type:  e.type,
+    }));
+
+  // 3. Atomic replace — retained edges + newly computed ones
+  await invoke("recompute_edges", { edges: [...retained, ...newEdges] });
+
+  // 4. Sync cache and rebuild canvas refs
+  const fresh = await invoke("get_edges");
+  setEdgesCache(fresh.map(adaptEdge));
+  rebuildEdgeRefs();
+  document.getElementById("stat-connections").textContent = getEdgesCache().length;
+}
+
 function rebuildEdgeRefs() {
   state.edges = getEdgesCache().map(e => ({
     ...e,
     sourceNode: state.nodes.find(n => n.id === e.source),
     targetNode: state.nodes.find(n => n.id === e.target),
   }));
+  // console.log("Synchronize DB to app (state.edges) : ", state.edges);
 }
 
 // ── Canvas ────────────────────────────────────────────────────────────────────
@@ -207,8 +617,9 @@ window.addEventListener("resize", resizeCanvas);
 // ── Graph init ────────────────────────────────────────────────────────────────
 function nodeRadius(p) {
   // Size by citation count if available, otherwise uniform
-  const citations = Number(attr(p, "citations", "0"));
-  return 16 + (Math.log(Math.max(citations, 1)) / Math.log(140000)) * 19;
+  const inConnection = getEdgesCache().filter(n => n.target === p.id).length;
+  const outConnection = getEdgesCache().filter(n => n.source === p.id).length;
+  return 16 + (Math.log(Math.max(inConnection + outConnection, 1)) / Math.log(14000)) * 19;
 }
 
 function initGraph() {
@@ -347,8 +758,9 @@ function draw() {
   state.edges.forEach(e => {
     const a = e.sourceNode, b = e.targetNode;
     if (!a || !b) return;
-    if (e.similarity < simThreshold) return;  // threshold filter
-
+    if (e.similarity < simThreshold) {
+      return;  // threshold filter
+    }
     let alpha;
     if (q) {
       // Search mode: only draw an edge if BOTH endpoints match the query.
@@ -531,6 +943,10 @@ canvas.addEventListener("mousemove", e => {
     document.getElementById("tt-title").textContent = n.title;
     document.getElementById("tt-year").textContent  =
       `${n.year} · ${n.venue}`;
+    
+    document.getElementById("tt-tag").innerHTML = [
+      ...n.hashtags
+    ].map(b => b).join(", ");
     tt.style.display = "block";
     tt.style.left    = (e.clientX + 14) + "px";
     tt.style.top     = e.clientY + "px";
@@ -789,6 +1205,7 @@ document.getElementById("search-input").addEventListener("input",
 
   function update(val) {
     simThreshold = parseFloat(val);
+    // _simConfig.threshold = simThreshold;
     label.textContent = simThreshold.toFixed(2);
     // Update visible edge count
     const visible = getEdgesCache().filter(e => e.similarity >= simThreshold).length;
@@ -877,11 +1294,25 @@ document.getElementById("npm-submit-btn").addEventListener("click", async () => 
     // 1. Persist to SQLite — returns the new integer id
     const newId = await invoke("add_paper", { paper: newPaper });
 
+    // 1b. Auto-compute embedding if HF module is enabled
+    if (_hfEnabled && _simConfig.strategy === "hf-embeddings") {
+      statusEl.textContent = "Computing embedding…";
+      try {
+        await invoke("hf_compute_paper_embedding", {
+          paperId: newId,
+          config:  _simConfig,
+        });
+      } catch (embErr) {
+        // Non-fatal: log the error but continue adding the paper
+        console.warn("[PaperGraph] Auto-embed failed:", embErr);
+      }
+    }
+
     // 2. Compute similarity edges for this new paper
     statusEl.textContent = "Computing edges…";
     const existingPapers = getPapersCache();
     const tempPaper = { id: newId, year, venue, hashtags };
-    const newEdges = computeEdgesForNewPaper(tempPaper, existingPapers);
+    const newEdges = await computeEdgesForNewPaper(tempPaper, existingPapers, _simConfig);
     if (newEdges.length > 0) {
       await invoke("append_edges", { edges: newEdges });
     }
@@ -968,3 +1399,15 @@ async function showSidebarPdf(node) {
     }
   });
 }
+
+// ── window.PaperGraph bridge ──────────────────────────────────────────────────
+// Exposes graph functions to non-module scripts (similarity-settings.js).
+window.PaperGraph = {
+  getSimConfig,
+  saveSimConfig,
+  triggerEdgeRecompute,
+  recomputeEdgesForPaper,
+  reloadGraph,
+  isHfEnabled: () => _hfEnabled,
+  enableHf:    () => _runLlmConsentFlow(),
+};
