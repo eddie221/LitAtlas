@@ -12,8 +12,8 @@ Due to the tremendous growth of research, it is hard for us to keep track of eve
     - [X] Present paper as node
     - [X] Present edge as similarity
     - [X] Zoom in/out
-    - [ ] Show HashTag connections in blue color.
-      - If two nodes' don't have similarity from LLM, the viewer will show the similarity from HashTag.
+    - [X] Show HashTag connections between papers.
+    - [ ] If two nodes' don't have similarity from LLM, the viewer will show the similarity from HashTag.
  - Paper information
     - [X] Add paper
     - [X] Delete paper
@@ -23,9 +23,26 @@ Due to the tremendous growth of research, it is hard for us to keep track of eve
     - [X] Using hashtag (cosine similarity)
     - [ ] Using LLM
       - [X] Simple usage. (Concate the selected information in on string.)
-      - [ ] Weighted information.
+      - [X] Weighted information.
       - [ ] Include PDFs.
-
+ - Search
+    - [X] Paper Title
+    - [ ] Venue
+    - [ ] Author
+    - [ ] Hashtag
  - Backup
 
 
+## Install Issues:
+
+### Issue 1: 
+“PaperGraph.app” is damaged and can’t be opened. You should eject the disk image.
+
+#### Reason: 
+The downloaded unauthorized application will be quarantined by default.
+#### Solution:  
+```bash
+# replace /Applications/YourAppName.app with actual APP path 
+# (default will be /Applications/PaperGraph.app)
+xattr -cr /Applications/YourAppName.app
+```
