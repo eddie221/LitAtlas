@@ -27,9 +27,9 @@ Due to the tremendous growth of research, it is hard for us to keep track of eve
       - [ ] Include PDFs.
  - Search
     - [X] Paper Title
-    - [ ] Venue
-    - [ ] Author
-    - [ ] Hashtag
+    - [X] Venue
+    - [X] Author
+    - [X] Hashtag
  - Backup
 
 
