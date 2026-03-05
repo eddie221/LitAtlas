@@ -888,13 +888,8 @@ function draw() {
     }
     let alpha;
     if (q) {
-      const aMatch = a.title.toLowerCase().includes(q)
-        || a.authors.join(" ").toLowerCase().includes(q)
-        || a.hashtags.join(" ").toLowerCase().includes(q);
-      const bMatch = b.title.toLowerCase().includes(q)
-        || b.authors.join(" ").toLowerCase().includes(q)
-        || b.hashtags.join(" ").toLowerCase().includes(q);
-      alpha = (aMatch && bMatch) ? 1 : 0;
+      // Edge is visible only when BOTH endpoints match the active search fields
+      alpha = (nodeMatchesSearch(a, q) && nodeMatchesSearch(b, q)) ? 1 : 0;
     } else if (sel) {
       // Selection mode: only show edges directly connected to selected node
       alpha = (a.id === sel || b.id === sel) ? 1 : 0;
@@ -909,10 +904,7 @@ function draw() {
 
   // Draw nodes — dim unrelated when a node is selected or edge is hovered
   state.nodes.forEach(n => {
-    const matchesSearch = !q
-      || n.title.toLowerCase().includes(q)
-      || n.authors.join(" ").toLowerCase().includes(q)
-      || n.hashtags.join(" ").toLowerCase().includes(q);
+    const matchesSearch = nodeMatchesSearch(n, q);
 
     if (!matchesSearch) { drawNodeFaded(n); return; }
 
@@ -1394,6 +1386,38 @@ document.getElementById("zoom-out").addEventListener("click",
   () => { state.scale = Math.max(0.15, state.scale * 0.83); });
 document.getElementById("zoom-fit").addEventListener("click",
   () => { state.viewX = state.viewY = 0; state.scale = 1; });
+// ── Search field filter ──────────────────────────────────────────────────────
+// Which fields to include when filtering by the search query.
+// Toggled by the sf-pill buttons; all four active = search everything.
+const _searchFields = new Set(["title", "authors", "tags", "venue"]);
+
+// Returns true if node n matches the current query under the active field set.
+function nodeMatchesSearch(n, q) {
+  if (!q) return true;
+  if (_searchFields.has("title")   && n.title.toLowerCase().includes(q))          return true;
+  if (_searchFields.has("authors") && n.authors.join(" ").toLowerCase().includes(q)) return true;
+  if (_searchFields.has("tags")    && n.hashtags.join(" ").toLowerCase().includes(q)) return true;
+  if (_searchFields.has("venue")   && (n.venue ?? "").toLowerCase().includes(q))  return true;
+  return false;
+}
+
+// Wire search field pill toggles
+document.querySelectorAll(".sf-pill").forEach(btn => {
+  btn.addEventListener("click", () => {
+    const field = btn.dataset.field;
+    if (_searchFields.has(field)) {
+      // Don't allow deselecting the last active pill
+      if (_searchFields.size > 1) {
+        _searchFields.delete(field);
+        btn.classList.remove("active");
+      }
+    } else {
+      _searchFields.add(field);
+      btn.classList.add("active");
+    }
+  });
+});
+
 document.getElementById("search-input").addEventListener("input",
   e => { state.searchQuery = e.target.value.trim(); });
 

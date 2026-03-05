@@ -247,14 +247,51 @@
     /* ═══════════════════════════════════════════════════════════
        SEARCH
     ═══════════════════════════════════════════════════════════ */
+    #search-bar {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      align-items: stretch;
+    }
     #search-input {
       background: var(--surface); border: 1px solid var(--border);
       color: var(--text-primary); font-family: 'Space Mono', monospace;
-      font-size: 0.7rem; padding: 6px 12px; width: 170px;
+      font-size: 0.7rem; padding: 6px 12px; width: 230px;
       outline: none; transition: border-color 0.2s;
     }
     #search-input:focus { border-color: var(--accent2); }
     #search-input::placeholder { color: var(--text-secondary); }
+    #search-fields {
+      display: flex;
+      gap: 4px;
+    }
+    .sf-pill {
+      flex: 1;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--text-secondary);
+      font-family: 'Space Mono', monospace;
+      font-size: 0.55rem;
+      letter-spacing: 0.04em;
+      padding: 3px 0;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s, border-color 0.15s;
+      white-space: nowrap;
+    }
+    .sf-pill:hover {
+      border-color: var(--accent2);
+      color: var(--accent2);
+    }
+    .sf-pill.active {
+      background: rgba(0,212,255,0.12);
+      border-color: var(--accent2);
+      color: var(--accent2);
+    }
+    .sf-pill.active:hover {
+      background: rgba(0,212,255,0.06);
+      color: var(--text-secondary);
+      border-color: var(--border);
+    }
 
     /* ═══════════════════════════════════════════════════════════
        TOOLTIP

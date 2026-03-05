@@ -36,7 +36,15 @@
   <button id="sidebar-edge-toggle" title="Collapse sidebar">‹</button>
   <header id="header">
     <h1>Paper<span>Graph</span></h1>
-    <input id="search-input" type="text" placeholder="Search papers…" />
+    <div id="search-bar">
+      <input id="search-input" type="text" placeholder="Search papers…" />
+      <div id="search-fields">
+        <button class="sf-pill active" data-field="title"   title="Search by title">Title</button>
+        <button class="sf-pill active" data-field="authors" title="Search by author">Authors</button>
+        <button class="sf-pill active" data-field="tags"    title="Search by hashtag">Tags</button>
+        <button class="sf-pill active" data-field="venue"   title="Search by venue">Venue</button>
+      </div>
+    </div>
     <div id="controls">
       <button class="btn active" id="btn-force">Force</button>
       <button class="btn" id="btn-radial">Radial</button>
