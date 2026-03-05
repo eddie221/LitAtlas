@@ -534,7 +534,7 @@ async function loadFromDB() {
   try {
     // Load similarity config first so compute uses user's settings
     await loadSimConfig();
-
+    _simConfig.strategy = "js-cosine";
     // ── LLM module consent ──────────────────────────────────────────────────
     // Ask on every launch whether the user wants HF active this session.
     // If the venv is already set up, saying Yes just enables it immediately
@@ -826,6 +826,29 @@ function canvasPos(e) {
   return { x: e.clientX - r.left, y: e.clientY - r.top };
 }
 
+// ── Edge overlap helper ───────────────────────────────────────────────────────
+// Returns the shared concepts between two paper nodes: tags, venue, year, authors.
+function computeOverlap(a, b) {
+  const tagsA = new Set((a.hashtags ?? []).map(t => t.replace(/^#/, "").toLowerCase()));
+  const tagsB = new Set((b.hashtags ?? []).map(t => t.replace(/^#/, "").toLowerCase()));
+  const sharedTags = [...tagsA].filter(t => tagsB.has(t));
+
+  const venueA = (a.venue ?? "").trim();
+  const venueB = (b.venue ?? "").trim();
+  const sharedVenue = (venueA && venueA === venueB) ? venueA : null;
+
+  const yearA = Number(a.year ?? 0);
+  const yearB = Number(b.year ?? 0);
+  const sharedYear = (yearA && yearA === yearB) ? yearA : null;
+
+  const authsA = new Set((a.authors ?? []).map(s => s.trim().toLowerCase()));
+  const authsB = new Set((b.authors ?? []).map(s => s.trim().toLowerCase()));
+  // Preserve original casing from paper A
+  const sharedAuthors = (a.authors ?? []).filter(s => authsB.has(s.trim().toLowerCase()));
+
+  return { sharedTags, sharedVenue, sharedYear, sharedAuthors };
+}
+
 // ── Draw ──────────────────────────────────────────────────────────────────────
 function draw() {
   const W = canvas.width  / devicePixelRatio;
@@ -837,6 +860,7 @@ function draw() {
 
   const q   = state.searchQuery.toLowerCase();
   const sel = state.selectedNode?.id;
+  const hovEdge = !sel ? state.hoveredEdge : null; // edge hover only when no node selected
 
   // Build set of node IDs connected to selected node (by edges passing threshold)
   const connectedIds = new Set();
@@ -848,6 +872,13 @@ function draw() {
     });
   }
 
+  // Build set of the two endpoint node IDs for the hovered edge
+  const hovEdgeEndpoints = new Set();
+  if (hovEdge) {
+    if (hovEdge.sourceNode) hovEdgeEndpoints.add(hovEdge.sourceNode.id);
+    if (hovEdge.targetNode) hovEdgeEndpoints.add(hovEdge.targetNode.id);
+  }
+
   // Draw edges — only those meeting threshold; dim unrelated when a node is selected
   state.edges.forEach(e => {
     const a = e.sourceNode, b = e.targetNode;
@@ -857,8 +888,6 @@ function draw() {
     }
     let alpha;
     if (q) {
-      // Search mode: only draw an edge if BOTH endpoints match the query.
-      // This prevents edges from "leaking" to non-matching nodes.
       const aMatch = a.title.toLowerCase().includes(q)
         || a.authors.join(" ").toLowerCase().includes(q)
         || a.hashtags.join(" ").toLowerCase().includes(q);
@@ -869,13 +898,16 @@ function draw() {
     } else if (sel) {
       // Selection mode: only show edges directly connected to selected node
       alpha = (a.id === sel || b.id === sel) ? 1 : 0;
+    } else if (hovEdge) {
+      // Edge hover mode: full alpha for the hovered edge, ghost everything else
+      alpha = (e === hovEdge) ? 1 : 0.08;
     } else {
       alpha = 1;
     }
     if (alpha > 0) drawEdge(e, alpha);
   });
 
-  // Draw nodes — dim unrelated when a node is selected
+  // Draw nodes — dim unrelated when a node is selected or edge is hovered
   state.nodes.forEach(n => {
     const matchesSearch = !q
       || n.title.toLowerCase().includes(q)
@@ -886,8 +918,12 @@ function draw() {
 
     if (sel && n.id !== sel && !connectedIds.has(n.id)) {
       drawNodeFaded(n);
+    } else if (hovEdge && !hovEdgeEndpoints.has(n.id)) {
+      // Dim all nodes that aren't the two endpoints of the hovered edge
+      drawNodeFaded(n);
     } else {
-      drawNode(n);
+      // Pass edgeHighlight=true for the two endpoint nodes
+      drawNode(n, hovEdge ? hovEdgeEndpoints.has(n.id) : false);
     }
   });
 
@@ -923,30 +959,30 @@ function drawEdge(e, alpha) {
   ctx.restore();
 }
 
-function drawNode(n) {
+function drawNode(n, edgeHighlight = false) {
   const sel   = state.selectedNode?.id === n.id;
-  const hov   = state.hoveredNode?.id  === n.id;
+  const hov   = state.hoveredNode?.id  === n.id || edgeHighlight;
   const color = colorForPaper(n);
   const r     = n.radius;
 
   if (sel || hov) {
     ctx.save();
-    ctx.shadowColor = color; ctx.shadowBlur = sel ? 28 : 16;
+    ctx.shadowColor = color; ctx.shadowBlur = sel ? 28 : 18;
     ctx.beginPath(); ctx.arc(n.x, n.y, r, 0, Math.PI*2);
     ctx.fillStyle = color; ctx.fill();
     ctx.restore();
   }
 
   ctx.beginPath(); ctx.arc(n.x, n.y, r, 0, Math.PI*2);
-  ctx.fillStyle   = sel ? color : color + "22";
+  ctx.fillStyle   = (sel || edgeHighlight) ? color : color + "22";
   ctx.fill();
-  ctx.strokeStyle = sel ? "#fff" : color;
-  ctx.lineWidth   = sel ? 2.5 : 1.5;
+  ctx.strokeStyle = (sel || edgeHighlight) ? "#fff" : color;
+  ctx.lineWidth   = (sel || edgeHighlight) ? 2.5 : 1.5;
   ctx.stroke();
 
   const label = n.title.length > 18 ? n.title.slice(0, 16) + "…" : n.title;
-  ctx.fillStyle    = sel ? "#fff" : "#c8d0e0";
-  ctx.font         = `${sel ? "bold " : ""}${Math.max(8, r*0.42)}px 'Space Mono'`;
+  ctx.fillStyle    = (sel || edgeHighlight) ? "#fff" : "#c8d0e0";
+  ctx.font         = `${(sel || edgeHighlight) ? "bold " : ""}${Math.max(8, r*0.42)}px 'Space Mono'`;
   ctx.textAlign    = "center"; ctx.textBaseline = "top";
   ctx.fillText(label, n.x, n.y + r + 5);
 }
@@ -1031,21 +1067,88 @@ canvas.addEventListener("mousemove", e => {
   state.hoveredEdge = state.hoveredNode ? null : edgeAt(pos.x, pos.y);
   canvas.style.cursor = state.hoveredNode ? "pointer" : "grab";
 
-  const tt = document.getElementById("tooltip");
+  const tt     = document.getElementById("tooltip");
+  const edgeTt = document.getElementById("edge-tooltip");
+
   if (state.hoveredNode) {
+    // ── Node tooltip ──────────────────────────────────────────────────────
     const n = state.hoveredNode;
     document.getElementById("tt-title").textContent = n.title;
-    document.getElementById("tt-year").textContent  =
-      `${n.year} · ${n.venue}`;
-    
-    document.getElementById("tt-tag").innerHTML = [
-      ...n.hashtags
-    ].map(b => b).join(", ");
-    tt.style.display = "block";
-    tt.style.left    = (e.clientX + 14) + "px";
-    tt.style.top     = e.clientY + "px";
-  } else {
+    document.getElementById("tt-year").textContent  = `${n.year} · ${n.venue}`;
+    document.getElementById("tt-tag").innerHTML = (n.hashtags ?? []).join(", ");
+    tt.style.display     = "block";
+    tt.style.left        = (e.clientX + 14) + "px";
+    tt.style.top         = e.clientY + "px";
+    edgeTt.style.display = "none";
+
+  } else if (state.hoveredEdge) {
+    // ── Edge overlap tooltip ──────────────────────────────────────────────
     tt.style.display = "none";
+    const edge = state.hoveredEdge;
+    const nA   = edge.sourceNode;
+    const nB   = edge.targetNode;
+    if (nA && nB) {
+      // Header
+      document.getElementById("et-sim").textContent = `sim ${edge.similarity.toFixed(3)}`;
+      const typeEl  = document.getElementById("et-type");
+      const typeLabel = edge.type === "same_tag"   ? "same tag"
+                      : edge.type === "same_venue" ? "same venue"
+                      : "related";
+      typeEl.textContent = typeLabel;
+      typeEl.className   = edge.type === "same_tag"   ? "type-same-tag"
+                         : edge.type === "same_venue" ? "type-same-venue"
+                         : "type-related";
+
+      // Paper titles
+      const trunc = (s, n) => s.length > n ? s.slice(0, n - 1) + "…" : s;
+      document.getElementById("et-paper-a").textContent = trunc(nA.title, 32);
+      document.getElementById("et-paper-b").textContent = trunc(nB.title, 32);
+
+      // Overlapping concepts
+      const { sharedTags, sharedVenue, sharedYear, sharedAuthors } = computeOverlap(nA, nB);
+
+      const tagsRow    = document.getElementById("et-tags-row");
+      const venueRow   = document.getElementById("et-venue-row");
+      const yearRow    = document.getElementById("et-year-row");
+      const authorsRow = document.getElementById("et-authors-row");
+      const noOverlap  = document.getElementById("et-no-overlap");
+
+      if (sharedTags.length > 0) {
+        document.getElementById("et-tags").innerHTML =
+          sharedTags.map(t => `<span class="et-chip">#${t}</span>`).join("");
+        tagsRow.style.display = "flex";
+      } else { tagsRow.style.display = "none"; }
+
+      if (sharedVenue) {
+        document.getElementById("et-venue").textContent = sharedVenue;
+        venueRow.style.display = "flex";
+      } else { venueRow.style.display = "none"; }
+
+      if (sharedYear) {
+        document.getElementById("et-year").textContent = sharedYear;
+        yearRow.style.display = "flex";
+      } else { yearRow.style.display = "none"; }
+
+      if (sharedAuthors.length > 0) {
+        document.getElementById("et-authors").innerHTML =
+          sharedAuthors.map(a => `<span class="et-chip et-chip-author">${a}</span>`).join("");
+        authorsRow.style.display = "flex";
+      } else { authorsRow.style.display = "none"; }
+
+      const hasOverlap = sharedTags.length > 0 || sharedVenue || sharedYear || sharedAuthors.length > 0;
+      noOverlap.style.display = hasOverlap ? "none" : "block";
+
+      // Position — nudge left if near right viewport edge
+      const left = (e.clientX + 16 + 280 > window.innerWidth)
+        ? e.clientX - 290 : e.clientX + 16;
+      edgeTt.style.left    = left + "px";
+      edgeTt.style.top     = (e.clientY - 10) + "px";
+      edgeTt.style.display = "block";
+    }
+
+  } else {
+    tt.style.display     = "none";
+    edgeTt.style.display = "none";
   }
 });
 
@@ -1054,7 +1157,8 @@ canvas.addEventListener("mouseup", e => {
   const wasDrag = state.dragging;
   state.dragging = null; state.panning = false;
   canvas.style.cursor = "grab";
-  document.getElementById("tooltip").style.display = "none";
+  document.getElementById("tooltip").style.display     = "none";
+  document.getElementById("edge-tooltip").style.display = "none";
 
   if (wasDrag && _mouseDownPos) {
     const dx = pos.x - _mouseDownPos.x, dy = pos.y - _mouseDownPos.y;
@@ -1068,7 +1172,9 @@ canvas.addEventListener("mouseup", e => {
 });
 
 canvas.addEventListener("mouseleave", () => {
-  document.getElementById("tooltip").style.display = "none";
+  document.getElementById("tooltip").style.display     = "none";
+  document.getElementById("edge-tooltip").style.display = "none";
+  state.hoveredEdge = null;
 });
 
 canvas.addEventListener("wheel", e => {

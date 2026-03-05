@@ -88,7 +88,7 @@ async function renderSettings(panel) {
   const isHF   = cfg.strategy === "hf-embeddings";
   const hfOk   = window.PaperGraph?.isHfEnabled?.() === true;
   let   models = _BUILTIN_MODELS;
-
+  console.log("hfOk : ", hfOk);
   const body = panel.querySelector("#sim-settings-body");
   if (!body) return;
   body.innerHTML = buildHTML(cfg, models, isHF, hfOk);

@@ -130,6 +130,38 @@
     <div class="t-tag"  id="tt-tag"></div>
   </div>
 
+  <!-- ── EDGE OVERLAP TOOLTIP ── -->
+  <div id="edge-tooltip">
+    <div id="et-header">
+      <span id="et-sim"></span>
+      <span id="et-type"></span>
+    </div>
+    <div id="et-papers">
+      <div class="et-paper" id="et-paper-a"></div>
+      <div class="et-divider">↔</div>
+      <div class="et-paper" id="et-paper-b"></div>
+    </div>
+    <div id="et-overlap">
+      <div class="et-section" id="et-tags-row" style="display:none">
+        <span class="et-label">Shared tags</span>
+        <div class="et-chips" id="et-tags"></div>
+      </div>
+      <div class="et-section" id="et-venue-row" style="display:none">
+        <span class="et-label">Venue</span>
+        <span class="et-value" id="et-venue"></span>
+      </div>
+      <div class="et-section" id="et-year-row" style="display:none">
+        <span class="et-label">Year</span>
+        <span class="et-value" id="et-year"></span>
+      </div>
+      <div class="et-section" id="et-authors-row" style="display:none">
+        <span class="et-label">Authors</span>
+        <div class="et-chips" id="et-authors"></div>
+      </div>
+      <div id="et-no-overlap" style="display:none">No shared concepts found</div>
+    </div>
+  </div>
+
   <!-- ── SIMILARITY THRESHOLD ── -->
   <div id="sim-threshold-panel">
     <div id="sim-threshold-label">
