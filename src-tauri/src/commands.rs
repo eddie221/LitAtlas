@@ -493,13 +493,13 @@ fn step_find_python(app: &tauri::AppHandle) -> Result<String, String> {
         };
 
         if !conda_prefix.is_empty() && exe_path.starts_with(&conda_prefix) {
-            eprintln!("[LitAtlas] Skipping {bin} — inside conda: {exe_path}");
+            eprintln!("[PaperGraph] Skipping {bin} — inside conda: {exe_path}");
             emit_progress(app, "find_python",
                 &format!("Skipped {bin} (conda env — needs isolation)"), false);
             continue;
         }
         if !venv_prefix.is_empty() && exe_path.starts_with(&venv_prefix) {
-            eprintln!("[LitAtlas] Skipping {bin} — inside venv: {exe_path}");
+            eprintln!("[PaperGraph] Skipping {bin} — inside venv: {exe_path}");
             emit_progress(app, "find_python",
                 &format!("Skipped {bin} (active venv — needs isolation)"), false);
             continue;
@@ -516,14 +516,14 @@ fn step_find_python(app: &tauri::AppHandle) -> Result<String, String> {
         if ver_ok {
             emit_progress(app, "find_python",
                 &format!("Found {bin} → {exe_path}"), false);
-            eprintln!("[LitAtlas] Using Python: {exe_path}");
+            eprintln!("[PaperGraph] Using Python: {exe_path}");
             return Ok(bin.to_string());
         }
     }
 
     Err("Python 3.8+ not found on PATH (every candidate was either missing or \
          inside an active conda / venv environment).\n\
-         Install Python 3 from https://python.org and restart LitAtlas.".into())
+         Install Python 3 from https://python.org and restart PaperGraph.".into())
 }
 
 // ── Process 2 of 5 : create isolated venv ────────────────────────────────────
@@ -676,7 +676,7 @@ fn step_upgrade_pip(
 
     if !status.success() {
         // Non-fatal: log a warning but do not abort the install
-        eprintln!("[LitAtlas] pip upgrade exited non-zero — continuing anyway");
+        eprintln!("[PaperGraph] pip upgrade exited non-zero — continuing anyway");
         emit_progress(app, "upgrade_pip",
             "pip upgrade failed (non-fatal) — continuing…", false);
     } else {
@@ -812,6 +812,22 @@ fn launch_sidecar(
 
     let python = ensure_venv(venv_dir, app)?;
 
+    // Read the custom plugin script path from app_config.json (if set).
+    // Pass it to the sidecar via the PAPERGRAPH_PLUGIN_SCRIPT env var so
+    // Python can load the user's similarity_fn / compute_embedding_fn hooks.
+    let plugin_script: String = {
+        // NOTE: we don't have &AppState here, only venv_dir.  Infer data_dir
+        // as venv_dir's parent (similarity_venv is created directly inside data_dir).
+        let data_dir = venv_dir.parent().unwrap_or(venv_dir);
+        let cfg_path = data_dir.join("app_config.json");
+        std::fs::read_to_string(&cfg_path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .and_then(|cfg| cfg["sidecar_script"].as_str().map(String::from))
+            .filter(|p| !p.is_empty() && std::path::Path::new(p).exists())
+            .unwrap_or_default()
+    };
+
     let mut child = Command::new(&python)
         .arg("-u")
         .arg(script)
@@ -819,6 +835,7 @@ fn launch_sidecar(
         .env_remove("CONDA_DEFAULT_ENV")
         .env_remove("VIRTUAL_ENV")
         .env_remove("VIRTUAL_ENV_PROMPT")
+        .env("PAPERGRAPH_PLUGIN_SCRIPT", &plugin_script)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -842,7 +859,7 @@ fn launch_sidecar(
     }
 
     emit_progress(app, "ready", "Similarity engine ready.", true);
-    eprintln!("[LitAtlas] Python sidecar started (pid {})", sc.child.id());
+    eprintln!("[PaperGraph] Python sidecar started (pid {})", sc.child.id());
     Ok(sc)
 }
 
@@ -854,7 +871,7 @@ fn ensure_running<'a>(s: &'a AppState, app: &tauri::AppHandle) -> Result<std::sy
     };
     if dead {
         if guard.is_some() {
-            eprintln!("[LitAtlas] Sidecar crashed — restarting…");
+            eprintln!("[PaperGraph] Sidecar crashed — restarting…");
         }
         eprintln!("dead !!");
         *guard = Some(launch_sidecar(&s.sidecar_script(), &s.venv_dir(), app)?);
@@ -904,17 +921,34 @@ pub fn hf_setup_status(s: State<'_, AppState>) -> CmdResult<serde_json::Value> {
     // _model_snapshot_path(): a model is offline-ready when its snapshot dir
     // contains config.json.  We do this in Rust so JS gets the list without
     // needing to start the sidecar first.
-    let known_models = [
-        "sentence-transformers/all-MiniLM-L6-v2",
-        "sentence-transformers/all-mpnet-base-v2",
-        "sentence-transformers/multi-qa-MiniLM-L6-cos-v1",
-        "allenai/specter2_base",
+    let mut known_models: Vec<String> = vec![
+        "sentence-transformers/all-MiniLM-L6-v2".into(),
+        "sentence-transformers/all-mpnet-base-v2".into(),
+        "sentence-transformers/multi-qa-MiniLM-L6-cos-v1".into(),
+        "allenai/specter2_base".into(),
     ];
+
+    // Merge custom models from app_config.json so user-defined models are
+    // also scanned for offline availability.
+    let app_cfg_path = s.data_dir.join("app_config.json");
+    if let Ok(raw) = std::fs::read_to_string(&app_cfg_path) {
+        if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&raw) {
+            if let Some(arr) = cfg["custom_models"].as_array() {
+                for m in arr {
+                    if let Some(id) = m["id"].as_str() {
+                        if !known_models.iter().any(|k| k == id) {
+                            known_models.push(id.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     let hf_cache = hf_cache_dir();
     let cached_models: Vec<serde_json::Value> = known_models.iter()
-        .filter(|&&model_id| model_is_cached(&hf_cache, model_id))
-        .map(|&id| serde_json::json!(id))
+        .filter(|model_id| model_is_cached(&hf_cache, model_id))
+        .map(|id| serde_json::json!(id))
         .collect();
 
     Ok(serde_json::json!({
@@ -986,12 +1020,12 @@ pub fn hf_setup_venv(
         let mut guard = s.sidecar.lock().unwrap();
         if let Some(sc) = guard.as_mut() {
             if sc.is_alive() {
-                eprintln!("[LitAtlas] hf_setup_venv: sidecar already live — reusing.");
+                eprintln!("[PaperGraph] hf_setup_venv: sidecar already live — reusing.");
                 emit_progress(&app, "ready", "Similarity engine ready.", true);
                 return Ok(serde_json::json!({ "ok": true }));
             }
             // Dead sidecar — drop it before relaunching.
-            eprintln!("[LitAtlas] hf_setup_venv: dead sidecar found — relaunching.");
+            eprintln!("[PaperGraph] hf_setup_venv: dead sidecar found — relaunching.");
             *guard = None;
         }
     }
@@ -1008,7 +1042,7 @@ pub fn hf_setup_venv(
                 // launch_sidecar already emits the "ready" done event
             }
             Err(e) => {
-                eprintln!("[LitAtlas] hf_setup_venv background error: {e}");
+                eprintln!("[PaperGraph] hf_setup_venv background error: {e}");
                 let _ = app.emit("venv://error", serde_json::json!({ "error": e }));
             }
         }
@@ -1684,4 +1718,96 @@ pub fn save_similarity_config(
     let path = s.data_dir.join("similarity_config.json");
     let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
     std::fs::write(path, json).map_err(|e| e.to_string())
+}
+// ── Plugin validation ────────────────────────────────────────────────────────
+
+/// Ask the running sidecar to validate a plugin script.
+/// The sidecar imports the file and checks for `similarity_fn` and
+/// `compute_embedding_fn` without permanently loading it.
+///
+/// Called from JS as: invoke("hf_validate_plugin", { scriptPath })
+/// Returns: { valid: bool, has_similarity_fn: bool, has_embedding_fn: bool, error?: str }
+#[tauri::command]
+pub fn hf_validate_plugin(
+    app:         tauri::AppHandle,
+    s:           State<'_, AppState>,
+    script_path: String,
+) -> CmdResult<serde_json::Value> {
+    let mut guard = ensure_running(&s, &app)?;
+    guard.as_mut().unwrap()
+        .call("validate_plugin", serde_json::json!({ "script_path": script_path }))
+}
+
+// ── App config persistence ────────────────────────────────────────────────────
+// app_data_dir/app_config.json — stores user preferences that affect app
+// behaviour across all projects: custom sidecar script path, custom HF models.
+//
+// Schema:
+// {
+//   "sidecar_script": "/path/to/my_similarity_server.py",  // optional override
+//   "custom_models": [
+//     { "id": "org/model-name", "label": "My Model", "description": "...", "size_mb": 200 }
+//   ]
+// }
+
+#[tauri::command]
+pub fn get_app_config(s: State<'_, AppState>) -> CmdResult<serde_json::Value> {
+    let path = s.data_dir.join("app_config.json");
+    if !path.exists() {
+        return Ok(serde_json::json!({ "sidecar_script": null, "custom_models": [] }));
+    }
+    let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    serde_json::from_str(&raw).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn save_app_config(
+    s:      State<'_, AppState>,
+    config: serde_json::Value,
+) -> CmdResult<()> {
+    let path = s.data_dir.join("app_config.json");
+    let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
+    std::fs::write(path, json).map_err(|e| e.to_string())
+}
+
+/// Validate that a user-supplied path points to a readable Python file.
+/// Used by the App Settings panel before saving a custom sidecar script path.
+///
+/// Called from JS as: invoke("pick_sidecar_script", { path })
+/// Returns: { path: str, exists: bool, readable: bool }
+///
+/// NOTE: Native file-picker dialogs require the tauri-plugin-dialog crate.
+/// This lighter alternative simply validates a path the user typed or pasted
+/// directly into the settings input, keeping the dependency surface minimal.
+#[tauri::command]
+pub fn pick_sidecar_script(path: String) -> CmdResult<serde_json::Value> {
+    let p = std::path::Path::new(&path);
+    let exists   = p.exists();
+    let readable = exists && std::fs::read(&p).is_ok();
+    Ok(serde_json::json!({ "path": path, "exists": exists, "readable": readable }))
+}
+
+/// Return the resolved sidecar script path and whether it is a user override.
+/// JS calls this to show which script is currently active.
+///
+/// Returns: { path: str, is_custom: bool }
+#[tauri::command]
+pub fn get_sidecar_script_info(s: State<'_, AppState>) -> CmdResult<serde_json::Value> {
+    // Check for user override in app_config.json
+    let cfg_path = s.data_dir.join("app_config.json");
+    if cfg_path.exists() {
+        if let Ok(raw) = std::fs::read_to_string(&cfg_path) {
+            if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&raw) {
+                if let Some(p) = cfg["sidecar_script"].as_str() {
+                    if !p.is_empty() && std::path::Path::new(p).exists() {
+                        return Ok(serde_json::json!({ "path": p, "is_custom": true }));
+                    }
+                }
+            }
+        }
+    }
+    Ok(serde_json::json!({
+        "path":      s.sidecar_script(),
+        "is_custom": false,
+    }))
 }

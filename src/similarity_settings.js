@@ -1,6 +1,7 @@
 "use strict";
 
 import { getDefaultConfig } from "./similarity.js";
+import { getCustomModels } from "./app_settings.js";
 
 /**
  * similarity_settings.js
@@ -16,9 +17,9 @@ import { getDefaultConfig } from "./similarity.js";
  *   • On error       → red badge + message + Retry button
  */
 
-function _getSimConfig()           { return window.LitAtlas?.getSimConfig?.()    ?? {}; }
-async function _saveSimConfig(cfg) { return window.LitAtlas?.saveSimConfig?.(cfg); }
-async function _recompute()        { return window.LitAtlas?.triggerEdgeRecompute?.(); }
+function _getSimConfig()           { return window.PaperGraph?.getSimConfig?.()    ?? {}; }
+async function _saveSimConfig(cfg) { return window.PaperGraph?.saveSimConfig?.(cfg); }
+async function _recompute()        { return window.PaperGraph?.triggerEdgeRecompute?.(); }
 
 const invoke = (
   window.__TAURI__?.core?.invoke ??
@@ -86,7 +87,7 @@ async function _checkModelCached(modelId) {
 async function renderSettings(panel) {
   const cfg    = _getSimConfig();
   const isHF   = cfg.strategy === "hf-embeddings";
-  const hfOk   = window.LitAtlas?.isHfEnabled?.() === true;
+  const hfOk   = window.PaperGraph?.isHfEnabled?.() === true;
   let   models = _BUILTIN_MODELS;
   console.log("hfOk : ", hfOk);
   const body = panel.querySelector("#sim-settings-body");
@@ -96,20 +97,39 @@ async function renderSettings(panel) {
 
   // Check cache for the currently selected model.
   if (isHF) {
-    // Async: refresh model list from live sidecar (non-blocking).
+    // Async: refresh model list from live sidecar + custom models (non-blocking).
     if (invoke) {
       try {
-        const res = await invoke("hf_list_models");
-        if (res?.models?.length) {
-          models = res.models;
-          const sel = body.querySelector("#sim-model-select");
-          if (sel) {
-            const cur = sel.value;
-            sel.innerHTML = models.map(m =>
-              `<option value="${m.id}" ${m.id===cur?"selected":""}>${m.label}</option>`
-            ).join("");
-            _setModelDesc(body, models, sel.value);
-          }
+        const [sidecarRes, customModels] = await Promise.all([
+          invoke("hf_list_models").catch(() => null),
+          getCustomModels().catch(() => []),
+        ]);
+
+        // Start with sidecar list (includes cached: bool annotation), fall back to builtin
+        let baseModels = sidecarRes?.models?.length ? sidecarRes.models : _BUILTIN_MODELS;
+
+        // Merge user-defined custom models, avoiding duplicates
+        const knownIds = new Set(baseModels.map(m => m.id));
+        const extras   = customModels
+          .filter(m => m.id && !knownIds.has(m.id))
+          .map(m => ({
+            id:          m.id,
+            label:       m.label || m.id,
+            description: "User-defined model",
+            size_mb:     m.size_mb ?? null,
+            cached:      sidecarRes?.models?.find(sm => sm.id === m.id)?.cached ?? false,
+          }));
+
+        models = [...baseModels, ...extras];
+
+        const sel = body.querySelector("#sim-model-select");
+        if (sel) {
+          const cur = sel.value;
+          sel.innerHTML = models.map(m => {
+            const label = m.cached ? `✓ ${m.label}` : m.label;
+            return `<option value="${m.id}" ${m.id===cur?"selected":""}>${label}</option>`;
+          }).join("");
+          _setModelDesc(body, models, sel.value);
         }
       } catch (_) { /* use builtin list */ }
     }

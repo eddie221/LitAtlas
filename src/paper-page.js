@@ -469,40 +469,41 @@ async function renderPdfTab(paper) {
   const nameEl    = document.getElementById("pp-pdf-name");
   const statusEl  = document.getElementById("pp-pdf-db-status");
   const removeBtn = document.getElementById("pp-pdf-remove");
-  const fileInput = document.getElementById("pp-pdf-file-input");
-  if (paper.pdf_path) {
-    showPdfFromPath(paper.pdf_path, viewer, dropzone, nameEl, statusEl);
-    const filename = paper.pdf_path.split(/[/\\]/).pop();
-    await loadPdfIntoIframe(paper.id, iframe, (msg, color) => {
-      if (!statusEl) return;
-      if (msg === null) {
-        statusEl.textContent = filename;
-        statusEl.style.color = "";
-      } else {
-        statusEl.textContent = msg;
-        statusEl.style.color = color || "";
-      }
-    });
-  }
-  else{
-    showDropzone(dropzone, viewer);
-  }
 
-  dropzone.onclick = () => fileInput.click();
-  const freshInput = fileInput.cloneNode(true);
-  fileInput.parentNode.replaceChild(freshInput, fileInput);
-  freshInput.onchange = () => {
-    const file = freshInput.files[0];
+  // Clone the file input to clear any previous onchange listener.
+  // Use a shallow clone so the new element keeps the same id/accept attributes.
+  const oldInput  = document.getElementById("pp-pdf-file-input");
+  const fileInput = oldInput.cloneNode(false);
+  oldInput.parentNode.replaceChild(fileInput, oldInput);
+
+  // ── Picker: triggered by click on dropzone or file input ──────────────────
+  fileInput.addEventListener("change", () => {
+    const file = fileInput.files[0];
     if (file) handlePdfPick(file, paper, dropzone, viewer, iframe, nameEl, statusEl);
-  };
-  dropzone.addEventListener("dragover",  e => { e.preventDefault(); dropzone.classList.add("drag-over"); });
-  dropzone.addEventListener("dragleave", () => dropzone.classList.remove("drag-over"));
-  dropzone.addEventListener("drop", e => {
-    e.preventDefault(); dropzone.classList.remove("drag-over");
+  });
+  dropzone.onclick = () => fileInput.click();
+
+  // ── Drag-and-drop: use named handlers so we can remove them next render ───
+  // Store handlers on the element so the next call can detach them first.
+  if (dropzone._pgDragOver)  dropzone.removeEventListener("dragover",  dropzone._pgDragOver);
+  if (dropzone._pgDragLeave) dropzone.removeEventListener("dragleave", dropzone._pgDragLeave);
+  if (dropzone._pgDrop)      dropzone.removeEventListener("drop",      dropzone._pgDrop);
+
+  dropzone._pgDragOver  = e => { e.preventDefault(); dropzone.classList.add("drag-over"); };
+  dropzone._pgDragLeave = ()  => dropzone.classList.remove("drag-over");
+  dropzone._pgDrop      = e  => {
+    e.preventDefault();
+    dropzone.classList.remove("drag-over");
     const file = e.dataTransfer.files[0];
     if (file?.type === "application/pdf")
       handlePdfPick(file, paper, dropzone, viewer, iframe, nameEl, statusEl);
-  });
+  };
+
+  dropzone.addEventListener("dragover",  dropzone._pgDragOver);
+  dropzone.addEventListener("dragleave", dropzone._pgDragLeave);
+  dropzone.addEventListener("drop",      dropzone._pgDrop);
+
+  // ── Remove button ──────────────────────────────────────────────────────────
   removeBtn.onclick = async () => {
     if (!await pgConfirm("Remove the PDF reference for this paper?", "Remove PDF")) return;
     await invoke("save_pdf_path", { id: paper.id, path: null });
@@ -510,22 +511,40 @@ async function renderPdfTab(paper) {
     if (cached) cached.pdf_path = null;
     if (iframe.src.startsWith("blob:")) URL.revokeObjectURL(iframe.src);
     iframe.src = "";
-    if (statusEl) statusEl.textContent = "PDF path removed";
+    if (statusEl) statusEl.textContent = "PDF removed";
     showDropzone(dropzone, viewer);
   };
+
+  // ── Load existing PDF or show dropzone ────────────────────────────────────
+  if (paper.pdf_path) {
+    showPdfFromPath(paper.pdf_path, viewer, dropzone, nameEl, statusEl);
+    const filename = paper.pdf_path.split(/[/\\]/).pop();
+    await loadPdfIntoIframe(paper.id, iframe, (msg, color) => {
+      if (!statusEl) return;
+      if (msg === null) { statusEl.textContent = filename; statusEl.style.color = ""; }
+      else              { statusEl.textContent = msg;      statusEl.style.color = color ?? ""; }
+    });
+  } else {
+    showDropzone(dropzone, viewer);
+  }
 }
 
 // Read a File object as a base64 string (strips the data-URL prefix)
 function readFileAsBase64(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onload  = () => resolve(reader.result); // full data-URL; Rust strips prefix
+    reader.onload = () => {
+      const result = reader.result;
+      const comma  = result.indexOf(",");
+      resolve(comma !== -1 ? result.slice(comma + 1) : result);
+    };
     reader.onerror = () => reject(reader.error);
     reader.readAsDataURL(file);
   });
 }
 
 async function handlePdfPick(file, paper, dropzone, viewer, iframe, nameEl, statusEl) {
+  console.log("handlePDF ");
   if (statusEl) { statusEl.textContent = "Reading file…"; statusEl.style.color = "var(--text-secondary)"; }
   try {
     // Read the file bytes in JS — this works in all Tauri/browser environments
@@ -571,8 +590,12 @@ async function handlePdfPick(file, paper, dropzone, viewer, iframe, nameEl, stat
       statusEl.style.color = "var(--accent3)";
     }
   }
-  // Always show the PDF in-frame using a local blob URL (no filesystem path needed)
+  // Show viewer and load the picked file directly as a blob URL —
+  // no round-trip to Rust needed, works immediately after upload.
   showPdfInFrame(file.name, viewer, dropzone, nameEl);
+  if (iframe.src.startsWith("blob:")) URL.revokeObjectURL(iframe.src);
+  const blob = new Blob([await file.arrayBuffer()], { type: "application/pdf" });
+  iframe.src = URL.createObjectURL(blob);
 }
 
 function showPdfFromPath(path, viewer, dropzone, nameEl, statusEl) {

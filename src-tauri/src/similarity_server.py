@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-similarity_server.py — LitAtlas HuggingFace similarity sidecar.
+similarity_server.py — PaperGraph HuggingFace similarity sidecar.
 
 Protocol: newline-delimited JSON over stdin/stdout (Tauri sidecar stdio).
 
@@ -28,6 +28,89 @@ import threading
 import traceback
 from typing import Any
 import torch
+
+# ── User plugin ──────────────────────────────────────────────────────────────
+#
+# Users can extend PaperGraph with a custom similarity function by creating a
+# Python file that defines the following entry point:
+#
+#   def similarity_fn(papers: list[dict], config: dict) -> list[dict]:
+#       """
+#       Compute similarity edges for the given papers.
+#
+#       Parameters
+#       ----------
+#       papers : list[dict]
+#           Each dict is a PaperFull record:
+#             { id, title, venue, year, notes, hashtags: [str],
+#               authors: [str], attributes: [{key, value, order}] }
+#       config : dict
+#           The current similarity config:
+#             { model, fields, weights, threshold, max_edges, ... }
+#           Plus any extra keys the user stored in their app config.
+#
+#       Returns
+#       -------
+#       list[dict]
+#           Each dict must have:
+#             { source_id: int, target_id: int,
+#               similarity: float,       # 0.0 – 1.0
+#               weight:     int,         # 1 | 2 | 3
+#               edge_type:  str }        # "related" | "same_tag" | "same_venue" | ...
+#       """
+#
+# The path to this file is passed at server startup via the environment
+# variable PAPERGRAPH_PLUGIN_SCRIPT (set by Rust before spawning the sidecar).
+# If the variable is not set, or the file does not define `similarity_fn`,
+# the default built-in implementation is used.
+#
+# Optional additional hooks (all have the same signature contract):
+#
+#   def compute_embedding_fn(paper: dict, config: dict) -> dict:
+#       """
+#       Compute per-field embedding vectors for a single paper.
+#       Must return: { field_vectors: { field_name: [float, ...] }, dim: int }
+#       If absent, the default HuggingFace implementation is used.
+#       """
+
+_plugin_similarity_fn        = None  # similarity_fn(papers, config) -> edges
+_plugin_compute_embedding_fn = None  # compute_embedding_fn(paper, config) -> {field_vectors, dim}
+
+def _load_plugin() -> None:
+    """
+    Load the user plugin script if PAPERGRAPH_PLUGIN_SCRIPT is set.
+    Called once at startup.  Errors are printed to stderr but never fatal —
+    the server always falls back to the built-in implementation.
+    """
+    global _plugin_similarity_fn, _plugin_compute_embedding_fn
+    script = os.environ.get("PAPERGRAPH_PLUGIN_SCRIPT", "").strip()
+    if not script:
+        return
+    if not os.path.isfile(script):
+        print(f"[PaperGraph] WARNING: plugin script not found: {script}", file=sys.stderr)
+        return
+    try:
+        import importlib.util
+        spec   = importlib.util.spec_from_file_location("_pg_plugin", script)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        if hasattr(module, "similarity_fn"):
+            _plugin_similarity_fn = module.similarity_fn
+            print(f"[PaperGraph] Loaded plugin similarity_fn from {script}", file=sys.stderr)
+        if hasattr(module, "compute_embedding_fn"):
+            _plugin_compute_embedding_fn = module.compute_embedding_fn
+            print(f"[PaperGraph] Loaded plugin compute_embedding_fn from {script}", file=sys.stderr)
+        if not hasattr(module, "similarity_fn") and not hasattr(module, "compute_embedding_fn"):
+            print(
+                f"[PaperGraph] WARNING: plugin {script} defines neither "
+                f"'similarity_fn' nor 'compute_embedding_fn' — no hooks loaded.",
+                file=sys.stderr,
+            )
+    except Exception:
+        import traceback
+        print(f"[PaperGraph] ERROR loading plugin {script}:", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+
 
 # ── Lazy-loaded model ─────────────────────────────────────────────────────────
 _model      = None
@@ -345,6 +428,16 @@ def compute_embedding(paper: dict, config: dict) -> dict:
     weights the user currently has set.  This means embedding.json stays valid
     across weight changes — only a model or field-set change triggers re-encoding.
     """
+    # Delegate to user plugin if one was loaded at startup.
+    if _plugin_compute_embedding_fn is not None:
+        try:
+            return _plugin_compute_embedding_fn(paper, config)
+        except Exception:
+            import traceback
+            print("[PaperGraph] plugin compute_embedding_fn raised — falling back to built-in:",
+                  file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+
     model_name = config.get("model",  "sentence-transformers/all-MiniLM-L6-v2")
     fields     = config.get("fields", ["title", "abstract", "hashtags"])
     model      = _get_model(model_name)
@@ -374,6 +467,17 @@ def compute_embedding(paper: dict, config: dict) -> dict:
 
 
 def compute(papers: list, config: dict) -> list:
+    # Delegate to user plugin if one was loaded at startup.
+    if _plugin_similarity_fn is not None:
+        try:
+            return _plugin_similarity_fn(papers, config)
+        except Exception:
+            import traceback
+            print("[PaperGraph] plugin similarity_fn raised an error — falling back to built-in:",
+                  file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+            # Fall through to built-in implementation below.
+
     model_name = config.get("model", "sentence-transformers/all-MiniLM-L6-v2")
     fields     = config.get("fields",    ["title", "abstract", "hashtags"])
     weights    = config.get("weights",   {})
@@ -430,6 +534,39 @@ def compute(papers: list, config: dict) -> list:
     return result
 
 
+# ── Plugin validation ────────────────────────────────────────────────────────
+
+def _handle_validate_plugin(req_id, script_path: str) -> None:
+    """
+    Validate a plugin script without loading it permanently.
+    Reports which hooks it exports and whether it can be imported cleanly.
+    """
+    if not script_path:
+        ok(req_id, {"valid": False, "error": "No script path provided."})
+        return
+    if not os.path.isfile(script_path):
+        ok(req_id, {"valid": False, "error": f"File not found: {script_path}"})
+        return
+    try:
+        import importlib.util
+        spec   = importlib.util.spec_from_file_location("_pg_plugin_validate", script_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        has_sim = hasattr(module, "similarity_fn")
+        has_emb = hasattr(module, "compute_embedding_fn")
+        ok(req_id, {
+            "valid":               True,
+            "has_similarity_fn":   has_sim,
+            "has_embedding_fn":    has_emb,
+        })
+    except Exception:
+        import traceback
+        ok(req_id, {
+            "valid": False,
+            "error": traceback.format_exc(),
+        })
+
+
 # ── JSON-RPC helpers ──────────────────────────────────────────────────────────
 
 def reply(req_id: Any, ok_flag: bool, key: str, val: Any) -> None:
@@ -478,6 +615,11 @@ def handle(line: str) -> None:
         elif method == "compute":
             edges = compute(params.get("papers", []), params.get("config", {}))
             ok(req_id, {"edges": edges, "count": len(edges)})
+        elif method == "validate_plugin":
+            # Validate a plugin script without loading it permanently.
+            # Params: { script_path: str }
+            # Returns: { valid: bool, has_similarity_fn: bool, has_embedding_fn: bool, error?: str }
+            _handle_validate_plugin(req_id, params.get("script_path", ""))
         else:
             err(req_id, f"Unknown method: '{method}'")
     except Exception:
@@ -485,6 +627,8 @@ def handle(line: str) -> None:
 
 
 def main() -> None:
+    # Load user plugin script (if PAPERGRAPH_PLUGIN_SCRIPT env var is set).
+    _load_plugin()
     sys.stdout.write(json.dumps({"id": 0, "ok": True, "result": "ready"}) + "\n")
     sys.stdout.flush()
     for raw in sys.stdin:

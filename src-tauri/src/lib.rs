@@ -44,20 +44,30 @@ impl AppState {
     /// Absolute path to similarity_server.py.
     ///
     /// Resolution order:
+    ///   0. User override in app_data_dir/app_config.json["sidecar_script"]
     ///   1. app_data_dir/similarity_server.py  (bundled release copy)
     ///   2. <workspace_root>/similarity_server.py  (dev — next to src-tauri/)
     pub fn sidecar_script(&self) -> String {
+        // 0. User override — respects custom script path set in App Settings.
+        let app_cfg = self.data_dir.join("app_config.json");
+        if let Ok(raw) = std::fs::read_to_string(&app_cfg) {
+            if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&raw) {
+                if let Some(p) = cfg["sidecar_script"].as_str() {
+                    let path = std::path::Path::new(p);
+                    if !p.is_empty() && path.exists() {
+                        return p.to_owned();
+                    }
+                }
+            }
+        }
         // 1. Bundled location (production)
-        // println!("Bundled {}", self.data_dir.display());
         let bundled = self.data_dir.join("similarity_server.py");
         if bundled.exists() {
             return bundled.to_string_lossy().into_owned();
         }
         // 2. Dev location: two directories up from src-tauri/src/ == workspace root
-        // println!(env!("CARGO_MANIFEST_DIR"));
         let dev = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("src/similarity_server.py");
-        // println!("Dev {}", dev.display());
         dev.to_string_lossy().into_owned()
     }
 }
@@ -83,7 +93,7 @@ fn seed_db(pool: &SqlitePool) {
             if stmt.is_empty() { continue; }
             // println!("{}", stmt);
             if let Err(e) = sqlx::query(stmt).execute(pool).await {
-                eprintln!("[LitAtlas] seed: {e}");
+                eprintln!("[PaperGraph] seed: {e}");
             }
         }
     });
@@ -93,7 +103,7 @@ pub fn open_project(projects_dir: &PathBuf, slug: &str) -> SqlitePool {
     let proj = projects_dir.join(slug);
     std::fs::create_dir_all(&proj).unwrap();
     std::fs::create_dir_all(proj.join("pdfs")).unwrap();
-    let db_path = proj.join("LitAtlas.db");
+    let db_path = proj.join("papergraph.db");
     let pool = tauri::async_runtime::block_on(
         db::create_pool(&db_path.to_string_lossy())
     ).expect("Failed to open DB");
@@ -173,7 +183,12 @@ pub fn run() {
             hf_setup_status, hf_setup_venv,
             // Similarity config persistence
             get_similarity_config, save_similarity_config,
+            // App config (custom sidecar path, custom models)
+            get_app_config, save_app_config,
+            pick_sidecar_script, get_sidecar_script_info,
+            // Plugin validation
+            hf_validate_plugin,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running LitAtlas");
+        .expect("error while running PaperGraph");
 }

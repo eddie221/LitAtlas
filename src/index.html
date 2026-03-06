@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>LitAtlas — Literature Atlas Viewer</title>
+  <title>PaperGraph — Research Relationship Viewer</title>
   <!-- ── LOCAL FONTS ─────────────────────────────────────────────────────────
        Font files live in the same directory as index.html (or adjust the
        paths below to match your Tauri asset setup).
@@ -88,7 +88,9 @@
   <!-- ── SIDEBAR EDGE TOGGLE ── -->
   <button id="sidebar-edge-toggle" title="Collapse sidebar">‹</button>
   <header id="header">
-    <h1>Lit<span>Atlas</span></h1>
+    <h1>Paper<span>Graph</span></h1>
+
+    <!-- ── Search ── -->
     <div id="search-bar">
       <input id="search-input" type="text" placeholder="Search papers…" />
       <div id="search-fields">
@@ -98,12 +100,47 @@
         <button class="sf-pill active" data-field="venue"   title="Search by venue">Venue</button>
       </div>
     </div>
+
+    <!-- ── Controls ── -->
     <div id="controls">
-      <button class="btn active" id="btn-force">Force</button>
-      <button class="btn" id="btn-radial">Radial</button>
-      <button class="btn" id="btn-reset">Reset</button>
-      <button class="btn btn-new-paper" id="btn-new-paper">+ New Paper</button>
-      <button class="btn" id="btn-sim-settings" title="Similarity Settings">⚙ Similarity</button>
+
+      <!-- Layout segmented control -->
+      <div class="ctrl-group ctrl-segmented" id="layout-toggle">
+        <button class="seg-btn active" id="btn-force"  title="Force-directed layout">Force</button>
+        <button class="seg-btn"        id="btn-radial" title="Radial layout">Radial</button>
+      </div>
+
+      <div class="ctrl-divider"></div>
+
+      <!-- Graph actions -->
+      <button class="btn ctrl-action" id="btn-reset" title="Reset view">↺ Reset</button>
+      <button class="btn ctrl-primary" id="btn-new-paper" title="Add a new paper">+ Paper</button>
+
+      <div class="ctrl-divider"></div>
+
+      <!-- Zoom inline -->
+      <div class="ctrl-group ctrl-zoom">
+        <button class="zoom-btn" id="zoom-out"  title="Zoom out">−</button>
+        <button class="zoom-btn" id="zoom-fit"  title="Fit graph">fit</button>
+        <button class="zoom-btn" id="zoom-in"   title="Zoom in">+</button>
+      </div>
+
+      <div class="ctrl-divider"></div>
+
+      <!-- Settings icon buttons -->
+      <button class="ctrl-icon-btn" id="btn-sim-settings" title="Similarity Settings">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+        </svg>
+        <span class="ctrl-icon-label">Similarity</span>
+      </button>
+      <button class="ctrl-icon-btn" id="btn-app-settings" title="App Settings">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 2H2v10l9.29 9.29c.94.94 2.48.94 3.42 0l6.58-6.58c.94-.94.94-2.48 0-3.42L12 2z"/><line x1="7" y1="7" x2="7.01" y2="7"/>
+        </svg>
+        <span class="ctrl-icon-label">App</span>
+      </button>
+
     </div>
   </header>
 
@@ -112,12 +149,7 @@
     <canvas id="graph-canvas"></canvas>
   </div>
 
-  <!-- ── ZOOM ── -->
-  <div id="zoom-controls">
-    <button class="zoom-btn" id="zoom-in">+</button>
-    <button class="zoom-btn" id="zoom-out">−</button>
-    <button class="zoom-btn" id="zoom-fit" style="font-size:0.55rem">FIT</button>
-  </div>
+
 
   
 
@@ -352,6 +384,21 @@
   <!-- ══════════════════════════════════════════════════
        SIMILARITY SETTINGS PANEL
   ══════════════════════════════════════════════════ -->
+  <!-- ── App Settings Panel ─────────────────────────────────────────────── -->
+  <div id="app-settings-backdrop"></div>
+  <div id="app-settings-panel">
+    <div id="app-settings-header">
+      <div id="app-settings-title">
+        <span class="app-settings-icon">⚙</span>
+        App Settings
+      </div>
+      <button id="app-settings-close">✕</button>
+    </div>
+    <div id="app-settings-body">
+      <!-- rendered by app_settings.js -->
+    </div>
+  </div>
+
   <div id="sim-settings-backdrop"></div>
   <div id="sim-settings-panel">
     <div id="sim-settings-header">
@@ -367,6 +414,7 @@
   </div>
 
   <script src="similarity_settings.js" type="module" defer></script>
+<script src="app_settings.js" type="module" defer></script>
   <script src="graph.js" type="module" defer></script>
   <script src="paper-page.js" type="module" defer></script>
   <script src="projects.js" type="module" defer></script> 
@@ -389,7 +437,7 @@
         </div>
         <div class="npm-field npm-field-full">
           <label class="npm-label">Authors
-            <span style="color:var(--text-dim)"> — comma separated</span>
+            <span style="color:var(--text-dim)"> — comma separated (optional)</span>
           </label>
           <input class="npm-input" id="npm-authors" placeholder="He, K., Zhang, X., Ren, S.">
         </div>
@@ -449,7 +497,7 @@
       <div id="llm-consent-icon">🤖</div>
       <div id="llm-consent-title">Enable AI Similarity Features?</div>
       <div id="llm-consent-body">
-        <p>LitAtlas can use a local <strong>HuggingFace sentence-transformer</strong>
+        <p>PaperGraph can use a local <strong>HuggingFace sentence-transformer</strong>
            model to compute semantic similarity between papers.</p>
         <ul>
           <li>Runs entirely <strong>on your machine</strong> — no data leaves your device</li>

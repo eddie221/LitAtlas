@@ -1483,8 +1483,8 @@ document.getElementById("npm-submit-btn").addEventListener("click", async () => 
   const authors = document.getElementById("npm-authors").value.trim();
   const statusEl = document.getElementById("npm-status");
 
-  if (!title || !authors) {
-    statusEl.textContent = "Title and at least one author are required.";
+  if (!title) {
+    statusEl.textContent = "A title is required.";
     statusEl.style.color = "var(--accent3)";
     return;
   }

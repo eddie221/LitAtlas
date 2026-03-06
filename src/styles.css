@@ -36,20 +36,130 @@
       z-index: 100;
       display: flex;
       align-items: center;
-      justify-content: space-between;
-      padding: 13px 24px;
-      background: rgba(10,12,16,0.88);
-      backdrop-filter: blur(12px);
+      gap: 0;
+      padding: 0 16px 0 20px;
+      height: 52px;
+      background: rgba(10,12,16,0.92);
+      backdrop-filter: blur(14px);
       border-bottom: 1px solid var(--border);
     }
     #header h1 {
       font-family: 'DM Serif Display', serif;
-      font-size: 1.25rem;
+      font-size: 1.1rem;
       letter-spacing: -0.01em;
+      flex-shrink: 0;
+      margin-right: 16px;
     }
     #header h1 span { color: var(--accent); }
 
-    #controls { display: flex; gap: 8px; align-items: center; }
+    /* ── Controls row ─────────────────────────────────────────────────────── */
+    #controls {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-left: auto;   /* push to right edge */
+    }
+
+    /* thin vertical divider between groups */
+    .ctrl-divider {
+      width: 1px;
+      height: 18px;
+      background: var(--border);
+      flex-shrink: 0;
+      margin: 0 2px;
+    }
+
+    /* ── Segmented layout toggle ──────────────────────────────────────────── */
+    .ctrl-segmented {
+      display: flex;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      overflow: hidden;
+    }
+    .seg-btn {
+      background: transparent;
+      border: none;
+      border-right: 1px solid var(--border);
+      color: var(--text-secondary);
+      font-family: 'Space Mono', monospace;
+      font-size: 0.58rem;
+      letter-spacing: 0.04em;
+      padding: 5px 10px;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+      white-space: nowrap;
+    }
+    .seg-btn:last-child { border-right: none; }
+    .seg-btn:hover { background: var(--bg-hover, #1e2230); color: var(--text-primary); }
+    .seg-btn.active {
+      background: rgba(0,212,255,0.12);
+      color: var(--accent2, #00d4ff);
+    }
+
+    /* ── Generic action button (Reset) ───────────────────────────────────── */
+    .ctrl-action {
+      font-size: 0.58rem;
+      padding: 5px 10px;
+      border-radius: 4px;
+      white-space: nowrap;
+    }
+
+    /* ── Primary CTA (+ Paper) ───────────────────────────────────────────── */
+    .ctrl-primary {
+      font-size: 0.58rem;
+      padding: 5px 10px;
+      border-radius: 4px;
+      border-color: var(--accent);
+      color: var(--accent);
+      white-space: nowrap;
+    }
+    .ctrl-primary:hover { background: var(--accent); color: #000; }
+
+    /* ── Zoom group (inline in header) ───────────────────────────────────── */
+    .ctrl-zoom {
+      display: flex;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      overflow: hidden;
+    }
+    .ctrl-zoom .zoom-btn {
+      border: none;
+      border-right: 1px solid var(--border);
+      border-radius: 0;
+      padding: 5px 8px;
+      font-size: 0.68rem;
+      min-width: 28px;
+    }
+    .ctrl-zoom .zoom-btn:last-child { border-right: none; }
+
+    /* ── Settings icon buttons ────────────────────────────────────────────── */
+    .ctrl-icon-btn {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 2px;
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--text-secondary);
+      cursor: pointer;
+      padding: 4px 8px;
+      transition: background 0.15s, color 0.15s, border-color 0.15s;
+      min-width: 40px;
+    }
+    .ctrl-icon-btn:hover {
+      background: var(--bg-hover, #1e2230);
+      color: var(--text-primary);
+      border-color: var(--accent2, #00d4ff);
+    }
+    .ctrl-icon-btn svg { flex-shrink: 0; }
+    .ctrl-icon-label {
+      font-family: 'Space Mono', monospace;
+      font-size: 0.45rem;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      line-height: 1;
+    }
 
     .btn {
       background: transparent;
@@ -81,7 +191,7 @@
     /* ═══════════════════════════════════════════════════════════
        CANVAS
     ═══════════════════════════════════════════════════════════ */
-    #canvas-container { position: fixed; inset: 0; top: 50px; }
+    #canvas-container { position: fixed; inset: 0; top: 52px; }
     #graph-canvas { width: 100%; height: 100%; cursor: grab; }
     #graph-canvas:active { cursor: grabbing; }
 
@@ -89,7 +199,7 @@
        QUICK DETAIL SIDEBAR (right panel)
     ═══════════════════════════════════════════════════════════ */
     #detail-panel {
-      position: fixed; right: 0; top: 84px; bottom: 0;
+      position: fixed; right: 0; top: 52px; bottom: 0;
       width: 500px;
       background: rgba(10,12,16,0.94);
       backdrop-filter: blur(16px);
@@ -229,20 +339,21 @@
     /* ═══════════════════════════════════════════════════════════
        ZOOM CONTROLS
     ═══════════════════════════════════════════════════════════ */
-    #zoom-controls {
-      position: fixed; left: 230px; top: 50%;
-      transform: translateY(-50%);
-      display: flex; flex-direction: column; gap: 4px; z-index: 50;
-      transition: left 0.25s cubic-bezier(0.16,1,0.3,1);
-    }
+    /* zoom-controls container is now gone — zoom lives in the header .ctrl-zoom group */
+    #zoom-controls { display: none; }   /* hide if remnant HTML exists */
     .zoom-btn {
-      width: 30px; height: 30px;
+      background: var(--surface);
+      border: none;
+      color: var(--text-secondary);
+      font-size: 0.78rem;
+      min-width: 28px; height: 28px;
+      cursor: pointer;
       display: flex; align-items: center; justify-content: center;
-      background: rgba(10,12,16,0.9); border: 1px solid var(--border);
-      color: var(--text-secondary); cursor: pointer;
-      font-size: 1rem; line-height: 1; transition: all 0.15s; font-family: inherit;
+      transition: background 0.15s, color 0.15s;
+      font-family: 'Space Mono', monospace;
+      letter-spacing: 0;
     }
-    .zoom-btn:hover { border-color: var(--accent); color: var(--accent); }
+    .zoom-btn:hover { background: var(--bg-hover, #1e2230); color: var(--accent); }
 
     /* ═══════════════════════════════════════════════════════════
        SEARCH
@@ -902,7 +1013,7 @@
     ═══════════════════════════════════════════════════════════ */
     #project-sidebar {
       position: fixed;
-      left: 0; top: 84px; bottom: 0;
+      left: 0; top: 52px; bottom: 0;
       width: 200px;
       background: var(--surface);
       border-right: 1px solid var(--border);
@@ -1072,7 +1183,6 @@
     }
     body.sidebar-collapsed #canvas-container,
     body.sidebar-collapsed #header { left: 0px; }
-    body.sidebar-collapsed #zoom-controls { left: 48px; }
 
     /* ═══════════════════════════════════════════════════════════
        SIDEBAR PDF VIEWER (quick detail panel)
@@ -1628,9 +1738,16 @@
 /* ── Disabled ⚙ Similarity button ───────────────────────────────────────── */
 #btn-sim-settings.hf-disabled,
 #btn-sim-settings:disabled {
-  opacity: 0.35;
+  opacity: 0.30;
   cursor: not-allowed;
   pointer-events: none;
+}
+/* Active state for the settings icon buttons */
+.ctrl-icon-btn.active,
+.ctrl-icon-btn[aria-pressed="true"] {
+  background: rgba(0,212,255,0.12);
+  border-color: var(--accent2, #00d4ff);
+  color: var(--accent2, #00d4ff);
 }
 
 /* ── HF strategy button locked (HF disabled this session) ───────────────── */
@@ -1754,4 +1871,353 @@
   font-size: 0.6rem;
   color: var(--text-dim);
   font-style: italic;
+}
+/* ══════════════════════════════════════════════════════════════════════════════
+   App Settings Panel
+   ══════════════════════════════════════════════════════════════════════════════ */
+
+#app-settings-backdrop {
+  display: none;
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.45);
+  backdrop-filter: blur(3px);
+  z-index: 1100;
+}
+#app-settings-backdrop.open { display: block; }
+
+#app-settings-panel {
+  display: none;
+  position: fixed;
+  top: 0; right: 0;
+  width: 440px; max-width: 96vw;
+  height: 100vh;
+  background: var(--bg-panel, #0e1118);
+  border-left: 1px solid var(--border, #2a2d3a);
+  z-index: 1101;
+  flex-direction: column;
+  overflow: hidden;
+}
+#app-settings-panel.open { display: flex; }
+
+#app-settings-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px 12px;
+  border-bottom: 1px solid var(--border, #2a2d3a);
+  flex-shrink: 0;
+}
+#app-settings-title {
+  font-size: .75rem;
+  font-weight: 600;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--text-primary, #f0f4ff);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.app-settings-icon { font-size: .85rem; }
+
+#app-settings-close {
+  background: none; border: none; cursor: pointer;
+  color: var(--text-dim, #666); font-size: .85rem; padding: 4px 6px;
+  border-radius: 4px;
+}
+#app-settings-close:hover { background: var(--bg-hover, #1e2230); color: var(--text-primary); }
+
+#app-settings-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 16px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+/* ── Sections ─────────────────────────────────────────────────────────────── */
+
+.app-cfg-section {
+  padding: 14px 0;
+  border-bottom: 1px solid var(--border, #2a2d3a);
+}
+.app-cfg-section:last-child { border-bottom: none; }
+
+.app-cfg-section-title {
+  font-size: .62rem;
+  font-weight: 600;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--accent, #00d4ff);
+  margin-bottom: 8px;
+}
+
+.app-cfg-hint {
+  font-size: .6rem;
+  color: var(--text-dim, #666);
+  line-height: 1.6;
+  margin-bottom: 10px;
+}
+.app-cfg-hint code {
+  font-family: "Space Mono", monospace;
+  font-size: .58rem;
+  background: var(--bg-code, #161922);
+  padding: 1px 4px;
+  border-radius: 3px;
+  color: var(--accent2, #00d4ff);
+}
+
+.app-cfg-loading {
+  font-size: .6rem;
+  color: var(--text-dim, #666);
+  padding: 20px 0;
+  text-align: center;
+}
+
+/* ── Active script path ───────────────────────────────────────────────────── */
+
+.app-cfg-active-path {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+  font-size: .58rem;
+  flex-wrap: wrap;
+}
+.app-cfg-path-label {
+  color: var(--text-secondary, #8b9bbd);
+  flex-shrink: 0;
+}
+.app-cfg-path-value {
+  font-family: "Space Mono", monospace;
+  font-size: .55rem;
+  color: var(--text-secondary, #8b9bbd);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 240px;
+}
+.app-cfg-path-custom { color: var(--accent, #00d4ff); }
+
+.app-cfg-badge {
+  font-size: .5rem;
+  font-weight: 600;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  padding: 1px 5px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+.app-cfg-badge-default {
+  background: rgba(255,255,255,.07);
+  color: var(--text-dim, #666);
+}
+.app-cfg-badge-custom {
+  background: rgba(0,212,255,.12);
+  color: var(--accent, #00d4ff);
+  border: 1px solid rgba(0,212,255,.3);
+}
+
+/* ── Script input row ─────────────────────────────────────────────────────── */
+
+.app-cfg-script-row {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.app-cfg-input {
+  flex: 1;
+  background: var(--bg-input, #161922);
+  border: 1px solid var(--border, #2a2d3a);
+  border-radius: 4px;
+  color: var(--text-primary, #f0f4ff);
+  font-size: .6rem;
+  font-family: "Space Mono", monospace;
+  padding: 5px 8px;
+  outline: none;
+  min-width: 0;
+}
+.app-cfg-input:focus { border-color: var(--accent, #00d4ff); }
+.app-cfg-input[type="number"] { width: 64px; flex: none; }
+
+.app-cfg-script-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+.app-cfg-reset-btn {
+  background: rgba(255,60,60,.08) !important;
+  border-color: rgba(255,60,60,.25) !important;
+  color: #ff7070 !important;
+}
+.app-cfg-reset-btn:hover {
+  background: rgba(255,60,60,.16) !important;
+}
+
+/* ── Validate area ────────────────────────────────────────────────────────── */
+
+.app-cfg-validate-area {
+  font-size: .58rem;
+  font-family: "Space Mono", monospace;
+  padding: 6px 10px;
+  border-radius: 4px;
+  margin-bottom: 8px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.app-cfg-validate-area.checking {
+  background: rgba(255,200,0,.06);
+  color: var(--text-dim, #666);
+  border: 1px solid rgba(255,200,0,.15);
+}
+.app-cfg-validate-area.ok {
+  background: rgba(52,211,153,.08);
+  color: #34d399;
+  border: 1px solid rgba(52,211,153,.2);
+}
+.app-cfg-validate-area.warn {
+  background: rgba(251,146,60,.08);
+  color: #fb923c;
+  border: 1px solid rgba(251,146,60,.2);
+}
+.app-cfg-validate-area.err {
+  background: rgba(255,60,60,.08);
+  color: #ff7070;
+  border: 1px solid rgba(255,60,60,.2);
+}
+
+/* ── Status messages ──────────────────────────────────────────────────────── */
+
+.app-cfg-status {
+  font-size: .58rem;
+  min-height: 1.2em;
+  margin-top: 4px;
+}
+.app-cfg-status.ok   { color: #34d399; }
+.app-cfg-status.warn { color: #fb923c; }
+.app-cfg-status.err  { color: #ff7070; }
+
+/* ── Custom models list ───────────────────────────────────────────────────── */
+
+#app-cfg-model-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+.app-cfg-empty {
+  font-size: .58rem;
+  color: var(--text-dim, #666);
+  padding: 6px 0;
+  font-style: italic;
+}
+.app-cfg-model-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: var(--bg-card, #161922);
+  border: 1px solid var(--border, #2a2d3a);
+  border-radius: 4px;
+  padding: 5px 8px;
+}
+.app-cfg-model-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+.app-cfg-model-id {
+  font-family: "Space Mono", monospace;
+  font-size: .55rem;
+  color: var(--accent, #00d4ff);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.app-cfg-model-label {
+  font-size: .55rem;
+  color: var(--text-secondary, #8b9bbd);
+  white-space: nowrap;
+}
+.app-cfg-model-size {
+  font-size: .5rem;
+  color: var(--text-dim, #666);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.app-cfg-model-del {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-dim, #666);
+  font-size: .65rem;
+  padding: 2px 5px;
+  border-radius: 3px;
+  flex-shrink: 0;
+  margin-left: 4px;
+}
+.app-cfg-model-del:hover { background: rgba(255,60,60,.12); color: #ff7070; }
+
+/* ── Add model form ───────────────────────────────────────────────────────── */
+
+.app-cfg-add-model-form { margin-top: 6px; }
+.app-cfg-add-row {
+  display: flex;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+.app-cfg-new-id    { flex: 2; min-width: 130px; }
+.app-cfg-new-label { flex: 1; min-width: 90px; }
+.app-cfg-new-size  { width: 60px; flex: none; }
+
+/* ── Plugin contract collapsible ──────────────────────────────────────────── */
+
+.app-cfg-toggle {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-secondary, #8b9bbd);
+  font-size: .6rem;
+  font-weight: 600;
+  letter-spacing: .05em;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  margin-bottom: 8px;
+  width: 100%;
+  text-align: left;
+}
+.app-cfg-toggle:hover { color: var(--text-primary, #f0f4ff); }
+.app-cfg-toggle-icon { font-size: .55rem; }
+
+.app-cfg-contract {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.app-cfg-contract.hidden { display: none; }
+
+.app-cfg-code {
+  background: var(--bg-code, #0c0e14);
+  border: 1px solid var(--border, #2a2d3a);
+  border-radius: 4px;
+  padding: 10px 12px;
+  font-family: "Space Mono", monospace;
+  font-size: .5rem;
+  line-height: 1.7;
+  color: var(--text-secondary, #8b9bbd);
+  overflow-x: auto;
+  white-space: pre;
+  margin: 0;
+}
+
+/* ── App Settings button in header ───────────────────────────────────────── */
+
+#btn-app-settings {
+  font-size: .55rem;
+  padding: 4px 8px;
 }
