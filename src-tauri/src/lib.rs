@@ -93,7 +93,7 @@ fn seed_db(pool: &SqlitePool) {
             if stmt.is_empty() { continue; }
             // println!("{}", stmt);
             if let Err(e) = sqlx::query(stmt).execute(pool).await {
-                eprintln!("[PaperGraph] seed: {e}");
+                eprintln!("[LitAtlas] seed: {e}");
             }
         }
     });
@@ -103,7 +103,7 @@ pub fn open_project(projects_dir: &PathBuf, slug: &str) -> SqlitePool {
     let proj = projects_dir.join(slug);
     std::fs::create_dir_all(&proj).unwrap();
     std::fs::create_dir_all(proj.join("pdfs")).unwrap();
-    let db_path = proj.join("papergraph.db");
+    let db_path = proj.join("LitAtlas.db");
     let pool = tauri::async_runtime::block_on(
         db::create_pool(&db_path.to_string_lossy())
     ).expect("Failed to open DB");
@@ -190,5 +190,5 @@ pub fn run() {
             hf_validate_plugin,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running PaperGraph");
+        .expect("error while running LitAtlas");
 }

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-similarity_server.py — PaperGraph HuggingFace similarity sidecar.
+similarity_server.py — LitAtlas HuggingFace similarity sidecar.
 
 Protocol: newline-delimited JSON over stdin/stdout (Tauri sidecar stdio).
 
@@ -31,7 +31,7 @@ import torch
 
 # ── User plugin ──────────────────────────────────────────────────────────────
 #
-# Users can extend PaperGraph with a custom similarity function by creating a
+# Users can extend LitAtlas with a custom similarity function by creating a
 # Python file that defines the following entry point:
 #
 #   def similarity_fn(papers: list[dict], config: dict) -> list[dict]:
@@ -60,7 +60,7 @@ import torch
 #       """
 #
 # The path to this file is passed at server startup via the environment
-# variable PAPERGRAPH_PLUGIN_SCRIPT (set by Rust before spawning the sidecar).
+# variable LitAtlas_PLUGIN_SCRIPT (set by Rust before spawning the sidecar).
 # If the variable is not set, or the file does not define `similarity_fn`,
 # the default built-in implementation is used.
 #
@@ -78,16 +78,16 @@ _plugin_compute_embedding_fn = None  # compute_embedding_fn(paper, config) -> {f
 
 def _load_plugin() -> None:
     """
-    Load the user plugin script if PAPERGRAPH_PLUGIN_SCRIPT is set.
+    Load the user plugin script if LitAtlas_PLUGIN_SCRIPT is set.
     Called once at startup.  Errors are printed to stderr but never fatal —
     the server always falls back to the built-in implementation.
     """
     global _plugin_similarity_fn, _plugin_compute_embedding_fn
-    script = os.environ.get("PAPERGRAPH_PLUGIN_SCRIPT", "").strip()
+    script = os.environ.get("LitAtlas_PLUGIN_SCRIPT", "").strip()
     if not script:
         return
     if not os.path.isfile(script):
-        print(f"[PaperGraph] WARNING: plugin script not found: {script}", file=sys.stderr)
+        print(f"[LitAtlas] WARNING: plugin script not found: {script}", file=sys.stderr)
         return
     try:
         import importlib.util
@@ -96,19 +96,19 @@ def _load_plugin() -> None:
         spec.loader.exec_module(module)
         if hasattr(module, "similarity_fn"):
             _plugin_similarity_fn = module.similarity_fn
-            print(f"[PaperGraph] Loaded plugin similarity_fn from {script}", file=sys.stderr)
+            print(f"[LitAtlas] Loaded plugin similarity_fn from {script}", file=sys.stderr)
         if hasattr(module, "compute_embedding_fn"):
             _plugin_compute_embedding_fn = module.compute_embedding_fn
-            print(f"[PaperGraph] Loaded plugin compute_embedding_fn from {script}", file=sys.stderr)
+            print(f"[LitAtlas] Loaded plugin compute_embedding_fn from {script}", file=sys.stderr)
         if not hasattr(module, "similarity_fn") and not hasattr(module, "compute_embedding_fn"):
             print(
-                f"[PaperGraph] WARNING: plugin {script} defines neither "
+                f"[LitAtlas] WARNING: plugin {script} defines neither "
                 f"'similarity_fn' nor 'compute_embedding_fn' — no hooks loaded.",
                 file=sys.stderr,
             )
     except Exception:
         import traceback
-        print(f"[PaperGraph] ERROR loading plugin {script}:", file=sys.stderr)
+        print(f"[LitAtlas] ERROR loading plugin {script}:", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
 
 
@@ -434,7 +434,7 @@ def compute_embedding(paper: dict, config: dict) -> dict:
             return _plugin_compute_embedding_fn(paper, config)
         except Exception:
             import traceback
-            print("[PaperGraph] plugin compute_embedding_fn raised — falling back to built-in:",
+            print("[LitAtlas] plugin compute_embedding_fn raised — falling back to built-in:",
                   file=sys.stderr)
             traceback.print_exc(file=sys.stderr)
 
@@ -473,7 +473,7 @@ def compute(papers: list, config: dict) -> list:
             return _plugin_similarity_fn(papers, config)
         except Exception:
             import traceback
-            print("[PaperGraph] plugin similarity_fn raised an error — falling back to built-in:",
+            print("[LitAtlas] plugin similarity_fn raised an error — falling back to built-in:",
                   file=sys.stderr)
             traceback.print_exc(file=sys.stderr)
             # Fall through to built-in implementation below.
@@ -627,7 +627,7 @@ def handle(line: str) -> None:
 
 
 def main() -> None:
-    # Load user plugin script (if PAPERGRAPH_PLUGIN_SCRIPT env var is set).
+    # Load user plugin script (if LitAtlas_PLUGIN_SCRIPT env var is set).
     _load_plugin()
     sys.stdout.write(json.dumps({"id": 0, "ok": True, "result": "ready"}) + "\n")
     sys.stdout.flush()

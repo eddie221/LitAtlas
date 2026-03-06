@@ -160,8 +160,6 @@ export function encode(paper) {
 
   // ── Hashtag sub-vector ──
   const ts = new Set((paper.hashtags ?? []).map(t => t.replace(/^#/, "").toLowerCase()));
-  console.log("ts : ", ts);
-  console.log("TAG_VOCAB : ", TAG_VOCAB);
   for (let i = 0; i < TAG_VOCAB.length; i++) {
     if (ts.has(TAG_VOCAB[i])) vec[i] = 1.0;
   }
@@ -226,9 +224,9 @@ function _jsEdges(papers, thr, max) {
   for (let i = 0; i < papers.length; i++) {
     for (let j = i + 1; j < papers.length; j++) {
       const sim = _blendedSim(encs[i], encs[j]);
-      console.log(encs[i], encs[j]);
-      console.log(i, j, sim, thr);
-      if (sim >= thr) {
+      // console.log(encs[i], encs[j]);
+      // console.log(i, j, sim, thr);
+      if (sim > thr) {
         cands.push({
           source_id: papers[i].id,
           target_id: papers[j].id,

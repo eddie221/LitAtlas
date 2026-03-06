@@ -260,7 +260,7 @@ function renderInfoTab(paper) {
 
     <div class="pp-save-row">
       <span id="pp-info-status" class="pp-save-status"></span>
-      <button class="pp-btn pp-btn-accent" id="pp-save-info-btn">Save to SQLite</button>
+      <button class="pp-btn pp-btn-accent" id="pp-save-info-btn">Save</button>
     </div>`;
 
   // Wire add-attribute button

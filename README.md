@@ -36,13 +36,13 @@ Due to the tremendous growth of research, it is hard for us to keep track of eve
 ## Install Issues:
 
 ### Issue 1: 
-“PaperGraph.app” is damaged and can’t be opened. You should eject the disk image.
+“LitAtlas.app” is damaged and can’t be opened. You should eject the disk image.
 
 #### Reason: 
 The downloaded unauthorized application will be quarantined by default.
 #### Solution:  
 ```bash
 # replace /Applications/YourAppName.app with actual APP path 
-# (default will be /Applications/PaperGraph.app)
+# (default will be /Applications/LitAtlas.app)
 xattr -cr /Applications/YourAppName.app
 ```

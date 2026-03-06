@@ -16,6 +16,10 @@
       --radius:       2px;
     }
 
+    /* Controlled at runtime by app_settings.js via setUiFontSize().
+       Default 18px; user range 10–22px. All rem values scale automatically. */
+    html { font-size: 18px; }
+
     * { margin: 0; padding: 0; box-sizing: border-box; }
 
     body {
@@ -38,7 +42,7 @@
       align-items: center;
       gap: 0;
       padding: 0 16px 0 20px;
-      height: 52px;
+      height: 80px;
       background: rgba(10,12,16,0.92);
       backdrop-filter: blur(14px);
       border-bottom: 1px solid var(--border);
@@ -155,7 +159,7 @@
     .ctrl-icon-btn svg { flex-shrink: 0; }
     .ctrl-icon-label {
       font-family: 'Space Mono', monospace;
-      font-size: 0.45rem;
+      font-size: 0.55rem;
       letter-spacing: 0.06em;
       text-transform: uppercase;
       line-height: 1;
@@ -191,7 +195,7 @@
     /* ═══════════════════════════════════════════════════════════
        CANVAS
     ═══════════════════════════════════════════════════════════ */
-    #canvas-container { position: fixed; inset: 0; top: 52px; }
+    #canvas-container { position: fixed; inset: 0; top: 80px; }
     #graph-canvas { width: 100%; height: 100%; cursor: grab; }
     #graph-canvas:active { cursor: grabbing; }
 
@@ -199,7 +203,7 @@
        QUICK DETAIL SIDEBAR (right panel)
     ═══════════════════════════════════════════════════════════ */
     #detail-panel {
-      position: fixed; right: 0; top: 52px; bottom: 0;
+      position: fixed; right: 0; top: 80px; bottom: 0;
       width: 500px;
       background: rgba(10,12,16,0.94);
       backdrop-filter: blur(16px);
@@ -1013,7 +1017,7 @@
     ═══════════════════════════════════════════════════════════ */
     #project-sidebar {
       position: fixed;
-      left: 0; top: 52px; bottom: 0;
+      left: 0; top: 80px; bottom: 0;
       width: 200px;
       background: var(--surface);
       border-right: 1px solid var(--border);
@@ -1843,7 +1847,7 @@
   color: var(--text-secondary);
   flex-shrink: 0;
   padding-top: 2px;
-  min-width: 52px;
+  min-width: 80px;
 }
 .et-value {
   color: var(--accent2);
@@ -2054,6 +2058,51 @@
 }
 .app-cfg-reset-btn:hover {
   background: rgba(255,60,60,.16) !important;
+}
+
+/* ── Display / font-size slider row ─────────────────────────────────────── */
+.app-cfg-slider-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.app-cfg-slider-label {
+  font-size: .65rem;
+  color: var(--text-secondary, #9ca3af);
+  white-space: nowrap;
+  min-width: 68px;
+}
+.app-cfg-slider {
+  flex: 1;
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  border-radius: 2px;
+  background: #1e2230;
+  outline: none;
+  cursor: pointer;
+}
+.app-cfg-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  background: var(--accent, #c8ff00);
+  border: 2px solid #0a0c10;
+  cursor: pointer;
+}
+.app-cfg-slider::-moz-range-thumb {
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  background: var(--accent, #c8ff00);
+  border: 2px solid #0a0c10;
+  cursor: pointer;
+}
+.app-cfg-slider-val {
+  font-size: .65rem;
+  font-family: "Space Mono", monospace;
+  color: var(--accent, #c8ff00);
+  min-width: 36px;
+  text-align: right;
 }
 
 /* ── Validate area ────────────────────────────────────────────────────────── */

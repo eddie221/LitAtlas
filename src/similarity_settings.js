@@ -17,9 +17,9 @@ import { getCustomModels } from "./app_settings.js";
  *   • On error       → red badge + message + Retry button
  */
 
-function _getSimConfig()           { return window.PaperGraph?.getSimConfig?.()    ?? {}; }
-async function _saveSimConfig(cfg) { return window.PaperGraph?.saveSimConfig?.(cfg); }
-async function _recompute()        { return window.PaperGraph?.triggerEdgeRecompute?.(); }
+function _getSimConfig()           { return window.LitAtlas?.getSimConfig?.()    ?? {}; }
+async function _saveSimConfig(cfg) { return window.LitAtlas?.saveSimConfig?.(cfg); }
+async function _recompute()        { return window.LitAtlas?.triggerEdgeRecompute?.(); }
 
 const invoke = (
   window.__TAURI__?.core?.invoke ??
@@ -87,9 +87,9 @@ async function _checkModelCached(modelId) {
 async function renderSettings(panel) {
   const cfg    = _getSimConfig();
   const isHF   = cfg.strategy === "hf-embeddings";
-  const hfOk   = window.PaperGraph?.isHfEnabled?.() === true;
+  const hfOk   = window.LitAtlas?.isHfEnabled?.() === true;
   let   models = _BUILTIN_MODELS;
-  console.log("hfOk : ", hfOk);
+  // console.log("hfOk : ", hfOk);
   const body = panel.querySelector("#sim-settings-body");
   if (!body) return;
   body.innerHTML = buildHTML(cfg, models, isHF, hfOk);
@@ -233,10 +233,10 @@ function buildHTML(cfg, models, isHF, hfOk) {
       <div class="sim-section-title">Threshold &amp; Connectivity</div>
       <div class="sim-param-row">
         <label>Min similarity
-          <span class="sim-param-val" id="sim-thr-val">${(cfg.threshold??0.30).toFixed(2)}</span>
+          <span class="sim-param-val" id="sim-thr-val">${(cfg.threshold??0.00).toFixed(2)}</span>
         </label>
         <input type="range" id="sim-thr-range" min="0.0" max="1.0" step="0.01"
-               value="${cfg.threshold??0.38}">
+               value="${cfg.threshold??0.00}">
       </div>
       <div class="sim-param-row">
         <label>Max edges per node

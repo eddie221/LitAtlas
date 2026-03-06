@@ -107,17 +107,13 @@ export async function loadPdfIntoIframe(paperId, iframe, onStatus) {
 
   if (onStatus) onStatus("Loading PDF…", "var(--text-secondary)");
   try {
-    console.log("sss");
     const b64 = await invoke("read_pdf_bytes", { paperId });
-    console.log("eee");
     // Convert base64 → Uint8Array → Blob
     const binary = atob(b64);
     const bytes  = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
     const blob = new Blob([bytes], { type: "application/pdf" });
-    console.log("blob : ", blob);
     _pdfBlobUrl = URL.createObjectURL(blob);
-    console.log("_pdfBlobUrl : ", _pdfBlobUrl);
     iframe.src = _pdfBlobUrl;
     if (onStatus) onStatus(null); // clear status
     return true;
@@ -688,7 +684,20 @@ function rebuildEdgeRefs() {
     sourceNode: state.nodes.find(n => n.id === e.source),
     targetNode: state.nodes.find(n => n.id === e.target),
   }));
-  // console.log("Synchronize DB to app (state.edges) : ", state.edges);
+  _rebuildConnectedPairs();
+}
+
+// Set of "minId|maxId" strings for node pairs that share at least one edge.
+// Used by simulationStep to boost repulsion between unconnected cross-group nodes.
+let _connectedPairs = new Set();
+
+function _rebuildConnectedPairs() {
+  _connectedPairs = new Set();
+  getEdgesCache().forEach(e => {
+    const lo = Math.min(e.source, e.target);
+    const hi = Math.max(e.source, e.target);
+    _connectedPairs.add(`${lo}|${hi}`);
+  });
 }
 
 // ── Canvas ────────────────────────────────────────────────────────────────────
@@ -702,7 +711,6 @@ function resizeCanvas() {
   canvas.style.width  = c.offsetWidth  + "px";
   canvas.style.height = c.offsetHeight + "px";
   ctx.scale(devicePixelRatio, devicePixelRatio);
-  // console.log(canvas);
 
   draw();
 }
@@ -728,7 +736,7 @@ function initGraph() {
              vx: 0, vy: 0, radius: nodeRadius(p) };
   });
 
-  rebuildEdgeRefs();
+  rebuildEdgeRefs(); // also rebuilds _connectedPairs
 
   const uniqueTags = new Set(papers.flatMap(p => p.hashtags.map(t => t.replace(/^#/, ""))));
   document.getElementById("stat-papers").textContent      = papers.length;
@@ -738,6 +746,37 @@ function initGraph() {
   loop();
 }
 
+// ── UI font size (app-wide, stored in localStorage) ──────────────────────────
+// Controls html { font-size } so every rem-based value in the UI scales.
+// Default 18 px; user range 10–22 px.
+// Canvas node labels use the same scale factor relative to their node radius.
+
+const _UI_FONT_DEFAULT = 18;
+const _UI_FONT_MIN     = 10;
+const _UI_FONT_MAX     = 28;
+
+
+let _uiFontSize = Math.min(_UI_FONT_MAX,
+  Math.max(_UI_FONT_MIN,
+    parseFloat(localStorage.getItem("uiFontSize") ?? String(_UI_FONT_DEFAULT))
+  )
+);
+
+function _applyUiFontSize(px) {
+  _uiFontSize = Math.min(_UI_FONT_MAX, Math.max(_UI_FONT_MIN, Number(px) || _UI_FONT_DEFAULT));
+  document.documentElement.style.fontSize = _uiFontSize + "px";
+  localStorage.setItem("uiFontSize", _uiFontSize);
+}
+
+// Apply immediately on load so there's no flash of the browser default.
+_applyUiFontSize(_uiFontSize);
+
+export function setUiFontSize(px) { _applyUiFontSize(px); }
+export function getUiFontSize()   { return _uiFontSize; }
+
+export function getUiFontSize_MAX()   { return _UI_FONT_MAX; }
+export function getUiFontSize_MIN()   { return _UI_FONT_MIN; }
+
 // ── Similarity threshold (controlled by range bar) ────────────────────────────
 let simThreshold = 0.38;
 
@@ -745,6 +784,9 @@ let simThreshold = 0.38;
 const SIM = {
   repulsion: 7500, attraction: 0.036, centerForce: 0.016,
   damping: 0.82, idealBase: 170, running: true,
+  // Extra repulsion multiplier applied between nodes that belong to different
+  // primary-tag groups AND share no direct edge.  1 = no extra push.
+  groupSeparation: 4.5,
 };
 let tick = 0;
 
@@ -760,7 +802,14 @@ function simulationStep() {
       const a = ns[i], b = ns[j];
       const dx = b.x - a.x, dy = b.y - a.y;
       const d  = Math.sqrt(dx*dx + dy*dy) || 1;
-      const f  = SIM.repulsion / (d*d);
+
+      // Boost repulsion between nodes from different groups that share no edge.
+      const sameGroup = (a.hashtags?.[0] ?? "") === (b.hashtags?.[0] ?? "");
+      const lo = Math.min(a.id, b.id), hi = Math.max(a.id, b.id);
+      const connected = _connectedPairs.has(`${lo}|${hi}`);
+      const sep = (!sameGroup && !connected) ? SIM.groupSeparation : 1;
+
+      const f  = SIM.repulsion * sep / (d*d);
       a.fx -= dx/d*f; a.fy -= dy/d*f;
       b.fx += dx/d*f; b.fy += dy/d*f;
     }
@@ -944,9 +993,10 @@ function drawEdge(e, alpha) {
   ctx.stroke();
   if (hov) {
     ctx.fillStyle = "#c8ff00";
-    ctx.font = "bold 9px 'Space Mono'";
+    const _fontScale = getUiFontSize() / _UI_FONT_DEFAULT;
+    ctx.font = `bold ${Math.max(12, _fontScale)}px 'Space Mono'`;
     ctx.textAlign = "center"; ctx.textBaseline = "middle";
-    ctx.fillText(e.similarity.toFixed(2), (a.x+b.x)/2, (a.y+b.y)/2 - 8);
+    ctx.fillText(e.similarity.toFixed(3), (a.x+b.x)/2, (a.y+b.y)/2 - 8);
   }
   ctx.restore();
 }
@@ -974,7 +1024,8 @@ function drawNode(n, edgeHighlight = false) {
 
   const label = n.title.length > 18 ? n.title.slice(0, 16) + "…" : n.title;
   ctx.fillStyle    = (sel || edgeHighlight) ? "#fff" : "#c8d0e0";
-  ctx.font         = `${(sel || edgeHighlight) ? "bold " : ""}${Math.max(8, r*0.42)}px 'Space Mono'`;
+  const _fontScale = getUiFontSize() / _UI_FONT_DEFAULT;
+  ctx.font         = `${(sel || edgeHighlight) ? "bold " : ""}${Math.max(16, r * 0.42 * _fontScale)}px 'Space Mono'`;
   ctx.textAlign    = "center"; ctx.textBaseline = "top";
   ctx.fillText(label, n.x, n.y + r + 5);
 }
@@ -1009,6 +1060,7 @@ function nodeAt(sx, sy) {
 function edgeAt(sx, sy) {
   const { x, y } = toWorld(sx, sy);
   for (const e of state.edges) {
+    if (e.similarity < simThreshold) continue;  // invisible edges are not interactive
     const a = e.sourceNode, b = e.targetNode;
     if (!a || !b) continue;
     const cpx = (a.x+b.x)/2 - (b.y-a.y)*0.13;
@@ -1634,4 +1686,8 @@ window.LitAtlas = {
   reloadGraph,
   isHfEnabled: () => _hfEnabled,
   enableHf:    () => _runLlmConsentFlow(),
+  getUiFontSize,
+  setUiFontSize,
+  getUiFontSize_MAX,
+  getUiFontSize_MIN,
 };

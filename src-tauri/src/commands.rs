@@ -493,13 +493,13 @@ fn step_find_python(app: &tauri::AppHandle) -> Result<String, String> {
         };
 
         if !conda_prefix.is_empty() && exe_path.starts_with(&conda_prefix) {
-            eprintln!("[PaperGraph] Skipping {bin} — inside conda: {exe_path}");
+            eprintln!("[LitAtlas] Skipping {bin} — inside conda: {exe_path}");
             emit_progress(app, "find_python",
                 &format!("Skipped {bin} (conda env — needs isolation)"), false);
             continue;
         }
         if !venv_prefix.is_empty() && exe_path.starts_with(&venv_prefix) {
-            eprintln!("[PaperGraph] Skipping {bin} — inside venv: {exe_path}");
+            eprintln!("[LitAtlas] Skipping {bin} — inside venv: {exe_path}");
             emit_progress(app, "find_python",
                 &format!("Skipped {bin} (active venv — needs isolation)"), false);
             continue;
@@ -516,14 +516,14 @@ fn step_find_python(app: &tauri::AppHandle) -> Result<String, String> {
         if ver_ok {
             emit_progress(app, "find_python",
                 &format!("Found {bin} → {exe_path}"), false);
-            eprintln!("[PaperGraph] Using Python: {exe_path}");
+            eprintln!("[LitAtlas] Using Python: {exe_path}");
             return Ok(bin.to_string());
         }
     }
 
     Err("Python 3.8+ not found on PATH (every candidate was either missing or \
          inside an active conda / venv environment).\n\
-         Install Python 3 from https://python.org and restart PaperGraph.".into())
+         Install Python 3 from https://python.org and restart LitAtlas.".into())
 }
 
 // ── Process 2 of 5 : create isolated venv ────────────────────────────────────
@@ -676,7 +676,7 @@ fn step_upgrade_pip(
 
     if !status.success() {
         // Non-fatal: log a warning but do not abort the install
-        eprintln!("[PaperGraph] pip upgrade exited non-zero — continuing anyway");
+        eprintln!("[LitAtlas] pip upgrade exited non-zero — continuing anyway");
         emit_progress(app, "upgrade_pip",
             "pip upgrade failed (non-fatal) — continuing…", false);
     } else {
@@ -813,7 +813,7 @@ fn launch_sidecar(
     let python = ensure_venv(venv_dir, app)?;
 
     // Read the custom plugin script path from app_config.json (if set).
-    // Pass it to the sidecar via the PAPERGRAPH_PLUGIN_SCRIPT env var so
+    // Pass it to the sidecar via the LitAtlas_PLUGIN_SCRIPT env var so
     // Python can load the user's similarity_fn / compute_embedding_fn hooks.
     let plugin_script: String = {
         // NOTE: we don't have &AppState here, only venv_dir.  Infer data_dir
@@ -835,7 +835,7 @@ fn launch_sidecar(
         .env_remove("CONDA_DEFAULT_ENV")
         .env_remove("VIRTUAL_ENV")
         .env_remove("VIRTUAL_ENV_PROMPT")
-        .env("PAPERGRAPH_PLUGIN_SCRIPT", &plugin_script)
+        .env("LitAtlas_PLUGIN_SCRIPT", &plugin_script)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -859,7 +859,7 @@ fn launch_sidecar(
     }
 
     emit_progress(app, "ready", "Similarity engine ready.", true);
-    eprintln!("[PaperGraph] Python sidecar started (pid {})", sc.child.id());
+    eprintln!("[LitAtlas] Python sidecar started (pid {})", sc.child.id());
     Ok(sc)
 }
 
@@ -871,7 +871,7 @@ fn ensure_running<'a>(s: &'a AppState, app: &tauri::AppHandle) -> Result<std::sy
     };
     if dead {
         if guard.is_some() {
-            eprintln!("[PaperGraph] Sidecar crashed — restarting…");
+            eprintln!("[LitAtlas] Sidecar crashed — restarting…");
         }
         eprintln!("dead !!");
         *guard = Some(launch_sidecar(&s.sidecar_script(), &s.venv_dir(), app)?);
@@ -1020,12 +1020,12 @@ pub fn hf_setup_venv(
         let mut guard = s.sidecar.lock().unwrap();
         if let Some(sc) = guard.as_mut() {
             if sc.is_alive() {
-                eprintln!("[PaperGraph] hf_setup_venv: sidecar already live — reusing.");
+                eprintln!("[LitAtlas] hf_setup_venv: sidecar already live — reusing.");
                 emit_progress(&app, "ready", "Similarity engine ready.", true);
                 return Ok(serde_json::json!({ "ok": true }));
             }
             // Dead sidecar — drop it before relaunching.
-            eprintln!("[PaperGraph] hf_setup_venv: dead sidecar found — relaunching.");
+            eprintln!("[LitAtlas] hf_setup_venv: dead sidecar found — relaunching.");
             *guard = None;
         }
     }
@@ -1042,7 +1042,7 @@ pub fn hf_setup_venv(
                 // launch_sidecar already emits the "ready" done event
             }
             Err(e) => {
-                eprintln!("[PaperGraph] hf_setup_venv background error: {e}");
+                eprintln!("[LitAtlas] hf_setup_venv background error: {e}");
                 let _ = app.emit("venv://error", serde_json::json!({ "error": e }));
             }
         }

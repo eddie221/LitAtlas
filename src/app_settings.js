@@ -23,6 +23,9 @@
  *    • Picked up in Similarity Settings via hf_list_models.
  */
 
+function _getFontMaxSize()           { return window.LitAtlas?.getUiFontSize_MAX?.()    ?? 28; }
+function _getFontMinSize()           { return window.LitAtlas?.getUiFontSize_MIN?.()    ?? 10; }
+
 const invoke = (
   window.__TAURI__?.core?.invoke ??
   window.__TAURI__?.tauri?.invoke ??
@@ -74,26 +77,46 @@ async function _renderAppSettings(panel) {
       : Promise.resolve({ path: "(unavailable)", is_custom: false }),
   ]);
 
-  const customModels = cfg.custom_models ?? [];
-  body.innerHTML = _buildHTML(cfg, scriptInfo, customModels);
+  const customModels  = cfg.custom_models ?? [];
+  const currentFontPx = window.LitAtlas?.getUiFontSize?.() ?? 18;
+  body.innerHTML = _buildHTML(cfg, scriptInfo, customModels, currentFontPx);
   _wireEvents(body, cfg, scriptInfo, customModels);
 }
 
 // ── HTML builder ──────────────────────────────────────────────────────────────
 
-function _buildHTML(cfg, scriptInfo, customModels) {
+function _buildHTML(cfg, scriptInfo, customModels, currentFontPx = 18) {
   const scriptPath = cfg.sidecar_script ?? "";
   const activePath = scriptInfo?.path ?? "(unknown)";
   const isCustom   = scriptInfo?.is_custom === true;
 
   const modelRows = _buildModelListHTML(customModels);
+  const pct = Math.round((currentFontPx / 18) * 100);
 
   return `
+    <!-- ── Section 0: Display ── -->
+    <div class="app-cfg-section">
+      <div class="app-cfg-section-title">Display</div>
+      <div class="app-cfg-hint">
+        Scales all text in the application — UI panels, labels, tooltips,
+        and canvas node labels — uniformly.
+      </div>
+      <div class="app-cfg-row app-cfg-slider-row">
+        <label class="app-cfg-slider-label" for="app-cfg-font-size">Font Size</label>
+        <input id="app-cfg-font-size" type="range"
+               class="app-cfg-slider" min="${_getFontMinSize()}" max="${_getFontMaxSize()}" step="1"
+               value="${_esc(String(currentFontPx))}">
+        <span id="app-cfg-font-size-val" class="app-cfg-slider-val">${pct}%</span>
+        <button id="app-cfg-font-size-reset" class="btn app-cfg-reset-btn"
+                title="Reset to default (100%)">↺</button>
+      </div>
+    </div>
+
     <!-- ── Section 1: Sidecar Script ── -->
     <div class="app-cfg-section">
       <div class="app-cfg-section-title">Similarity Engine Script</div>
       <div class="app-cfg-hint">
-        By default PaperGraph uses its bundled <code>similarity_server.py</code>.
+        By default LitAtlas uses its bundled <code>similarity_server.py</code>.
         You can specify a custom script that implements your own
         <code>similarity_fn</code> and/or <code>compute_embedding_fn</code>.
         The change takes effect the next time the engine starts.
@@ -188,7 +211,7 @@ function _buildHTML(cfg, scriptInfo, customModels) {
     """</pre>
         <p class="app-cfg-hint">
           Both hooks are optional and independent. If only
-          <code>compute_embedding_fn</code> is defined, PaperGraph uses
+          <code>compute_embedding_fn</code> is defined, LitAtlas uses
           your vectors with the built-in edge computation.
         </p>
       </div>
@@ -198,6 +221,23 @@ function _buildHTML(cfg, scriptInfo, customModels) {
 // ── Event wiring ──────────────────────────────────────────────────────────────
 
 function _wireEvents(body, cfg, scriptInfo, customModels) {
+  // ── App-wide Font Size slider ──────────────────────────────────────────────
+  const fontSlider   = body.querySelector("#app-cfg-font-size");
+  const fontValEl    = body.querySelector("#app-cfg-font-size-val");
+  const fontResetBtn = body.querySelector("#app-cfg-font-size-reset");
+
+  fontSlider?.addEventListener("input", () => {
+    const px = parseInt(fontSlider.value, 10);
+    // console.log("px : ", px);
+    if (fontValEl) fontValEl.textContent = Math.round((px / 18) * 100) + "%";
+    window.LitAtlas?.setUiFontSize?.(px);
+  });
+  fontResetBtn?.addEventListener("click", () => {
+    if (fontSlider) fontSlider.value = "18";
+    if (fontValEl)  fontValEl.textContent = "100%";
+    window.LitAtlas?.setUiFontSize?.(18);
+  });
+
   const scriptInput  = body.querySelector("#app-cfg-script-input");
   const validateBtn  = body.querySelector("#app-cfg-validate-btn");
   const validateArea = body.querySelector("#app-cfg-validate-area");
