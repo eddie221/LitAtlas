@@ -1,4 +1,10 @@
+<p align="center">
+  <img src="https://github.com/eddie221/LitAtlas/blob/main/figures/logo.png" width=50% height=50%>
+</p>
+
 # LitAtlas -- Literature Atlas Viewer
+
+[![Publish](https://github.com/eddie221/LitAtlas/actions/workflows/main.yml/badge.svg)](https://github.com/eddie221/LitAtlas/actions/workflows/main.yml)
 
 This project provides a local paper-relation viewer to manage and present relations between papers.
 
