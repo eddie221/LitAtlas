@@ -21,8 +21,9 @@
 import { colorForPaper, groupForPaper, nodeColorOverrides, COLOR_PALETTE } from "./constant.js";
 import { setPapersCache, getPapersCache, setEdgesCache, getEdgesCache, state, setCurrentPaperCache } from "./cache.js";
 import { openPaperPage, showDropzone } from "./paper-page.js";
-import { computeEdges, computeEdgesForNewPaper, getDefaultConfig, setTagVocab } from "./similarity.js";
+import { computeEdges, computeEdgesForNewPaper, getDefaultConfig, setTagVocab, getTagVocab } from "./similarity.js";
 import { loadProjects, onProjectSwitch } from "./projects.js";
+import { attachTagAutocomplete } from "./tag-autocomplete.js";
 
 // ── Tauri bridge ──────────────────────────────────────────────────────────────
 const invoke = (
@@ -1529,6 +1530,9 @@ document.getElementById("npm-cancel-btn").addEventListener("click", closeNewPape
 document.getElementById("new-paper-modal").addEventListener("click", e => {
   if (e.target === document.getElementById("new-paper-modal")) closeNewPaperModal();
 });
+
+// Attach hashtag autocomplete to the new-paper modal input (once, at boot).
+attachTagAutocomplete(document.getElementById("npm-hashtags"), getTagVocab);
 
 document.getElementById("npm-submit-btn").addEventListener("click", async () => {
   const title   = document.getElementById("npm-title").value.trim();

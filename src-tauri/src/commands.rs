@@ -73,6 +73,26 @@ pub async fn save_pdf_path(s: State<'_, AppState>, id: i64, path: Option<String>
     db::save_pdf_path(&s.pool(), id, path.as_deref()).await.map_err(String::from)
 }
 
+/// Remove the PDF file from disk and clear its path in the DB.
+/// Deletes the entire per-paper PDF directory (projects/<slug>/pdfs/<id>/)
+/// which also removes any cached embedding.json stored alongside the PDF.
+/// Silently succeeds if no file exists — the DB path is always cleared.
+#[tauri::command]
+pub async fn delete_pdf_file(s: State<'_, AppState>, id: i64) -> CmdResult<()> {
+    // 1. Clear the DB record first so the paper is never left pointing at a
+    //    deleted file even if the filesystem removal fails.
+    db::save_pdf_path(&s.pool(), id, None).await.map_err(String::from)?;
+
+    // 2. Remove the per-paper PDF directory.
+    let pdf_dir = s.pdfs_dir().join(id.to_string());
+    if pdf_dir.exists() {
+        std::fs::remove_dir_all(&pdf_dir)
+            .map_err(|e| format!("Failed to delete PDF directory: {e}"))?;
+    }
+
+    Ok(())
+}
+
 // ── Authors ───────────────────────────────────────────────────────────────────
 
 #[tauri::command]

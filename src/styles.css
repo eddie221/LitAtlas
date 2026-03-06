@@ -2270,3 +2270,65 @@
   font-size: .55rem;
   padding: 4px 8px;
 }
+/* ── Tag autocomplete dropdown ───────────────────────────────────────────── */
+
+.tag-ac-dropdown {
+  position: absolute;
+  z-index: 9999;
+  list-style: none;
+  margin: 2px 0 0;
+  padding: 2px 0;
+  background: var(--surface2, #161922);
+  border: 1px solid var(--border2, #252a3a);
+  border-radius: 4px;
+  box-shadow: 0 6px 18px rgba(0,0,0,.55);
+  min-width: 160px;
+  max-width: 280px;
+  font-family: 'Space Mono', monospace;
+  font-size: .62rem;
+  overflow: hidden;
+}
+
+.tag-ac-item {
+  padding: 5px 12px;
+  color: var(--text-secondary, #9ca3af);
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: background .08s, color .08s;
+}
+
+.tag-ac-item:hover,
+.tag-ac-active {
+  background: var(--border, #1e2230);
+  color: var(--accent, #c8ff00);
+}
+
+/* Ensure the field wrapper has position:relative so the dropdown sits
+   directly below the input regardless of scroll context. */
+.npm-field:has(#npm-hashtags),
+.pp-field:has(#ppi-tags) {
+  position: relative;
+}
+
+/* ── Focus hint line ─────────────────────────────────────────────────────── */
+/* Shown below the input when focused but no token is being typed. */
+.tag-ac-focus-hint {
+  margin-top: 4px;
+  font-family: 'Space Mono', monospace;
+  font-size: .55rem;
+  color: var(--text-dim, #4b5563);
+  letter-spacing: .03em;
+  pointer-events: none;
+  animation: tag-hint-in .15s ease;
+}
+
+/* ── Split-highlight in dropdown items ───────────────────────────────────── */
+.tag-ac-match {
+  color: var(--accent, #c8ff00);
+  opacity: .7;
+}
+.tag-ac-rest {
+  color: var(--accent, #c8ff00);
+}

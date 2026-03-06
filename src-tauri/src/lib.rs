@@ -172,6 +172,7 @@ pub fn run() {
             get_edges, recompute_edges, append_edges,
             // PDF
             copy_pdf, get_pdf_url, store_pdf_bytes, read_pdf_bytes,
+            delete_pdf_file,
             // Projects
             list_projects, create_project, rename_project,
             delete_project, switch_project, get_current_project,

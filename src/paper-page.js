@@ -16,6 +16,8 @@ import { colorForPaper, groupForPaper } from "./constant.js";
 import { getPapersCache, getEdgesCache, setCurrentPaperCache, setCurrentConnectedCache, getCurrentPaperCache, state } from "./cache.js";
 import { triggerEdgeRecompute, deselectNode, selectNode, refreshPaper, recomputeEdgesForPaper, getConnected, attr, loadPdfIntoIframe } from "./graph.js";
 import { getEmbeddingConfig } from "./similarity.js";
+import { getTagVocab } from "./similarity.js";
+import { attachTagAutocomplete } from "./tag-autocomplete.js";
 
 const invoke = (
   window.__TAURI__?.core?.invoke ??
@@ -91,6 +93,67 @@ function pgAlert(message, title) {
   return pgDialog(title || "Notice", message, false);
 }
 
+// Three-way dialog for PDF removal.
+// Returns: true = delete from disk, false = unlink only, null = cancelled.
+function _pgPdfRemoveDialog() {
+  return new Promise(resolve => {
+    const backdrop = document.getElementById("pg-dialog-backdrop");
+    const titleEl  = document.getElementById("pg-dialog-title");
+    const msgEl    = document.getElementById("pg-dialog-message");
+    const okBtn    = document.getElementById("pg-dialog-ok");
+    const cancelBtn= document.getElementById("pg-dialog-cancel");
+
+    titleEl.textContent = "Remove PDF";
+    msgEl.textContent   = "Do you want to delete the PDF file from disk, or just unlink it from this paper?";
+
+    // Repurpose the OK button as "Delete file" and Cancel as "Unlink only",
+    // then inject a third "Cancel" link.
+    okBtn.textContent     = "Delete File";
+    okBtn.style.background = "rgba(255,60,60,.15)";
+    okBtn.style.borderColor= "rgba(255,60,60,.4)";
+    okBtn.style.color      = "#ff7070";
+    cancelBtn.textContent  = "Unlink Only";
+    cancelBtn.style.display= "";
+
+    // Inject a real cancel option below the buttons.
+    const dismissLink = document.createElement("button");
+    dismissLink.textContent = "Cancel";
+    dismissLink.className   = "btn";
+    dismissLink.style.cssText = "margin-top:6px;width:100%;font-size:.62rem;color:var(--text-secondary)";
+    cancelBtn.parentNode.insertBefore(dismissLink, cancelBtn.nextSibling);
+
+    backdrop.classList.add("open");
+
+    function close(result) {
+      backdrop.classList.remove("open");
+      // Restore button defaults for future uses of the shared modal.
+      okBtn.textContent      = "OK";
+      okBtn.style.background = "";
+      okBtn.style.borderColor= "";
+      okBtn.style.color      = "";
+      cancelBtn.textContent  = "Cancel";
+      dismissLink.remove();
+      okBtn.removeEventListener("click", onDelete);
+      cancelBtn.removeEventListener("click", onUnlink);
+      dismissLink.removeEventListener("click", onDismiss);
+      document.removeEventListener("keydown", onKey);
+      resolve(result);
+    }
+    const onDelete  = () => close(true);
+    const onUnlink  = () => close(false);
+    const onDismiss = () => close(null);
+    okBtn.addEventListener("click", onDelete);
+    cancelBtn.addEventListener("click", onUnlink);
+    dismissLink.addEventListener("click", onDismiss);
+
+    function onKey(e) {
+      if (e.key === "Escape") { e.preventDefault(); close(null); }
+      document.removeEventListener("keydown", onKey);
+    }
+    document.addEventListener("keydown", onKey);
+  });
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 let _saveTimer = null;
 function debounce(fn, ms = 700) { clearTimeout(_saveTimer); _saveTimer = setTimeout(fn, ms); }
@@ -133,7 +196,7 @@ function switchTab(tab) {
 // ── Page render ───────────────────────────────────────────────────────────────
 function renderPage(paper, connected) {
   const color = colorForPaper(paper);
-  document.getElementById("pp-topic-badge").textContent = groupForPaper(paper);
+  document.getElementById("pp-topic-badge").textContent = paper.venue;//groupForPaper(paper);
   document.getElementById("pp-topic-badge").style.color = color;
 
   // Header title — inline edit
@@ -225,7 +288,7 @@ function renderInfoTab(paper) {
 
       <div class="pp-field pp-field-full">
         <label class="pp-label">Hashtags
-          <span style="color:var(--text-dim);font-size:.55rem"> — space or comma separated, # optional</span>
+          <span style="color:var(--text-dim);font-size:.55rem"> — space or comma separated</span>
         </label>
         <input class="pp-input" id="ppi-tags" value="${esc((paper.hashtags ?? []).join(" "))}">
       </div>
@@ -280,6 +343,11 @@ function renderInfoTab(paper) {
 
   wireDeleteButtons();
 
+  // Hashtag autocomplete on the tags input
+  const tagsInput = document.getElementById("ppi-tags");
+  console.log("tagsInput : ", tagsInput);
+  if (tagsInput) attachTagAutocomplete(tagsInput, getTagVocab);
+
   // Save button
   document.getElementById("pp-save-info-btn").addEventListener("click", async () => {
     setStatus("pp-info-status", "Saving…", "var(--text-secondary)");
@@ -313,14 +381,17 @@ function renderInfoTab(paper) {
       await invoke("set_attributes",    { id: paper.id, attributes });
 
       // compute new embedding for modification 
-      try {
-        await invoke("hf_compute_paper_embedding", {
-          paperId: paper.id,
-          config:  getEmbeddingConfig(),
-        });
-      } catch (embErr) {
-        // Non-fatal: log the error but continue adding the paper
-        console.warn("[LitAtlas] Auto-embed failed:", embErr);
+      if (window.LitAtlas?.isHfEnabled?.()){
+        try {
+          console.log("hf_compute_paper_embedding");
+          await invoke("hf_compute_paper_embedding", {
+            paperId: paper.id,
+            config:  getEmbeddingConfig(),
+          });
+        } catch (embErr) {
+          // Non-fatal: log the error but continue adding the paper
+          console.warn("[LitAtlas] Auto-embed failed:", embErr);
+        }
       }
 
       // Update in-memory paper
@@ -329,7 +400,7 @@ function renderInfoTab(paper) {
       if (cached) {
         Object.assign(paper, cached);
         // Refresh sidebar header badge
-        document.getElementById("pp-topic-badge").textContent = groupForPaper(paper);
+        document.getElementById("pp-topic-badge").textContent = paper.venue;//groupForPaper(paper);
         document.getElementById("pp-topic-badge").style.color = colorForPaper(paper);
       }
 
@@ -505,13 +576,23 @@ async function renderPdfTab(paper) {
 
   // ── Remove button ──────────────────────────────────────────────────────────
   removeBtn.onclick = async () => {
-    if (!await pgConfirm("Remove the PDF reference for this paper?", "Remove PDF")) return;
-    await invoke("save_pdf_path", { id: paper.id, path: null });
+    // Ask whether to also delete the file from disk, or just unlink it.
+    const deleteFile = await _pgPdfRemoveDialog();
+    if (deleteFile === null) return; // cancelled
+
+    if (deleteFile) {
+      // Delete file from disk + clear DB path in one atomic Rust call.
+      await invoke("delete_pdf_file", { id: paper.id });
+    } else {
+      // Unlink only — keep the file on disk, clear the DB reference.
+      await invoke("save_pdf_path", { id: paper.id, path: null });
+    }
+
     const cached = getPapersCache().find(p => p.id === paper.id);
     if (cached) cached.pdf_path = null;
     if (iframe.src.startsWith("blob:")) URL.revokeObjectURL(iframe.src);
     iframe.src = "";
-    if (statusEl) statusEl.textContent = "PDF removed";
+    if (statusEl) statusEl.textContent = deleteFile ? "PDF deleted" : "PDF removed";
     showDropzone(dropzone, viewer);
   };
 
