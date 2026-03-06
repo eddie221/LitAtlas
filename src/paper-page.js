@@ -196,7 +196,7 @@ function switchTab(tab) {
 // ── Page render ───────────────────────────────────────────────────────────────
 function renderPage(paper, connected) {
   const color = colorForPaper(paper);
-  document.getElementById("pp-topic-badge").textContent = paper.venue;//groupForPaper(paper);
+  document.getElementById("pp-topic-badge").textContent = paper.venue + paper.year;//groupForPaper(paper);
   document.getElementById("pp-topic-badge").style.color = color;
 
   // Header title — inline edit

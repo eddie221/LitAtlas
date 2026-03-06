@@ -21,10 +21,13 @@ Due to the tremendous growth of research, it is hard for us to keep track of eve
     - [X] Upload PDF
  - Similarity between Papers
     - [X] Using hashtag (cosine similarity)
-    - [ ] Using LLM
+    - [X] Using LLM
       - [X] Simple usage. (Concate the selected information in on string.)
       - [X] Weighted information.
-      - [ ] Include PDFs.
+      - [X] Include PDFs.
+    - [ ] Customized function.
+    - [ ] Self-defined models.
+
  - Search
     - [X] Paper Title
     - [X] Venue

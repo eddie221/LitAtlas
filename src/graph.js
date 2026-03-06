@@ -59,6 +59,30 @@ function _applyHfEnabled(enabled) {
   }
 }
 
+// ── Node colour persistence ───────────────────────────────────────────────────
+// Overrides are stored inside app_config.json under the key "node_color_overrides"
+// as { [paperId]: "#rrggbb" }, merged non-destructively with the rest of the config.
+
+async function loadNodeColors() {
+  try {
+    const cfg = await invoke("get_app_config") ?? {};
+    const saved = cfg.node_color_overrides ?? {};
+    Object.assign(nodeColorOverrides, saved);
+  } catch (e) {
+    console.warn("[LitAtlas] Could not load node color overrides:", e);
+  }
+}
+
+async function _saveNodeColors() {
+  try {
+    const cfg = await invoke("get_app_config") ?? {};
+    cfg.node_color_overrides = { ...nodeColorOverrides };
+    await invoke("save_app_config", { config: cfg });
+  } catch (e) {
+    console.warn("[LitAtlas] Could not save node color overrides:", e);
+  }
+}
+
 export async function loadSimConfig() {
   try {
     const saved = await invoke("get_similarity_config");
@@ -531,6 +555,7 @@ async function loadFromDB() {
   try {
     // Load similarity config first so compute uses user's settings
     await loadSimConfig();
+    await loadNodeColors();
     _simConfig.strategy = "js-cosine";
     // ── LLM module consent ──────────────────────────────────────────────────
     // Ask on every launch whether the user wants HF active this session.
@@ -1120,7 +1145,9 @@ canvas.addEventListener("mousemove", e => {
     const n = state.hoveredNode;
     document.getElementById("tt-title").textContent = n.title;
     document.getElementById("tt-year").textContent  = `${n.year} · ${n.venue}`;
-    document.getElementById("tt-tag").innerHTML = (n.hashtags ?? []).join(", ");
+    document.getElementById("tt-tag").innerHTML = (n.hashtags ?? []).length
+      ? (n.hashtags).map(t => `<span class="tag-chip tag-chip-sm">${t}</span>`).join("")
+      : "";
     tt.style.display     = "block";
     tt.style.left        = (e.clientX + 14) + "px";
     tt.style.top         = e.clientY + "px";
@@ -1236,7 +1263,7 @@ export function selectNode(node) {
   setCurrentPaperCache(node);
   state.selectedNode = node;
   document.getElementById("detail-panel").classList.add("open");
-  document.getElementById("detail-tag").textContent     = `— ${node.venue}`;
+  document.getElementById("detail-tag").textContent     = `— ${node.venue} ${node.year}`;
   document.getElementById("detail-title").textContent   = node.title;
   document.getElementById("detail-authors").textContent = node.authors.join(", ");
 
@@ -1257,24 +1284,27 @@ export function selectNode(node) {
 
   function applyColor(hex) {
     nodeColorOverrides[node.id] = hex;
-    colorInput.value = hex;
-    // Update active swatch
-    swatchContainer.querySelectorAll(".node-color-swatch").forEach(s =>
+    document.getElementById("node-color-custom").value = hex;
+    // Update active swatch — re-query the live DOM element each time
+    document.getElementById("node-color-swatches").querySelectorAll(".node-color-swatch").forEach(s =>
       s.classList.toggle("active", s.dataset.color === hex));
     // Update detail-tag accent colour
     document.getElementById("detail-tag").style.color = hex;
+    _saveNodeColors();
   }
 
   function resetColor() {
     delete nodeColorOverrides[node.id];
     const def = colorForPaper(node);
-    colorInput.value = def.length === 7 ? def : "#888888";
-    swatchContainer.querySelectorAll(".node-color-swatch").forEach(s =>
+    document.getElementById("node-color-custom").value = def.length === 7 ? def : "#888888";
+    // Update active swatch — re-query the live DOM element each time
+    document.getElementById("node-color-swatches").querySelectorAll(".node-color-swatch").forEach(s =>
       s.classList.toggle("active", s.dataset.color === def));
     document.getElementById("detail-tag").style.color = "";
+    _saveNodeColors();
   }
 
-  // Clone to remove stale listeners
+  // Clone all three interactive elements to shed every stale listener.
   const freshInput = colorInput.cloneNode(true);
   colorInput.parentNode.replaceChild(freshInput, colorInput);
   freshInput.value = currentColor.length === 7 ? currentColor : "#888888";
@@ -1284,7 +1314,12 @@ export function selectNode(node) {
   resetBtn.parentNode.replaceChild(freshReset, resetBtn);
   freshReset.addEventListener("click", resetColor);
 
-  swatchContainer.addEventListener("click", e => {
+  // Clone swatchContainer too — otherwise each node selection stacks another
+  // click listener on the same element, causing all previous nodes' applyColor
+  // closures to fire and overwrite each other's colors.
+  const freshSwatches = swatchContainer.cloneNode(true);
+  swatchContainer.parentNode.replaceChild(freshSwatches, swatchContainer);
+  freshSwatches.addEventListener("click", e => {
     const swatch = e.target.closest(".node-color-swatch");
     if (swatch) applyColor(swatch.dataset.color);
   });
@@ -1295,14 +1330,21 @@ export function selectNode(node) {
     .sort((a, b) => a.order - b.order)
     .slice(0, 6);
 
+  const tagsHtml = (node.hashtags ?? []).length
+    ? `<div class="tag-chip-list">${(node.hashtags).map(t =>
+        `<span class="tag-chip">${t}</span>`).join("")}</div>`
+    : `<span style="color:var(--text-dim)">—</span>`;
+
   document.getElementById("detail-meta").innerHTML = [
-    { label: "Year",  val: node.year},
+    { label: "Year",  val: node.year },
     { label: "Venue", val: node.venue },
-    { label: "Tags", val: node.hashtags }
   ].map(b => `<div class="meta-item">
     <div class="meta-label">${b.label}</div>
     <div class="meta-value">${b.val}</div>
-  </div>`).join("");
+  </div>`).join("") + `<div class="meta-item meta-item-full">
+    <div class="meta-label">Tags</div>
+    ${tagsHtml}
+  </div>`;
   // ── Abstract / Notes toggle buttons ──────────────────────────────────────
   // Reset container and button states on every new node selection
   const container = document.getElementById("detail-container");
