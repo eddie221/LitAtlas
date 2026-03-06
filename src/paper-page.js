@@ -27,14 +27,14 @@ const invoke = (
 
 /**
  * Compute and cache the HF embedding for a single paper in the background.
- * Uses the current similarity config from window.PaperGraph if available,
+ * Uses the current similarity config from window.LitAtlas if available,
  * falling back to sensible defaults.
  *
  * The embedding is saved next to the PDF as embedding.json and will be used
  * automatically by hf_compute_similarity to skip re-encoding.
  */
 async function _triggerPaperEmbedding(paperId) {
-  const cfg = window.PaperGraph?.getSimConfig?.() ?? {};
+  const cfg = window.LitAtlas?.getSimConfig?.() ?? {};
   // Only bother if HF strategy is in use — no-op for js-cosine
   if (cfg.strategy !== "hf-embeddings") return;
   const config = {
@@ -320,7 +320,7 @@ function renderInfoTab(paper) {
         });
       } catch (embErr) {
         // Non-fatal: log the error but continue adding the paper
-        console.warn("[PaperGraph] Auto-embed failed:", embErr);
+        console.warn("[LitAtlas] Auto-embed failed:", embErr);
       }
 
       // Update in-memory paper

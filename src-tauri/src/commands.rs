@@ -493,13 +493,13 @@ fn step_find_python(app: &tauri::AppHandle) -> Result<String, String> {
         };
 
         if !conda_prefix.is_empty() && exe_path.starts_with(&conda_prefix) {
-            eprintln!("[PaperGraph] Skipping {bin} — inside conda: {exe_path}");
+            eprintln!("[LitAtlas] Skipping {bin} — inside conda: {exe_path}");
             emit_progress(app, "find_python",
                 &format!("Skipped {bin} (conda env — needs isolation)"), false);
             continue;
         }
         if !venv_prefix.is_empty() && exe_path.starts_with(&venv_prefix) {
-            eprintln!("[PaperGraph] Skipping {bin} — inside venv: {exe_path}");
+            eprintln!("[LitAtlas] Skipping {bin} — inside venv: {exe_path}");
             emit_progress(app, "find_python",
                 &format!("Skipped {bin} (active venv — needs isolation)"), false);
             continue;
@@ -516,14 +516,14 @@ fn step_find_python(app: &tauri::AppHandle) -> Result<String, String> {
         if ver_ok {
             emit_progress(app, "find_python",
                 &format!("Found {bin} → {exe_path}"), false);
-            eprintln!("[PaperGraph] Using Python: {exe_path}");
+            eprintln!("[LitAtlas] Using Python: {exe_path}");
             return Ok(bin.to_string());
         }
     }
 
     Err("Python 3.8+ not found on PATH (every candidate was either missing or \
          inside an active conda / venv environment).\n\
-         Install Python 3 from https://python.org and restart PaperGraph.".into())
+         Install Python 3 from https://python.org and restart LitAtlas.".into())
 }
 
 // ── Process 2 of 5 : create isolated venv ────────────────────────────────────
@@ -676,7 +676,7 @@ fn step_upgrade_pip(
 
     if !status.success() {
         // Non-fatal: log a warning but do not abort the install
-        eprintln!("[PaperGraph] pip upgrade exited non-zero — continuing anyway");
+        eprintln!("[LitAtlas] pip upgrade exited non-zero — continuing anyway");
         emit_progress(app, "upgrade_pip",
             "pip upgrade failed (non-fatal) — continuing…", false);
     } else {
@@ -754,7 +754,12 @@ fn step_install_deps(
         return Err(
             "sentence-transformers installation failed.\n\
              Check the terminal log above for details.\n\
-             Common causes: no internet connection, disk full, outdated pip.".into()
+             Common causes:\n\
+             • No internet connection — connect to the internet and try again.\n\
+             • Disk full — free up space and retry.\n\
+             • Outdated pip — will be upgraded automatically on the next attempt.\n\n\
+             Note: once installed, the AI similarity features work fully offline.\n\
+             Only the initial setup and model downloads require internet access.".into()
         );
     }
 
@@ -837,7 +842,7 @@ fn launch_sidecar(
     }
 
     emit_progress(app, "ready", "Similarity engine ready.", true);
-    eprintln!("[PaperGraph] Python sidecar started (pid {})", sc.child.id());
+    eprintln!("[LitAtlas] Python sidecar started (pid {})", sc.child.id());
     Ok(sc)
 }
 
@@ -849,7 +854,7 @@ fn ensure_running<'a>(s: &'a AppState, app: &tauri::AppHandle) -> Result<std::sy
     };
     if dead {
         if guard.is_some() {
-            eprintln!("[PaperGraph] Sidecar crashed — restarting…");
+            eprintln!("[LitAtlas] Sidecar crashed — restarting…");
         }
         eprintln!("dead !!");
         *guard = Some(launch_sidecar(&s.sidecar_script(), &s.venv_dir(), app)?);
@@ -871,12 +876,14 @@ pub fn hf_setup_status(s: State<'_, AppState>) -> CmdResult<serde_json::Value> {
     let py = venv_python(&s.venv_dir());
     if !py.exists() {
         return Ok(serde_json::json!({
-            "ready": false,
-            "reason": "venv not created yet"
+            "ready":          false,
+            "reason":         "venv not created yet",
+            "cached_models":  serde_json::Value::Array(vec![]),
         }));
     }
+
     // Quick import check — fast because Python binary already exists
-    let ok = std::process::Command::new(&py)
+    let pkg_ok = std::process::Command::new(&py)
         .args(["-c", "import sentence_transformers"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -884,14 +891,71 @@ pub fn hf_setup_status(s: State<'_, AppState>) -> CmdResult<serde_json::Value> {
         .map(|st| st.success())
         .unwrap_or(false);
 
-    if ok {
-        Ok(serde_json::json!({ "ready": true }))
-    } else {
-        Ok(serde_json::json!({
-            "ready": false,
-            "reason": "sentence-transformers not installed"
-        }))
+    if !pkg_ok {
+        return Ok(serde_json::json!({
+            "ready":         false,
+            "reason":        "sentence-transformers not installed",
+            "cached_models": serde_json::Value::Array(vec![]),
+        }));
     }
+
+    // Scan the HuggingFace local cache for models that are available offline.
+    // This uses the same snapshot-directory heuristic as the Python sidecar's
+    // _model_snapshot_path(): a model is offline-ready when its snapshot dir
+    // contains config.json.  We do this in Rust so JS gets the list without
+    // needing to start the sidecar first.
+    let known_models = [
+        "sentence-transformers/all-MiniLM-L6-v2",
+        "sentence-transformers/all-mpnet-base-v2",
+        "sentence-transformers/multi-qa-MiniLM-L6-cos-v1",
+        "allenai/specter2_base",
+    ];
+
+    let hf_cache = hf_cache_dir();
+    let cached_models: Vec<serde_json::Value> = known_models.iter()
+        .filter(|&&model_id| model_is_cached(&hf_cache, model_id))
+        .map(|&id| serde_json::json!(id))
+        .collect();
+
+    Ok(serde_json::json!({
+        "ready":         true,
+        "cached_models": cached_models,
+    }))
+}
+
+/// Return the HuggingFace hub cache directory, respecting HF_HOME / XDG_CACHE_HOME.
+/// Mirrors the logic in similarity_server.py: _hf_cache_dir().
+fn hf_cache_dir() -> std::path::PathBuf {
+    if let Ok(hf_home) = std::env::var("HF_HOME") {
+        return std::path::PathBuf::from(hf_home).join("hub");
+    }
+    let cache_root = std::env::var("XDG_CACHE_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            dirs_next_home().join(".cache")
+        });
+    cache_root.join("huggingface").join("hub")
+}
+
+/// Cross-platform home directory (mirrors dirs::home_dir without the dep).
+fn dirs_next_home() -> std::path::PathBuf {
+    std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("."))
+}
+
+/// Return true if model_id has at least one snapshot directory containing
+/// config.json in the HuggingFace hub cache.  Mirrors _model_snapshot_path().
+fn model_is_cached(hf_cache: &std::path::Path, model_id: &str) -> bool {
+    let safe      = model_id.replace('/', "--");
+    let snap_root = hf_cache.join(format!("models--{safe}")).join("snapshots");
+    if !snap_root.is_dir() { return false; }
+    std::fs::read_dir(&snap_root)
+        .map(|entries| entries.flatten().any(|entry| {
+            entry.path().join("config.json").is_file()
+        }))
+        .unwrap_or(false)
 }
 
 /// Set up (or repair) the Python venv and install sentence-transformers.
@@ -922,12 +986,12 @@ pub fn hf_setup_venv(
         let mut guard = s.sidecar.lock().unwrap();
         if let Some(sc) = guard.as_mut() {
             if sc.is_alive() {
-                eprintln!("[PaperGraph] hf_setup_venv: sidecar already live — reusing.");
+                eprintln!("[LitAtlas] hf_setup_venv: sidecar already live — reusing.");
                 emit_progress(&app, "ready", "Similarity engine ready.", true);
                 return Ok(serde_json::json!({ "ok": true }));
             }
             // Dead sidecar — drop it before relaunching.
-            eprintln!("[PaperGraph] hf_setup_venv: dead sidecar found — relaunching.");
+            eprintln!("[LitAtlas] hf_setup_venv: dead sidecar found — relaunching.");
             *guard = None;
         }
     }
@@ -944,7 +1008,7 @@ pub fn hf_setup_venv(
                 // launch_sidecar already emits the "ready" done event
             }
             Err(e) => {
-                eprintln!("[PaperGraph] hf_setup_venv background error: {e}");
+                eprintln!("[LitAtlas] hf_setup_venv background error: {e}");
                 let _ = app.emit("venv://error", serde_json::json!({ "error": e }));
             }
         }

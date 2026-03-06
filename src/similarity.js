@@ -1,5 +1,5 @@
 /**
- * similarity.js  —  PaperGraph similarity engine (strategy pattern)
+ * similarity.js  —  LitAtlas similarity engine (strategy pattern)
  *
  * Two strategies, swappable at runtime:
  *

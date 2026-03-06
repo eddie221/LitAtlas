@@ -1,4 +1,4 @@
-# PaperGraph
+# LitAtlas -- Literature Atlas Viewer
 
 This project provides a local paper-relation viewer to manage and present relations between papers.
 

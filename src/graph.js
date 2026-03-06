@@ -45,7 +45,7 @@ let _hfEnabled = null;
 /// Apply LLM-enabled state.
 /// The ⚙ Similarity button is always accessible (JS-cosine works without HF).
 /// When disabled, only the HuggingFace strategy option inside the panel is
-/// grayed out — communicated via window.PaperGraph.isHfEnabled().
+/// grayed out — communicated via window.LitAtlas.isHfEnabled().
 function _applyHfEnabled(enabled) {
   _hfEnabled = enabled;
   // The ⚙ Similarity button itself stays enabled regardless — the panel
@@ -69,7 +69,7 @@ export async function loadSimConfig() {
       }
     }
   } catch (e) {
-    console.warn("[PaperGraph] Could not load similarity config:", e);
+    console.warn("[LitAtlas] Could not load similarity config:", e);
   }
 }
 
@@ -81,7 +81,7 @@ export async function saveSimConfig(cfg) {
       config: { ..._simConfig, llm_enabled: _hfEnabled }
     });
   }
-  catch (e) { console.warn("[PaperGraph] Could not save similarity config:", e); }
+  catch (e) { console.warn("[LitAtlas] Could not save similarity config:", e); }
 }
 
 async function _persistHfEnabled(val) {
@@ -90,7 +90,7 @@ async function _persistHfEnabled(val) {
     await invoke("save_similarity_config", {
       config: { ..._simConfig, llm_enabled: val }
     });
-  } catch (e) { console.warn("[PaperGraph] Could not persist llm_enabled:", e); }
+  } catch (e) { console.warn("[LitAtlas] Could not persist llm_enabled:", e); }
 }
 
 export function getSimConfig() { return { ..._simConfig }; }
@@ -123,7 +123,7 @@ export async function loadPdfIntoIframe(paperId, iframe, onStatus) {
     return true;
   } catch (err) {
     if (onStatus) onStatus("❌ " + err, "var(--accent3)");
-    console.error("[PaperGraph] read_pdf_bytes failed:", err);
+    console.error("[LitAtlas] read_pdf_bytes failed:", err);
     return false;
   }
 }
@@ -545,7 +545,7 @@ async function loadFromDB() {
       await _runLlmConsentFlow();
       showOverlay("Opening database…");
     } catch (e) {
-      console.warn("[PaperGraph] LLM consent flow failed:", e);
+      console.warn("[LitAtlas] LLM consent flow failed:", e);
       _applyHfEnabled(false);
     }
 
@@ -572,7 +572,7 @@ async function loadFromDB() {
     initGraph();
   } catch (err) {
     showOverlay(`❌ Database error\n\n${err}`);
-    console.error("[PaperGraph]", err);
+    console.error("[LitAtlas]", err);
   }
 }
 
@@ -645,7 +645,7 @@ export async function refreshPaper(id) {
       if (node) { Object.assign(node, updated); node.radius = nodeRadius(updated); }
     }
   } catch (err) {
-    console.warn("[PaperGraph] refreshPaper failed:", err);
+    console.warn("[LitAtlas] refreshPaper failed:", err);
   }
 }
 
@@ -1528,7 +1528,7 @@ document.getElementById("npm-submit-btn").addEventListener("click", async () => 
         });
       } catch (embErr) {
         // Non-fatal: log the error but continue adding the paper
-        console.warn("[PaperGraph] Auto-embed failed:", embErr);
+        console.warn("[LitAtlas] Auto-embed failed:", embErr);
       }
     }
 
@@ -1569,7 +1569,7 @@ document.getElementById("npm-submit-btn").addEventListener("click", async () => 
   } catch (err) {
     statusEl.textContent = `✗ ${err}`;
     statusEl.style.color = "var(--accent3)";
-    console.error("[PaperGraph] add_paper failed:", err);
+    console.error("[LitAtlas] add_paper failed:", err);
   }
 });
 
@@ -1624,9 +1624,9 @@ async function showSidebarPdf(node) {
   });
 }
 
-// ── window.PaperGraph bridge ──────────────────────────────────────────────────
+// ── window.LitAtlas bridge ──────────────────────────────────────────────────
 // Exposes graph functions to non-module scripts (similarity-settings.js).
-window.PaperGraph = {
+window.LitAtlas = {
   getSimConfig,
   saveSimConfig,
   triggerEdgeRecompute,

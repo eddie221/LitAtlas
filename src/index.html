@@ -3,9 +3,62 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>PaperGraph — Research Relationship Viewer</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Serif+Display:ital@0;1&display=swap" rel="stylesheet" />
+  <title>LitAtlas — Literature Atlas Viewer</title>
+  <!-- ── LOCAL FONTS ─────────────────────────────────────────────────────────
+       Font files live in the same directory as index.html (or adjust the
+       paths below to match your Tauri asset setup).
+
+       To obtain the woff2 files:
+         Space Mono      → https://fontsource.org/fonts/space-mono
+         DM Serif Display → https://fontsource.org/fonts/dm-serif-display
+       Download the "Variable" or individual weight packages, then copy:
+         Space Mono 400  → fonts/space-mono-latin-400-normal.woff2
+         Space Mono 700  → fonts/space-mono-latin-700-normal.woff2
+         DM Serif Display 400        → fonts/dm-serif-display-latin-400-normal.woff2
+         DM Serif Display 400 italic → fonts/dm-serif-display-latin-400-italic.woff2
+  ── -->
+  <style>
+    @font-face {
+      font-family: 'Space Mono';
+      font-style:  normal;
+      font-weight: 400;
+      font-display: swap;
+      src: url('fonts/space-mono-latin-400-normal.woff2') format('woff2');
+      unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6,
+                     U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F,
+                     U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+    }
+    @font-face {
+      font-family: 'Space Mono';
+      font-style:  normal;
+      font-weight: 700;
+      font-display: swap;
+      src: url('fonts/space-mono-latin-700-normal.woff2') format('woff2');
+      unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6,
+                     U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F,
+                     U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+    }
+    @font-face {
+      font-family: 'DM Serif Display';
+      font-style:  normal;
+      font-weight: 400;
+      font-display: swap;
+      src: url('fonts/dm-serif-display-latin-400-normal.woff2') format('woff2');
+      unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6,
+                     U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F,
+                     U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+    }
+    @font-face {
+      font-family: 'DM Serif Display';
+      font-style:  italic;
+      font-weight: 400;
+      font-display: swap;
+      src: url('fonts/dm-serif-display-latin-400-italic.woff2') format('woff2');
+      unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6,
+                     U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F,
+                     U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+    }
+  </style>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -35,7 +88,7 @@
   <!-- ── SIDEBAR EDGE TOGGLE ── -->
   <button id="sidebar-edge-toggle" title="Collapse sidebar">‹</button>
   <header id="header">
-    <h1>Paper<span>Graph</span></h1>
+    <h1>Lit<span>Atlas</span></h1>
     <div id="search-bar">
       <input id="search-input" type="text" placeholder="Search papers…" />
       <div id="search-fields">
@@ -396,7 +449,7 @@
       <div id="llm-consent-icon">🤖</div>
       <div id="llm-consent-title">Enable AI Similarity Features?</div>
       <div id="llm-consent-body">
-        <p>PaperGraph can use a local <strong>HuggingFace sentence-transformer</strong>
+        <p>LitAtlas can use a local <strong>HuggingFace sentence-transformer</strong>
            model to compute semantic similarity between papers.</p>
         <ul>
           <li>Runs entirely <strong>on your machine</strong> — no data leaves your device</li>

@@ -16,9 +16,9 @@ import { getDefaultConfig } from "./similarity.js";
  *   • On error       → red badge + message + Retry button
  */
 
-function _getSimConfig()           { return window.PaperGraph?.getSimConfig?.()    ?? {}; }
-async function _saveSimConfig(cfg) { return window.PaperGraph?.saveSimConfig?.(cfg); }
-async function _recompute()        { return window.PaperGraph?.triggerEdgeRecompute?.(); }
+function _getSimConfig()           { return window.LitAtlas?.getSimConfig?.()    ?? {}; }
+async function _saveSimConfig(cfg) { return window.LitAtlas?.saveSimConfig?.(cfg); }
+async function _recompute()        { return window.LitAtlas?.triggerEdgeRecompute?.(); }
 
 const invoke = (
   window.__TAURI__?.core?.invoke ??
@@ -86,7 +86,7 @@ async function _checkModelCached(modelId) {
 async function renderSettings(panel) {
   const cfg    = _getSimConfig();
   const isHF   = cfg.strategy === "hf-embeddings";
-  const hfOk   = window.PaperGraph?.isHfEnabled?.() === true;
+  const hfOk   = window.LitAtlas?.isHfEnabled?.() === true;
   let   models = _BUILTIN_MODELS;
   console.log("hfOk : ", hfOk);
   const body = panel.querySelector("#sim-settings-body");

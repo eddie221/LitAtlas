@@ -5,7 +5,7 @@
  * Manages the left-hand project switcher sidebar.
  *
  * Each "project" is an independent SQLite database stored at:
- *   app_data_dir/projects/<slug>/papergraph.db
+ *   app_data_dir/projects/<slug>/litatlas.db
  *   app_data_dir/projects/<slug>/pdfs/
  *
  * Switching a project calls the Rust `switch_project` command which

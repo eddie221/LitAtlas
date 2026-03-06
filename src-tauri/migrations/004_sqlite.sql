@@ -1,5 +1,5 @@
 -- ═══════════════════════════════════════════════════════════════════════════
--- PaperGraph  —  Schema v3  (SQLite)
+-- LitAtlas  —  Schema v3  (SQLite)
 --
 -- The database file lives next to the app binary.
 -- Tauri resolves the path at startup and passes it to create_pool().
@@ -165,9 +165,9 @@ ORDER BY p.year ASC, p.id ASC;
 -- -- SEED DATA (small)
 -- -- ═══════════════════════════════════════════════════════════════════════════
 -- sample_seed.sql
--- Minimal seed for PaperGraph: AlexNet, Transformer, ResNet
+-- Minimal seed for LitAtlas: AlexNet, Transformer, ResNet
 -- Compatible with migrations/004_sqlite.sql (SQLite dialect)
--- Load with: sqlite3 papergraph.db < sample_seed.sql
+-- Load with: sqlite3 LitAtlas.db < sample_seed.sql
 
 -- ── Papers ────────────────────────────────────────────────────────────────────
 

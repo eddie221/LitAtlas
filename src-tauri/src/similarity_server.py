@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-similarity_server.py — PaperGraph HuggingFace similarity sidecar.
+similarity_server.py — LitAtlas HuggingFace similarity sidecar.
 
 Protocol: newline-delimited JSON over stdin/stdout (Tauri sidecar stdio).
 
@@ -42,18 +42,61 @@ _model_lock = threading.Lock()
 #     device = "cpu"
 # print(f"Using {device} device")
 
-def _get_model(model_name: str):
+def _get_model(model_name: str, allow_download: bool = True):
+    """
+    Load a SentenceTransformer model.
+
+    Strategy (offline-safe):
+      1. If the model is already cached locally, load it with
+         local_files_only=True — works with no internet connection.
+      2. If NOT cached and allow_download=True, attempt a normal download.
+      3. If NOT cached and allow_download=False (or download fails because
+         the network is unreachable), raise a clear offline error rather
+         than a cryptic huggingface_hub exception.
+    """
     global _model, _model_name
     with _model_lock:
         if _model is not None and _model_name == model_name:
             return _model
         try:
             from sentence_transformers import SentenceTransformer
-            _model      = SentenceTransformer(model_name)
-            _model_name = model_name
-            return _model
+
+            # Fast path: model already in local HF cache — never hits the network.
+            if _model_snapshot_path(model_name) is not None:
+                _model      = SentenceTransformer(model_name, local_files_only=True)
+                _model_name = model_name
+                return _model
+
+            # Model not cached yet.
+            if not allow_download:
+                raise RuntimeError(
+                    f"Model '{model_name}' is not cached locally and the app is "
+                    f"in offline mode.  Connect to the internet and download the "
+                    f"model first via the Similarity Settings panel."
+                )
+
+            # Attempt download (requires internet).
+            try:
+                _model      = SentenceTransformer(model_name)
+                _model_name = model_name
+                return _model
+            except Exception as dl_err:
+                # Distinguish a network failure from other errors so the user
+                # gets a meaningful message when offline.
+                err_str = str(dl_err).lower()
+                if any(kw in err_str for kw in ("connection", "network", "timeout",
+                                                 "offline", "unreachable", "resolve")):
+                    raise RuntimeError(
+                        f"Cannot download model '{model_name}': no internet connection.\n"
+                        f"Connect to the internet and try again, or download the model "
+                        f"while online and it will be available offline afterwards."
+                    ) from dl_err
+                raise RuntimeError(f"Failed to load model '{model_name}': {dl_err}") from dl_err
+
+        except RuntimeError:
+            raise
         except Exception as e:
-            raise RuntimeError(f"Failed to load model '{model_name}': {e}")
+            raise RuntimeError(f"Failed to load model '{model_name}': {e}") from e
 
 
 # ── HuggingFace cache helpers ─────────────────────────────────────────────────
@@ -85,12 +128,17 @@ def _model_snapshot_path(model_id: str):
 # ── check_model ───────────────────────────────────────────────────────────────
 
 def handle_check_model(req_id: Any, model_id: str) -> None:
-    """Filesystem-only cache check — never touches the network."""
+    """
+    Filesystem-only cache check — never touches the network.
+    Returns { cached: bool, path?: str, offline_ready: bool }.
+    offline_ready is True when the model can be loaded without a network
+    connection (i.e. a complete snapshot exists in the HF cache).
+    """
     path = _model_snapshot_path(model_id)
     if path:
-        ok(req_id, {"cached": True, "path": path})
+        ok(req_id, {"cached": True, "path": path, "offline_ready": True})
     else:
-        ok(req_id, {"cached": False})
+        ok(req_id, {"cached": False, "offline_ready": False})
 
 
 # ── download_model ────────────────────────────────────────────────────────────
@@ -405,8 +453,21 @@ def handle(line: str) -> None:
     params = req.get("params") or {}
 
     try:
-        if   method == "status":         ok(req_id, {"ready": True, "loaded_model": _model_name, "python": sys.version})
-        elif method == "list_models":    ok(req_id, {"models": AVAILABLE_MODELS, "fields": AVAILABLE_FIELDS})
+        if   method == "status":
+            offline_models = [m["id"] for m in AVAILABLE_MODELS
+                              if _model_snapshot_path(m["id"]) is not None]
+            ok(req_id, {
+                "ready":          True,
+                "loaded_model":   _model_name,
+                "python":         sys.version,
+                "offline_models": offline_models,
+            })
+        elif method == "list_models":
+            models_annotated = [
+                {**m, "cached": _model_snapshot_path(m["id"]) is not None}
+                for m in AVAILABLE_MODELS
+            ]
+            ok(req_id, {"models": models_annotated, "fields": AVAILABLE_FIELDS})
         elif method == "check_model":    handle_check_model(req_id, params.get("model", ""))
         elif method == "download_model": handle_download_model(req_id, params.get("model", ""))
         elif method == "compute_embedding":

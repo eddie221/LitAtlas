@@ -1,10 +1,10 @@
 [package]
-name = "paper-graph"
+name = "lit-atlas"
 version = "0.3.0"
 edition = "2021"
 
 [lib]
-name = "paper_graph_lib"
+name = "lit_atlas_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

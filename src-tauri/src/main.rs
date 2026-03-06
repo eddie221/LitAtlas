@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    paper_graph_lib::run()
+    lit_atlas_lib::run()
 }
