@@ -267,7 +267,7 @@ function _jsEdgesForNew(np, existing, thr, max) {
   for (const o of existing) {
     if (o.id === np.id) continue;
     const sim = _blendedSim(nEnc, encode(o));
-    if (sim >= thr) {
+    if (sim > thr) {
       edges.push({
         source_id:  np.id,
         target_id:  o.id,
