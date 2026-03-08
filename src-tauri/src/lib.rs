@@ -2,6 +2,7 @@
 
 mod db;
 mod commands;
+mod logger;   // ← NEW: structured call/error logger
 
 use commands::*;
 use commands::PySidecar;
@@ -91,7 +92,6 @@ fn seed_db(pool: &SqlitePool) {
                 .collect::<Vec<_>>().join("\n");
             let stmt = stmt.trim();
             if stmt.is_empty() { continue; }
-            // println!("{}", stmt);
             if let Err(e) = sqlx::query(stmt).execute(pool).await {
                 eprintln!("[LitAtlas] seed: {e}");
             }
@@ -119,6 +119,13 @@ pub fn run() {
             let data_dir = app.path().app_data_dir()
                 .expect("Failed to resolve app data dir");
             std::fs::create_dir_all(&data_dir).unwrap();
+
+            // ── Initialise logger ────────────────────────────────────────────
+            // Must happen before any command can be invoked so the log file
+            // path is known.  litatlas.log is appended across sessions;
+            // delete it manually to reset (the app always appends, never truncates).
+            logger::init(data_dir.join("litatlas.log"));
+            logger::log_call("app::startup");
 
             let projects_dir = data_dir.join("projects");
             std::fs::create_dir_all(&projects_dir).unwrap();

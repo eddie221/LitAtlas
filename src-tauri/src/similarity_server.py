@@ -25,6 +25,7 @@ import json
 import os
 import math
 import threading
+import time
 import traceback
 from typing import Any
 import torch
@@ -127,7 +128,7 @@ _model_lock = threading.Lock()
 
 def _get_model(model_name: str, allow_download: bool = True):
     """
-    Load a SentenceTransformer model.
+    Load a HuggingFace model as a (tokenizer, model) tuple.
 
     Strategy (offline-safe):
       1. If the model is already cached locally, load it with
@@ -142,27 +143,23 @@ def _get_model(model_name: str, allow_download: bool = True):
         if _model is not None and _model_name == model_name:
             return _model
         try:
-            from sentence_transformers import SentenceTransformer
+            from transformers import AutoTokenizer, AutoModel
 
-            # Fast path: model already in local HF cache — never hits the network.
-            if _model_snapshot_path(model_name) is not None:
-                _model      = SentenceTransformer(model_name, local_files_only=True)
-                _model_name = model_name
-                return _model
+            offline = _model_snapshot_path(model_name) is not None
 
             # Model not cached yet.
-            if not allow_download:
+            if not offline and not allow_download:
                 raise RuntimeError(
                     f"Model '{model_name}' is not cached locally and the app is "
                     f"in offline mode.  Connect to the internet and download the "
                     f"model first via the Similarity Settings panel."
                 )
 
-            # Attempt download (requires internet).
+            kwargs = {"local_files_only": True} if offline else {}
             try:
-                _model      = SentenceTransformer(model_name)
-                _model_name = model_name
-                return _model
+                tokenizer = AutoTokenizer.from_pretrained(model_name, **kwargs)
+                model     = AutoModel.from_pretrained(model_name, trust_remote_code=True, **kwargs)
+                model.eval()
             except Exception as dl_err:
                 # Distinguish a network failure from other errors so the user
                 # gets a meaningful message when offline.
@@ -176,10 +173,29 @@ def _get_model(model_name: str, allow_download: bool = True):
                     ) from dl_err
                 raise RuntimeError(f"Failed to load model '{model_name}': {dl_err}") from dl_err
 
+            _model      = (tokenizer, model)
+            _model_name = model_name
+            return _model
+
         except RuntimeError:
             raise
         except Exception as e:
             raise RuntimeError(f"Failed to load model '{model_name}': {e}") from e
+
+
+def _mean_pool(model_output, attention_mask):
+    """
+    Mean-pool token embeddings across the sequence dimension,
+    masking out padding tokens, then L2-normalise each row.
+    Returns a numpy array of shape (batch, dim).
+    """
+    token_embeddings = model_output.last_hidden_state            # (B, T, D)
+    mask = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
+    summed = torch.sum(token_embeddings * mask, dim=1)
+    counts = torch.clamp(mask.sum(dim=1), min=1e-9)
+    pooled = summed / counts                                      # (B, D)
+    norms  = pooled.norm(dim=1, keepdim=True).clamp(min=1e-9)
+    return (pooled / norms).detach().cpu().numpy()                # (B, D)
 
 
 # ── HuggingFace cache helpers ─────────────────────────────────────────────────
@@ -228,68 +244,29 @@ def handle_check_model(req_id: Any, model_id: str) -> None:
 
 def handle_download_model(req_id: Any, model_id: str) -> None:
     """
-    Download model_id via snapshot_download, emitting per-file progress JSON
-    lines on stdout before the final reply so Rust can forward them as
-    'venv://model-progress' Tauri events.
+    Download model_id using AutoTokenizer.from_pretrained /
+    AutoModel.from_pretrained (via _get_model), which is HuggingFace's
+    native download-and-cache mechanism.
+
+    The model stays loaded in memory after this call so the first
+    compute_embedding request is instant.  Elapsed wall-clock time is
+    written to log.txt via sys.stderr.
     """
-
-    def _emit_prog(filename: str, downloaded: int, total: int) -> None:
-        pct = round(downloaded / total * 100, 1) if total > 0 else 0.0
-        sys.stdout.write(json.dumps({
-            "id": req_id,
-            "ok": True,
-            "progress": {
-                "filename":   os.path.basename(filename) or filename,
-                "downloaded": downloaded,
-                "total":      total,
-                "pct":        pct,
-            },
-        }) + "\n")
-        sys.stdout.flush()
-
     try:
-        from huggingface_hub import snapshot_download
-        import huggingface_hub.file_download as _fd
-
-        _cur_file: list[str] = [""]
-
-        class _ProgressShim:
-            """Minimal tqdm shim that writes progress JSON instead of a bar."""
-            def __init__(self, iterable=None, *, total=None, desc=None, **_kw):
-                self._iter  = iterable
-                self._total = int(total or 0)
-                self._n     = 0
-                if desc:
-                    _cur_file[0] = str(desc)
-
-            def __iter__(self):
-                for item in (self._iter or []):
-                    yield item
-
-            def __enter__(self): return self
-            def __exit__(self, *_): self.close()
-
-            def update(self, n: int = 1) -> None:
-                self._n += n
-                _emit_prog(_cur_file[0] or model_id, self._n, self._total)
-
-            def set_postfix(self, **_): pass
-            def set_description(self, s="", **_):
-                if s: _cur_file[0] = str(s)
-            def close(self): pass
-
-        # Patch tqdm in the two locations huggingface_hub uses it.
-        _fd.tqdm = _ProgressShim  # type: ignore[attr-defined]
-        try:
-            import huggingface_hub.utils as _hu
-            _hu.tqdm = _ProgressShim  # type: ignore[attr-defined]
-        except (ImportError, AttributeError):
-            pass
-
-        local_path = snapshot_download(repo_id=model_id, repo_type="model")
-        ok(req_id, {"path": local_path, "done": True})
-
+        t0 = time.monotonic()
+        print(f"[LitAtlas] download_model: starting '{model_id}'", file=sys.stderr, flush=True)
+        _get_model(model_id, allow_download=True)
+        elapsed = time.monotonic() - t0
+        print(
+            f"[LitAtlas] download_model: '{model_id}' completed in {elapsed:.1f}s",
+            file=sys.stderr, flush=True,
+        )
+        ok(req_id, {"done": True})
     except Exception:
+        print(
+            f"[LitAtlas] download_model: '{model_id}' failed\n{traceback.format_exc()}",
+            file=sys.stderr, flush=True,
+        )
         err(req_id, f"Model download failed:\n{traceback.format_exc()}")
 
 
@@ -348,7 +325,11 @@ def paper_embedding(paper: dict, fields: list, weights: dict, model) -> list:
 
     # Batch encode all field texts at once (single GPU/CPU pass)
     texts = [text for _, text, _ in items]
-    vecs  = model.encode(texts, convert_to_numpy=True, show_progress_bar=False)
+    tokenizer, hf_model = model
+    inputs = tokenizer(texts, padding=True, truncation=True, max_length=512, return_tensors="pt")
+    with torch.no_grad():
+        outputs = hf_model(**inputs)
+    vecs = _mean_pool(outputs, inputs["attention_mask"])
 
     # Weighted sum
     dim       = vecs.shape[1]
@@ -455,7 +436,11 @@ def compute_embedding(paper: dict, config: dict) -> dict:
 
     # Batch-encode all field texts in one GPU/CPU pass
     texts = [text for _, text in items]
-    vecs  = model.encode(texts, convert_to_numpy=True, show_progress_bar=False)
+    tokenizer, hf_model = model
+    inputs = tokenizer(texts, padding=True, truncation=True, max_length=512, return_tensors="pt")
+    with torch.no_grad():
+        outputs = hf_model(**inputs)
+    vecs = _mean_pool(outputs, inputs["attention_mask"])
 
     # Build field_vectors dict: { field_name -> raw unit vector }
     field_vectors = {}
@@ -627,6 +612,37 @@ def handle(line: str) -> None:
 
 
 def main() -> None:
+    # ── Redirect all output to log.txt ───────────────────────────────────────
+    # Derive log path from LitAtlas_LOG_PATH env var (set by Rust), falling
+    # back to a log.txt next to this script so it always works.
+    log_path = (
+        os.environ.get("LitAtlas_LOG_PATH")
+        or os.path.join(os.path.dirname(os.path.abspath(__file__)), "log.txt")
+    )
+    try:
+        # line-buffered (buffering=1) so every print() appears immediately
+        _log = open(log_path, "a", buffering=1, encoding="utf-8")
+        sys.stderr = _log
+        # Also capture stray print() calls that go to stdout by mistake —
+        # wrap stdout so JSON-RPC lines pass through and everything else logs.
+        _real_stdout = sys.stdout
+        class _TeeStdout:
+            """Pass JSON lines through; log anything that looks like plain text."""
+            def write(self, s):
+                stripped = s.strip()
+                if not stripped:
+                    return
+                if stripped.startswith("{") and stripped.endswith("}"):
+                    _real_stdout.write(s)
+                else:
+                    _log.write(s if s.endswith("\n") else s + "\n")
+                    _log.flush()
+            def flush(self):
+                _real_stdout.flush()
+        sys.stdout = _TeeStdout()
+    except OSError:
+        pass  # if log file can't be opened, fall back silently
+
     # Load user plugin script (if LitAtlas_PLUGIN_SCRIPT env var is set).
     _load_plugin()
     sys.stdout.write(json.dumps({"id": 0, "ok": True, "result": "ready"}) + "\n")

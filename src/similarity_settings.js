@@ -57,15 +57,23 @@ const _BUILTIN_MODELS = [
   { id: "sentence-transformers/all-MiniLM-L6-v2",
     label: "MiniLM-L6-v2 (fast, 384-dim)",
     description: "Lightweight and fast. Good for most cases.", size_mb: 80 },
-  { id: "sentence-transformers/all-mpnet-base-v2",
-    label: "MPNet-base-v2 (accurate, 768-dim)",
-    description: "Higher accuracy, slower. Best for research quality.", size_mb: 420 },
-  { id: "sentence-transformers/multi-qa-MiniLM-L6-cos-v1",
-    label: "Multi-QA MiniLM (semantic search)",
-    description: "Optimised for semantic similarity search.", size_mb: 80 },
-  { id: "allenai/specter2_base",
-    label: "SPECTER2 (academic papers)",
-    description: "Trained on scientific paper citations. Best for academic similarity.", size_mb: 440 },
+  { id: "Qwen/Qwen2.5-VL-32B-Instruct",
+    label: "Qwen2.5-VL-32B-Instruct (MLLM, 5120-dim)",
+    description: "Large, more precise and powerful."
+  }
+  // { id: "OpenGVLab/InternVL3_5-14B",
+  //   label: "InternVL3_5-14B (MLLM, 5120-dim)",
+  //   description: "Large, more precise and powerful." },
+  
+  // { id: "sentence-transformers/all-mpnet-base-v2",
+  //   label: "MPNet-base-v2 (accurate, 768-dim)",
+  //   description: "Higher accuracy, slower. Best for research quality.", size_mb: 420 },
+  // { id: "sentence-transformers/multi-qa-MiniLM-L6-cos-v1",
+  //   label: "Multi-QA MiniLM (semantic search)",
+  //   description: "Optimised for semantic similarity search.", size_mb: 80 },
+  // { id: "allenai/specter2_base",
+  //   label: "SPECTER2 (academic papers)",
+  //   description: "Trained on scientific paper citations. Best for academic similarity.", size_mb: 440 },
 ];
 
 // ── Per-model cache status memo: modelId → true | false | null (unknown) ──────
@@ -97,46 +105,60 @@ async function renderSettings(panel) {
 
   // Check cache for the currently selected model.
   if (isHF) {
-    // Async: refresh model list from live sidecar + custom models (non-blocking).
-    if (invoke) {
-      try {
-        const [sidecarRes, customModels] = await Promise.all([
-          invoke("hf_list_models").catch(() => null),
-          getCustomModels().catch(() => []),
-        ]);
-
-        // Start with sidecar list (includes cached: bool annotation), fall back to builtin
-        let baseModels = sidecarRes?.models?.length ? sidecarRes.models : _BUILTIN_MODELS;
-
-        // Merge user-defined custom models, avoiding duplicates
-        const knownIds = new Set(baseModels.map(m => m.id));
-        const extras   = customModels
-          .filter(m => m.id && !knownIds.has(m.id))
-          .map(m => ({
-            id:          m.id,
-            label:       m.label || m.id,
-            description: "User-defined model",
-            size_mb:     m.size_mb ?? null,
-            cached:      sidecarRes?.models?.find(sm => sm.id === m.id)?.cached ?? false,
-          }));
-
-        models = [...baseModels, ...extras];
-
-        const sel = body.querySelector("#sim-model-select");
-        if (sel) {
-          const cur = sel.value;
-          sel.innerHTML = models.map(m => {
-            const label = m.cached ? `✓ ${m.label}` : m.label;
-            return `<option value="${m.id}" ${m.id===cur?"selected":""}>${label}</option>`;
-          }).join("");
-          _setModelDesc(body, models, sel.value);
-        }
-      } catch (_) { /* use builtin list */ }
-    }
-    const modelId = body.querySelector("#sim-model-select")?.value
-                 ?? cfg.model ?? _BUILTIN_MODELS[0].id;
-    await _refreshDownloadUI(body, modelId, models);
+    await refreshModelSelect(body);
   }
+}
+
+// ── Refresh the model <select> in an already-rendered panel ──────────────────
+// Exported so app_settings.js can call it immediately after adding a model,
+// making the new entry appear in the dropdown without reopening the panel.
+export async function refreshModelSelect(bodyOrPanel) {
+  // Accept either the panel root or the #sim-settings-body directly.
+  const body = bodyOrPanel?.id === "sim-settings-body"
+    ? bodyOrPanel
+    : bodyOrPanel?.querySelector("#sim-settings-body");
+  if (!body) return;
+
+  const cfg = _getSimConfig();
+  let models = _BUILTIN_MODELS;
+
+  if (invoke) {
+    try {
+      const [sidecarRes, customModels] = await Promise.all([
+        invoke("hf_list_models").catch(() => null),
+        getCustomModels().catch(() => []),
+      ]);
+
+      let baseModels = sidecarRes?.models?.length ? sidecarRes.models : _BUILTIN_MODELS;
+
+      const knownIds = new Set(baseModels.map(m => m.id));
+      const extras   = customModels
+        .filter(m => m.id && !knownIds.has(m.id))
+        .map(m => ({
+          id:          m.id,
+          label:       m.label || m.id,
+          description: "User-defined model",
+          size_mb:     m.size_mb ?? null,
+          cached:      sidecarRes?.models?.find(sm => sm.id === m.id)?.cached ?? false,
+        }));
+
+      models = [...baseModels, ...extras];
+
+      const sel = body.querySelector("#sim-model-select");
+      if (sel) {
+        const cur = sel.value;
+        sel.innerHTML = models.map(m => {
+          const label = m.cached ? `✓ ${m.label}` : m.label;
+          return `<option value="${m.id}" ${m.id === cur ? "selected" : ""}>${label}</option>`;
+        }).join("");
+        _setModelDesc(body, models, sel.value);
+      }
+    } catch (_) { /* use builtin list */ }
+  }
+
+  const modelId = body.querySelector("#sim-model-select")?.value
+               ?? cfg.model ?? _BUILTIN_MODELS[0].id;
+  await _refreshDownloadUI(body, modelId, models);
 }
 
 // ── HTML builder ──────────────────────────────────────────────────────────────
@@ -203,7 +225,7 @@ function buildHTML(cfg, models, isHF, hfOk) {
                 ${!hfOk?'disabled title="AI features are disabled for this session — restart the app to enable"':''}>
           <span class="sim-strat-icon">😎</span>
           <div>
-            <div class="sim-strat-name">MLLM Model</div>
+            <div class="sim-strat-name">AI mode</div>
             <div class="sim-strat-desc">${hfOk?"Deep embeddings · Requires Python":"Disabled this session · Restart to enable"}</div>
           </div>
         </button>
@@ -279,12 +301,6 @@ function buildHTML(cfg, models, isHF, hfOk) {
 
 // ── Download area ─────────────────────────────────────────────────────────────
 
-function _fmtBytes(b) {
-  if (b >= 1_000_000) return `${(b / 1_000_000).toFixed(1)} MB`;
-  if (b >= 1_000)     return `${(b / 1_000).toFixed(0)} KB`;
-  return `${b} B`;
-}
-
 function _setModelDesc(body, models, modelId) {
   const m    = models.find(m => m.id === modelId);
   const desc = body.querySelector("#sim-model-desc");
@@ -339,62 +355,96 @@ async function _refreshDownloadUI(body, modelId, models) {
   );
 }
 
+// Selectors for every interactive control inside the settings panel.
+const _LOCKABLE = [
+  ".sim-strat-btn", "#sim-model-select",
+  "#sim-save-btn", "#sim-recompute-btn", "#sim-emb-btn",
+  ".sim-field-check", ".sim-weight-range",
+  "#sim-thr-range", "#sim-max-range",
+];
+
+function _lockPanel(panel) {
+  _LOCKABLE.forEach(sel =>
+    panel.querySelectorAll(sel).forEach(el => { el.disabled = true; })
+  );
+  // Block backdrop click and close button so the panel can't be dismissed.
+  panel.querySelector && (panel._closeBtn = panel.querySelector("#sim-settings-close") ??
+    document.getElementById("sim-settings-close"));
+  if (panel._closeBtn) panel._closeBtn.disabled = true;
+  const backdrop = document.getElementById("sim-settings-backdrop");
+  if (backdrop) backdrop.style.pointerEvents = "none";
+}
+
+function _unlockPanel(panel) {
+  _LOCKABLE.forEach(sel =>
+    panel.querySelectorAll(sel).forEach(el => { el.disabled = false; })
+  );
+  if (panel._closeBtn) panel._closeBtn.disabled = false;
+  const backdrop = document.getElementById("sim-settings-backdrop");
+  if (backdrop) backdrop.style.pointerEvents = "";
+}
+
 async function _startDownload(body, modelId, models) {
   const area         = body.querySelector("#sim-dl-area");
   const recomputeBtn = body.querySelector("#sim-recompute-btn");
+  const panel        = body.closest("#sim-settings-panel") ?? body.parentElement;
   if (!area || !invoke) return;
 
-  // Show progress bar immediately
+  // Show a minimal status badge and lock every other control.
   area.innerHTML = `
-    <div class="sim-dl-progress">
-      <div class="sim-dl-progress-top">
-        <span class="sim-dl-badge sim-dl-active">⬇ Downloading…</span>
-        <span id="sim-dl-pct" class="sim-dl-pct">0%</span>
-      </div>
-      <div class="sim-dl-track"><div id="sim-dl-bar" class="sim-dl-bar" style="width:0%"></div></div>
-      <div id="sim-dl-file" class="sim-dl-file">Connecting…</div>
-      <div id="sim-dl-bytes" class="sim-dl-bytes"></div>
+    <div class="sim-dl-row">
+      <span class="sim-dl-badge sim-dl-active">⬇ Downloading…</span>
+      <span class="sim-dl-hint">This may take a few minutes</span>
     </div>`;
+  _lockPanel(panel);
 
-  // Subscribe to per-file progress events
-  // let _unlisten = null;
-  // if (tauriListen) {
-  //   _unlisten = await tauriListen("venv://model-progress", ({ payload }) => {
-  //     const { filename, downloaded, total, pct } = payload ?? {};
-  //     const bar   = document.getElementById("sim-dl-bar");
-  //     const pctEl = document.getElementById("sim-dl-pct");
-  //     const file  = document.getElementById("sim-dl-file");
-  //     const bytes = document.getElementById("sim-dl-bytes");
-  //     if (bar)   bar.style.width     = `${Math.min(pct ?? 0, 100)}%`;
-  //     if (pctEl) pctEl.textContent   = `${(pct ?? 0).toFixed(1)}%`;
-  //     if (file)  file.textContent    = filename ?? "";
-  //     if (bytes && total > 0)
-  //       bytes.textContent = `${_fmtBytes(downloaded)} / ${_fmtBytes(total)}`;
-  //   });
-  // }
+  const unlisteners = [];
+  const _cleanup = () => { unlisteners.forEach(fn => fn?.()); unlisteners.length = 0; };
 
-  try {
-    await invoke("hf_download_model", { model: modelId });
-    _cacheStatus[modelId] = true;
-    area.innerHTML = `
-      <div class="sim-dl-row">
-        <span class="sim-dl-badge sim-dl-ok">✓ Downloaded</span>
-        <span class="sim-dl-hint">Model ready — click Recompute Graph to apply</span>
-      </div>`;
-    if (recomputeBtn) recomputeBtn.disabled = false;
-  } catch (e) {
-    const msg = String(e).slice(0, 300);
-    area.innerHTML = `
+  const _finish = (successHtml) => {
+    _cleanup();
+    _unlockPanel(panel);
+    area.innerHTML = successHtml;
+  };
+
+  const _showError = (msg) => {
+    _finish(`
       <div class="sim-dl-row">
         <span class="sim-dl-badge sim-dl-err">✗ Download failed</span>
       </div>
-      <div class="sim-dl-errmsg">${msg}</div>
+      <div class="sim-dl-errmsg">${String(msg).slice(0, 300)}</div>
       <button id="sim-dl-retry" class="btn" style="margin-top:8px;font-size:.6rem">
         Retry
-      </button>`;
+      </button>`);
     area.querySelector("#sim-dl-retry")?.addEventListener("click", () =>
       _startDownload(body, modelId, models)
     );
+  };
+
+  if (tauriListen) {
+    // Completion event emitted by the Rust background thread when done.
+    unlisteners.push(await tauriListen("venv://model-download-done", ({ payload }) => {
+      if (payload?.model !== modelId) return; // ignore events for other models
+      if (payload?.ok) {
+        _cacheStatus[modelId] = true;
+        _finish(`
+          <div class="sim-dl-row">
+            <span class="sim-dl-badge sim-dl-ok">✓ Downloaded</span>
+            <span class="sim-dl-hint">Model ready — click Recompute Graph to apply</span>
+          </div>`);
+        if (recomputeBtn) recomputeBtn.disabled = false;
+      } else {
+        _showError(payload?.error ?? "Unknown error");
+      }
+    }));
+  }
+
+  // Kick off the download — returns immediately ({ ok: true, background: true }).
+  // Errors here mean the sidecar couldn't start at all.
+  try {
+    await invoke("hf_download_model", { model: modelId });
+  } catch (e) {
+    _showError(e);
   }
 }
 

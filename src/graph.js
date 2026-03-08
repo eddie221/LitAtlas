@@ -96,10 +96,26 @@ export async function loadSimConfig() {
   } catch (e) {
     console.warn("[LitAtlas] Could not load similarity config:", e);
   }
+  console.log(_simConfig.strategy);
+  _updateMethodBadge(_simConfig.strategy);
+}
+
+function _updateMethodBadge(strategy) {
+  const icon  = document.getElementById("sim-method-icon");
+  const label = document.getElementById("sim-method-label");
+  if (!icon || !label) return;
+  if (strategy === "hf-embeddings") {
+    icon.textContent  = "😎";
+    label.textContent = "AI similarity";
+  } else {
+    icon.textContent  = "⬡";
+    label.textContent = "cosine similarity";
+  }
 }
 
 export async function saveSimConfig(cfg) {
   _simConfig = { ...getDefaultConfig(), ...cfg };
+  _updateMethodBadge(_simConfig.strategy);
   try {
     // Persist llm_enabled alongside the sim config so the choice survives restart
     await invoke("save_similarity_config", {
@@ -225,7 +241,7 @@ const _VENV_STEPS = [
   { key: "create_venv",  label: "Create isolated environment" },
   { key: "verify_venv",  label: "Verify environment" },
   { key: "upgrade_pip",  label: "Upgrade pip" },
-  { key: "install_deps", label: "Install sentence-transformers" },
+  { key: "install_deps", label: "Install packages" },
   { key: "starting",     label: "Start similarity engine" },
 ];
 
@@ -553,10 +569,10 @@ function _showLlmErrorDialog(msg) {
 async function loadFromDB() {
   showOverlay("Opening database…");
   try {
+    _simConfig.strategy = "js-cosine";
     // Load similarity config first so compute uses user's settings
     await loadSimConfig();
     await loadNodeColors();
-    _simConfig.strategy = "js-cosine";
     // ── LLM module consent ──────────────────────────────────────────────────
     // Ask on every launch whether the user wants HF active this session.
     // If the venv is already set up, saying Yes just enables it immediately
@@ -997,10 +1013,23 @@ function draw() {
   ctx.restore();
 }
 
-function edgeColor(type) {
-  return type === "same_tag"   ? "rgba(200,255,0,.75)"  :
-         type === "same_venue" ? "rgba(0,212,255,.65)"  :
-                                 "rgba(100,120,180,.4)";
+// ── js-cosine mode: warm palette, categorical by relationship type ────────────
+function edgeColorByType(type) {
+  return type === "same_tag"   ? "rgba(255,200,0,.80)"   // amber  — shared hashtag
+       : type === "same_venue" ? "rgba(255,120,40,.70)"  // orange — same venue
+                               : "rgba(255,60,120,.50)"; // rose   — general overlap
+}
+
+// ── hf-embeddings mode: cool palette, continuous gradient by similarity ───────
+function edgeColorBySimilarity(similarity) {
+  const t = Math.max(0, Math.min(1,
+    (similarity - simThreshold) / (1 - simThreshold)
+  ));
+  const r = Math.round(t < 0.5 ? 100 * (1 - t*2)               : 0);
+  const g = Math.round(t < 0.5 ? 100 + (220 - 100) * (t*2)     : 220 * (1 - (t - 0.5)*2) + 80 * ((t - 0.5)*2));
+  const b = Math.round(t < 0.5 ? 100 + (200 - 100) * (t*2)     : 200 + (255 - 200) * ((t - 0.5)*2));
+  const a = (0.30 + t * 0.55).toFixed(2);
+  return { color: `rgba(${r},${g},${b},${a})`, t };
 }
 
 function drawEdge(e, alpha) {
@@ -1009,14 +1038,31 @@ function drawEdge(e, alpha) {
   const cpx = (a.x + b.x)/2 - (b.y - a.y)*0.13;
   const cpy = (a.y + b.y)/2 + (b.x - a.x)*0.13;
 
+  const isHf = _simConfig.strategy === "hf-embeddings";
+  // Shared thickness formula: similarity drives lineWidth in both modes.
+  const t    = Math.max(0, Math.min(1, (e.similarity - simThreshold) / (1 - simThreshold)));
+  const simW = 0.5 + t * 3.5;
+
   ctx.save();
   ctx.globalAlpha = hov ? 1 : alpha;
-  ctx.strokeStyle = hov ? "#c8ff00" : edgeColor(e.type);
-  ctx.lineWidth   = hov ? 2.5 : (e.weight >= 3 ? 2 : e.weight >= 2 ? 1.4 : 0.8);
+
+  if (hov) {
+    ctx.strokeStyle = "#c8ff00";
+    ctx.lineWidth   = 4;
+  } else if (isHf) {
+    const { color } = edgeColorBySimilarity(e.similarity);
+    ctx.strokeStyle = color;
+    ctx.lineWidth   = simW;
+  } else {
+    ctx.strokeStyle = edgeColorByType(e.type);
+    ctx.lineWidth   = simW;
+  }
+
   ctx.beginPath();
   ctx.moveTo(a.x, a.y);
   ctx.quadraticCurveTo(cpx, cpy, b.x, b.y);
   ctx.stroke();
+
   if (hov) {
     ctx.fillStyle = "#c8ff00";
     const _fontScale = getUiFontSize() / _UI_FONT_DEFAULT;

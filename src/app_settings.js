@@ -1,5 +1,7 @@
 "use strict";
 
+import { refreshModelSelect } from "./similarity_settings.js";
+
 /**
  * app_settings.js
  *
@@ -156,22 +158,18 @@ function _buildHTML(cfg, scriptInfo, customModels, currentFontPx = 18) {
     <div class="app-cfg-section">
       <div class="app-cfg-section-title">Custom HuggingFace Models</div>
       <div class="app-cfg-hint">
-        Add any public HuggingFace sentence-transformer model by its Hub ID
+        Add any public HuggingFace model by its Hub ID
         (e.g. <code>BAAI/bge-base-en-v1.5</code>).
-        Custom models appear in the Similarity Settings model picker alongside
-        the built-ins and are scanned for offline availability on startup.
+        After adding, open Similarity Settings to download and use the model.
       </div>
 
       <div id="app-cfg-model-list">${modelRows}</div>
 
       <div class="app-cfg-add-model-form">
         <div class="app-cfg-add-row">
-          <input id="app-cfg-new-id"    class="app-cfg-input app-cfg-new-id"
-                 type="text" placeholder="Model ID  e.g. BAAI/bge-base-en-v1.5">
-          <input id="app-cfg-new-label" class="app-cfg-input app-cfg-new-label"
-                 type="text" placeholder="Label (optional)">
-          <input id="app-cfg-new-size"  class="app-cfg-input app-cfg-new-size"
-                 type="number" placeholder="MB" min="1" max="99999">
+          <input id="app-cfg-new-id" class="app-cfg-input app-cfg-new-id"
+                 type="text" placeholder="HuggingFace model name  e.g. BAAI/bge-base-en-v1.5"
+                 spellcheck="false">
           <button id="app-cfg-add-model-btn" class="btn btn-new-paper">Add</button>
         </div>
         <div id="app-cfg-model-status" class="app-cfg-status"></div>
@@ -320,30 +318,30 @@ function _wireEvents(body, cfg, scriptInfo, customModels) {
 
   // Add model
   const addBtn     = body.querySelector("#app-cfg-add-model-btn");
-  const idInput    = body.querySelector("#app-cfg-new-id");
-  const labelInput = body.querySelector("#app-cfg-new-label");
-  const sizeInput  = body.querySelector("#app-cfg-new-size");
+  const idInput = body.querySelector("#app-cfg-new-id");
 
   const doAdd = async () => {
-    const id    = idInput?.value.trim();
-    const label = labelInput?.value.trim() || id;
-    const size  = parseInt(sizeInput?.value ?? "0", 10) || null;
+    const id = idInput?.value.trim();
     if (!id) { _showStatus(modelStatus, "✗ Model ID is required.", "err"); return; }
     if (customModels.some(m => m.id === id)) {
       _showStatus(modelStatus, "Model already in list.", "warn"); return;
     }
-    const entry = { id, label, ...(size ? { size_mb: size } : {}) };
+    // Auto-derive a readable label from the model ID (e.g. "BAAI/bge-base-en-v1.5" → "bge-base-en-v1.5")
+    const label = id.includes("/") ? id.split("/").pop() : id;
+    const entry = { id, label };
     customModels.push(entry);
     cfg.custom_models = customModels;
     try {
       await _saveConfig(cfg);
-      if (idInput)    idInput.value    = "";
-      if (labelInput) labelInput.value = "";
-      if (sizeInput)  sizeInput.value  = "";
+      if (idInput) idInput.value = "";
       modelList.innerHTML = _buildModelListHTML(customModels);
       _wireModelDelButtons(modelList, customModels, cfg, modelStatus);
       _showStatus(modelStatus, `✓ Added ${id}`, "ok");
       setTimeout(() => { if (modelStatus) modelStatus.textContent = ""; }, 2000);
+      // Immediately refresh the model <select> in the Similarity Settings panel
+      // if it is currently open, so the new model appears without a reopen.
+      const simPanel = document.getElementById("sim-settings-panel");
+      refreshModelSelect(simPanel).catch(() => {});
     } catch (e) {
       customModels.pop(); cfg.custom_models = customModels;
       _showStatus(modelStatus, `✗ ${e}`, "err");
@@ -384,8 +382,6 @@ function _buildModelListHTML(customModels) {
     <div class="app-cfg-model-row" data-idx="${i}">
       <div class="app-cfg-model-info">
         <code class="app-cfg-model-id">${_esc(m.id)}</code>
-        ${m.label && m.label !== m.id ? `<span class="app-cfg-model-label">${_esc(m.label)}</span>` : ""}
-        ${m.size_mb ? `<span class="app-cfg-model-size">${m.size_mb} MB</span>` : ""}
       </div>
       <button class="app-cfg-model-del" data-idx="${i}" title="Remove model">✕</button>
     </div>`).join("");

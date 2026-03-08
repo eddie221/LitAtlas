@@ -3,6 +3,7 @@
 use tauri::Manager;
 use tauri::State;
 use crate::AppState;
+use crate::logger;
 use crate::db::{
     self, EdgeInput, NewPaper, NewRelation,
     PaperFull, EdgeRow, HashtagRow, RelationRow, PaperAttribute,
@@ -10,26 +11,49 @@ use crate::db::{
 
 type CmdResult<T> = Result<T, String>;
 
+// ── Logging helper ────────────────────────────────────────────────────────────
+//
+// map_log_err!(fn_name) converts a Result's Err branch to String while also
+// emitting a logger::log_error entry.  Use in place of .map_err(String::from):
+//
+//   db::get_all_papers(&pool).await.map_err(map_log_err!("get_papers"))
+//
+// A macro is used so the closure input type is inferred from context —
+// avoids nested `impl Trait` and type mismatches with DB error types.
+macro_rules! map_log_err {
+    ($fn_name:expr) => {
+        |e| {
+            let msg = e.to_string();
+            logger::log_error($fn_name, &msg);
+            msg
+        }
+    };
+}
+
 // ── Papers ────────────────────────────────────────────────────────────────────
 
 #[tauri::command]
 pub async fn get_papers(s: State<'_, AppState>) -> CmdResult<Vec<PaperFull>> {
-    db::get_all_papers(&s.pool()).await.map_err(String::from)
+    logger::log_call("get_papers");
+    db::get_all_papers(&s.pool()).await.map_err(map_log_err!("get_papers"))
 }
 
 #[tauri::command]
 pub async fn get_paper(s: State<'_, AppState>, id: i64) -> CmdResult<PaperFull> {
-    db::get_paper(&s.pool(), id).await.map_err(String::from)
+    logger::log_call("get_paper");
+    db::get_paper(&s.pool(), id).await.map_err(map_log_err!("get_paper"))
 }
 
 #[tauri::command]
 pub async fn add_paper(s: State<'_, AppState>, paper: NewPaper) -> CmdResult<i64> {
-    db::insert_paper(&s.pool(), paper).await.map_err(String::from)
+    logger::log_call("add_paper");
+    db::insert_paper(&s.pool(), paper).await.map_err(map_log_err!("add_paper"))
 }
 
 #[tauri::command]
 pub async fn delete_paper(s: State<'_, AppState>, id: i64) -> CmdResult<()> {
-    db::delete_paper(&s.pool(), id).await.map_err(String::from)?;
+    logger::log_call("delete_paper");
+    db::delete_paper(&s.pool(), id).await.map_err(map_log_err!("delete_paper"))?;
 
     // ── Delete associated files ───────────────────────────────────────────
     // 1. PDF directory: projects/<slug>/pdfs/<id>/
@@ -59,18 +83,21 @@ pub async fn update_paper_core(
     s: State<'_, AppState>, id: i64,
     title: Option<String>, venue: Option<String>, year: Option<i64>,
 ) -> CmdResult<()> {
+    logger::log_call("update_paper_core");
     db::update_paper_core(&s.pool(), id, title, venue, year)
-        .await.map_err(String::from)
+        .await.map_err(map_log_err!("update_paper_core"))
 }
 
 #[tauri::command]
 pub async fn save_notes(s: State<'_, AppState>, id: i64, notes: String) -> CmdResult<()> {
-    db::save_notes(&s.pool(), id, &notes).await.map_err(String::from)
+    logger::log_call("save_notes");
+    db::save_notes(&s.pool(), id, &notes).await.map_err(map_log_err!("save_notes"))
 }
 
 #[tauri::command]
 pub async fn save_pdf_path(s: State<'_, AppState>, id: i64, path: Option<String>) -> CmdResult<()> {
-    db::save_pdf_path(&s.pool(), id, path.as_deref()).await.map_err(String::from)
+    logger::log_call("save_pdf_path");
+    db::save_pdf_path(&s.pool(), id, path.as_deref()).await.map_err(map_log_err!("save_pdf_path"))
 }
 
 /// Remove the PDF file from disk and clear its path in the DB.
@@ -79,9 +106,10 @@ pub async fn save_pdf_path(s: State<'_, AppState>, id: i64, path: Option<String>
 /// Silently succeeds if no file exists — the DB path is always cleared.
 #[tauri::command]
 pub async fn delete_pdf_file(s: State<'_, AppState>, id: i64) -> CmdResult<()> {
+    logger::log_call("delete_pdf_file");
     // 1. Clear the DB record first so the paper is never left pointing at a
     //    deleted file even if the filesystem removal fails.
-    db::save_pdf_path(&s.pool(), id, None).await.map_err(String::from)?;
+    db::save_pdf_path(&s.pool(), id, None).await.map_err(map_log_err!("delete_pdf_file"))?;
 
     // 2. Remove the per-paper PDF directory.
     let pdf_dir = s.pdfs_dir().join(id.to_string());
@@ -97,19 +125,22 @@ pub async fn delete_pdf_file(s: State<'_, AppState>, id: i64) -> CmdResult<()> {
 
 #[tauri::command]
 pub async fn set_authors(s: State<'_, AppState>, id: i64, authors: Vec<String>) -> CmdResult<()> {
-    db::set_authors(&s.pool(), id, &authors).await.map_err(String::from)
+    logger::log_call("set_authors");
+    db::set_authors(&s.pool(), id, &authors).await.map_err(map_log_err!("set_authors"))
 }
 
 // ── Hashtags ──────────────────────────────────────────────────────────────────
 
 #[tauri::command]
 pub async fn get_hashtags(s: State<'_, AppState>) -> CmdResult<Vec<HashtagRow>> {
-    db::get_all_hashtags(&s.pool()).await.map_err(String::from)
+    logger::log_call("get_hashtags");
+    db::get_all_hashtags(&s.pool()).await.map_err(map_log_err!("get_hashtags"))
 }
 
 #[tauri::command]
 pub async fn set_tags(s: State<'_, AppState>, id: i64, tags: Vec<String>) -> CmdResult<()> {
-    db::set_tags(&s.pool(), id, &tags).await.map_err(String::from)
+    logger::log_call("set_tags");
+    db::set_tags(&s.pool(), id, &tags).await.map_err(map_log_err!("set_tags"))
 }
 
 // ── Custom attributes ─────────────────────────────────────────────────────────
@@ -118,66 +149,77 @@ pub async fn set_tags(s: State<'_, AppState>, id: i64, tags: Vec<String>) -> Cmd
 pub async fn set_attributes(
     s: State<'_, AppState>, id: i64, attributes: Vec<PaperAttribute>,
 ) -> CmdResult<()> {
-    db::set_attributes(&s.pool(), id, &attributes).await.map_err(String::from)
+    logger::log_call("set_attributes");
+    db::set_attributes(&s.pool(), id, &attributes).await.map_err(map_log_err!("set_attributes"))
 }
 
 #[tauri::command]
 pub async fn upsert_attribute(
     s: State<'_, AppState>, id: i64, key: String, value: String, order: i64,
 ) -> CmdResult<()> {
+    logger::log_call("upsert_attribute");
     db::upsert_attribute(&s.pool(), id, &key, &value, order)
-        .await.map_err(String::from)
+        .await.map_err(map_log_err!("upsert_attribute"))
 }
 
 #[tauri::command]
 pub async fn delete_attribute(s: State<'_, AppState>, id: i64, key: String) -> CmdResult<()> {
-    db::delete_attribute(&s.pool(), id, &key).await.map_err(String::from)
+    logger::log_call("delete_attribute");
+    db::delete_attribute(&s.pool(), id, &key).await.map_err(map_log_err!("delete_attribute"))
 }
 
 // ── Relations ─────────────────────────────────────────────────────────────────
 
 #[tauri::command]
 pub async fn get_relations(s: State<'_, AppState>, id: i64) -> CmdResult<Vec<RelationRow>> {
-    db::get_relations_for_paper(&s.pool(), id).await.map_err(String::from)
+    logger::log_call("get_relations");
+    db::get_relations_for_paper(&s.pool(), id).await.map_err(map_log_err!("get_relations"))
 }
 
 #[tauri::command]
 pub async fn get_all_relations(s: State<'_, AppState>) -> CmdResult<Vec<RelationRow>> {
-    db::get_all_relations(&s.pool()).await.map_err(String::from)
+    logger::log_call("get_all_relations");
+    db::get_all_relations(&s.pool()).await.map_err(map_log_err!("get_all_relations"))
 }
 
 #[tauri::command]
 pub async fn add_relation(s: State<'_, AppState>, relation: NewRelation) -> CmdResult<i64> {
-    db::add_relation(&s.pool(), relation).await.map_err(String::from)
+    logger::log_call("add_relation");
+    db::add_relation(&s.pool(), relation).await.map_err(map_log_err!("add_relation"))
 }
 
 #[tauri::command]
 pub async fn update_relation_note(
     s: State<'_, AppState>, id: i64, note: Option<String>,
 ) -> CmdResult<()> {
-    db::update_relation_note(&s.pool(), id, note).await.map_err(String::from)
+    logger::log_call("update_relation_note");
+    db::update_relation_note(&s.pool(), id, note).await.map_err(map_log_err!("update_relation_note"))
 }
 
 #[tauri::command]
 pub async fn delete_relation(s: State<'_, AppState>, id: i64) -> CmdResult<()> {
-    db::delete_relation(&s.pool(), id).await.map_err(String::from)
+    logger::log_call("delete_relation");
+    db::delete_relation(&s.pool(), id).await.map_err(map_log_err!("delete_relation"))
 }
 
 // ── Similarity edges ──────────────────────────────────────────────────────────
 
 #[tauri::command]
 pub async fn get_edges(s: State<'_, AppState>) -> CmdResult<Vec<EdgeRow>> {
-    db::get_all_edges(&s.pool()).await.map_err(String::from)
+    logger::log_call("get_edges");
+    db::get_all_edges(&s.pool()).await.map_err(map_log_err!("get_edges"))
 }
 
 #[tauri::command]
 pub async fn recompute_edges(s: State<'_, AppState>, edges: Vec<EdgeInput>) -> CmdResult<usize> {
-    db::replace_all_edges(&s.pool(), edges).await.map_err(String::from)
+    logger::log_call("recompute_edges");
+    db::replace_all_edges(&s.pool(), edges).await.map_err(map_log_err!("recompute_edges"))
 }
 
 #[tauri::command]
 pub async fn append_edges(s: State<'_, AppState>, edges: Vec<EdgeInput>) -> CmdResult<usize> {
-    db::append_edges(&s.pool(), edges).await.map_err(String::from)
+    logger::log_call("append_edges");
+    db::append_edges(&s.pool(), edges).await.map_err(map_log_err!("append_edges"))
 }
 
 // ── PDF storage ───────────────────────────────────────────────────────────────
@@ -189,6 +231,7 @@ pub async fn store_pdf_bytes(
     filename:    String,
     data_base64: String,
 ) -> CmdResult<String> {
+    logger::log_call("store_pdf_bytes");
     use std::io::Write;
     let bytes = base64_decode(&data_base64)
         .map_err(|e| format!("Base64 decode failed: {e}"))?;
@@ -205,7 +248,7 @@ pub async fn store_pdf_bytes(
     f.write_all(&bytes)
         .map_err(|e| format!("Failed to write PDF: {e}"))?;
     db::save_pdf_path(&s.pool(), paper_id, Some(&dest.to_string_lossy()))
-        .await.map_err(String::from)?;
+        .await.map_err(map_log_err!("store_pdf_bytes"))?;
     Ok(dest.to_string_lossy().to_string())
 }
 
@@ -254,6 +297,7 @@ fn base64_encode(input: &[u8]) -> String {
 pub async fn copy_pdf(
     s: State<'_, AppState>, paper_id: i64, src_path: String,
 ) -> CmdResult<String> {
+    logger::log_call("copy_pdf");
     let src = std::path::Path::new(&src_path);
     if !src.exists() {
         return Err(format!(
@@ -269,19 +313,21 @@ pub async fn copy_pdf(
     let dest = dest_dir.join(&filename);
     std::fs::copy(src, &dest).map_err(|e| format!("Failed to copy PDF: {e}"))?;
     db::save_pdf_path(&s.pool(), paper_id, Some(&dest.to_string_lossy()))
-        .await.map_err(String::from)?;
+        .await.map_err(map_log_err!("store_pdf_bytes"))?;
     Ok(dest.to_string_lossy().to_string())
 }
 
 #[tauri::command]
 pub async fn get_pdf_url(s: State<'_, AppState>, paper_id: i64) -> CmdResult<String> {
-    let paper = db::get_paper(&s.pool(), paper_id).await.map_err(String::from)?;
+    logger::log_call("get_pdf_url");
+    let paper = db::get_paper(&s.pool(), paper_id).await.map_err(map_log_err!("get_pdf_url"))?;
     Ok(paper.pdf_path.unwrap_or_default())
 }
 
 #[tauri::command]
 pub async fn read_pdf_bytes(s: State<'_, AppState>, paper_id: i64) -> CmdResult<String> {
-    let paper = db::get_paper(&s.pool(), paper_id).await.map_err(String::from)?;
+    logger::log_call("read_pdf_bytes");
+    let paper = db::get_paper(&s.pool(), paper_id).await.map_err(map_log_err!("read_pdf_bytes"))?;
     let path  = paper.pdf_path.ok_or("No PDF stored for this paper")?;
     let bytes = std::fs::read(&path)
         .map_err(|e| format!("Cannot read PDF at \"{path}\": {e}"))?;
@@ -323,16 +369,19 @@ fn slugify(name: &str) -> String {
 
 #[tauri::command]
 pub fn list_projects(s: State<'_, AppState>) -> CmdResult<Vec<ProjectEntry>> {
+    logger::log_call("list_projects");
     Ok(read_projects(&s))
 }
 
 #[tauri::command]
 pub fn get_current_project(s: State<'_, AppState>) -> CmdResult<String> {
+    logger::log_call("get_current_project");
     Ok(s.current_slug())
 }
 
 #[tauri::command]
 pub fn create_project(s: State<'_, AppState>, name: String) -> CmdResult<ProjectEntry> {
+    logger::log_call("create_project");
     let mut projects = read_projects(&s);
     let base_slug = slugify(&name);
     let mut slug = base_slug.clone();
@@ -355,10 +404,12 @@ pub fn create_project(s: State<'_, AppState>, name: String) -> CmdResult<Project
 
 #[tauri::command]
 pub fn rename_project(s: State<'_, AppState>, slug: String, new_name: String) -> CmdResult<()> {
+    logger::log_call("rename_project");
     let mut projects = read_projects(&s);
     if let Some(p) = projects.iter_mut().find(|p| p.slug == slug) {
         p.name = new_name;
     } else {
+        logger::log_error("rename_project", "Project '{slug}' not found");
         return Err(format!("Project '{slug}' not found"));
     }
     write_projects(&s, &projects)
@@ -366,7 +417,9 @@ pub fn rename_project(s: State<'_, AppState>, slug: String, new_name: String) ->
 
 #[tauri::command]
 pub fn delete_project(s: State<'_, AppState>, slug: String) -> CmdResult<()> {
+    logger::log_call("delete_project");
     let mut projects = read_projects(&s);
+    logger::log_error("delete_project", "Cannot delete the last project");
     if projects.len() <= 1 { return Err("Cannot delete the last project".into()); }
     projects.retain(|p| p.slug != slug);
     let _ = std::fs::remove_dir_all(s.projects_dir.join(&slug));
@@ -375,8 +428,10 @@ pub fn delete_project(s: State<'_, AppState>, slug: String) -> CmdResult<()> {
 
 #[tauri::command]
 pub fn switch_project(s: State<'_, AppState>, slug: String) -> CmdResult<()> {
+    logger::log_call("switch_project");
     let projects = read_projects(&s);
     if !projects.iter().any(|p| p.slug == slug) {
+        logger::log_error("switch_project", "Project '{slug}' not found");
         return Err(format!("Project '{slug}' not found"));
     }
     let new_pool = crate::open_project(&s.projects_dir, &slug);
@@ -639,7 +694,7 @@ fn step_verify_venv(
 //
 // A fresh venv ships with the pip version bundled into the Python installer,
 // which may be months or years old.  Running `pip install --upgrade pip` before
-// installing sentence-transformers avoids resolver bugs and improves download
+// installing transformers avoids resolver bugs and improves download
 // reliability.  This step streams its output exactly like the main install.
 // Skipped if pip is already reasonably modern (≥ 23).
 fn step_upgrade_pip(
@@ -715,10 +770,13 @@ fn step_upgrade_pip(
     Ok(())
 }
 
-// ── Process 5 of 5 : install sentence-transformers ───────────────────────────
+// ── Process 5 of 5 : install transformers + torch + einops + timm ────────────
 //
-// Checks whether the package is already importable first; if so the step is
-// skipped entirely (fast path on every launch after the first).
+// Checks EVERY required package individually so a partial install (e.g. torch
+// present but einops missing) is detected and repaired.  Each package is probed
+// by importing it; missing ones are collected into a list and installed together
+// in a single pip invocation.  If all packages are present the step is skipped
+// entirely (fast path on every launch after the first).
 // When installation IS needed, pip stdout and stderr are forwarded line-by-line
 // as "venv://pip-log" events so the UI can render a live terminal.
 fn step_install_deps(
@@ -726,31 +784,59 @@ fn step_install_deps(
     py_bin:   &std::path::Path,
     app:      &tauri::AppHandle,
 ) -> Result<(), String> {
-    // Fast path: package already installed
-    let already = Command::new(py_bin)
-        .args(["-c", "import sentence_transformers; print(sentence_transformers.__version__)"])
-        .stdout(Stdio::piped()).stderr(Stdio::null())
-        .output()
-        .map(|o| o.status.success()
-            .then(|| String::from_utf8_lossy(&o.stdout).trim().to_string()))
-        .unwrap_or(None);
+    // Each entry: (pip package name, python import name, version expression)
+    // The version expression is embedded in the import probe so we can report
+    // the installed version in the progress message.
+    let required: &[(&str, &str, &str)] = &[
+        ("transformers",    "transformers",    "transformers.__version__"),
+        ("torch",           "torch",           "torch.__version__"),
+        ("huggingface_hub", "huggingface_hub", "huggingface_hub.__version__"),
+        ("einops",          "einops",          "einops.__version__"),
+        ("timm",            "timm",            "timm.__version__"),
+    ];
 
-    if let Some(ver) = already {
+    // Probe each package; build two lists: already-installed (for the log) and
+    // missing (need to be installed).
+    let mut missing: Vec<&str> = Vec::new();
+
+    for (pip_name, import_name, version_expr) in required {
+        let probe = format!("import {import_name}; print({version_expr})");
+        let result = Command::new(py_bin)
+            .args(["-c", &probe])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+            .ok()
+            .filter(|o| o.status.success());
+
+        match result {
+            Some(o) => {
+                let ver = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                emit_progress(app, "install_deps",
+                    &format!("✓ {pip_name} {ver} already installed"), false);
+            }
+            None => {
+                emit_progress(app, "install_deps",
+                    &format!("✗ {pip_name} not found — will install"), false);
+                missing.push(pip_name);
+            }
+        }
+    }
+
+    // All packages present — nothing to do.
+    if missing.is_empty() {
         emit_progress(app, "install_deps",
-            &format!("sentence-transformers {ver} already installed — skipping"), false);
+            "All requirements satisfied — skipping installation", false);
         return Ok(());
     }
 
+    let missing_list = missing.join(", ");
     emit_progress(app, "install_deps",
-        "Installing sentence-transformers (first time — may take a minute)…", false);
+        &format!("Installing missing packages: {missing_list} (may take a minute)…"), false);
 
     let mut child = Command::new(venv_pip(venv_dir))
-        .args([
-            "install",
-            "--no-color",
-            "--progress-bar", "off",
-            "sentence-transformers",
-        ])
+        .args(["install", "--no-color", "--progress-bar", "off"])
+        .args(&missing)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -771,28 +857,37 @@ fn step_install_deps(
         .map_err(|e| format!("pip install wait failed: {e}"))?;
 
     if !status.success() {
-        return Err(
-            "sentence-transformers installation failed.\n\
+        return Err(format!(
+            "Installation of [{missing_list}] failed.\n\
              Check the terminal log above for details.\n\
              Common causes:\n\
              • No internet connection — connect to the internet and try again.\n\
              • Disk full — free up space and retry.\n\
              • Outdated pip — will be upgraded automatically on the next attempt.\n\n\
              Note: once installed, the AI similarity features work fully offline.\n\
-             Only the initial setup and model downloads require internet access.".into()
-        );
+             Only the initial setup and model downloads require internet access."
+        ));
     }
 
-    // Confirm by importing and reading the installed version
-    let ver = Command::new(py_bin)
-        .args(["-c",
-            "import sentence_transformers; print(sentence_transformers.__version__)"])
-        .stdout(Stdio::piped()).stderr(Stdio::null()).output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_else(|_| "unknown".into());
-
-    emit_progress(app, "install_deps",
-        &format!("sentence-transformers {ver} installed successfully"), false);
+    // Confirm by re-probing every package that was just installed.
+    let required_confirm: &[(&str, &str, &str)] = &[
+        ("transformers",    "transformers",    "transformers.__version__"),
+        ("torch",           "torch",           "torch.__version__"),
+        ("huggingface_hub", "huggingface_hub", "huggingface_hub.__version__"),
+        ("einops",          "einops",          "einops.__version__"),
+        ("timm",            "timm",            "timm.__version__"),
+    ];
+    for (pip_name, import_name, version_expr) in required_confirm {
+        if !missing.contains(pip_name) { continue; }
+        let probe = format!("import {import_name}; print({version_expr})");
+        let ver = Command::new(py_bin)
+            .args(["-c", &probe])
+            .stdout(Stdio::piped()).stderr(Stdio::null()).output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_else(|_| "unknown".into());
+        emit_progress(app, "install_deps",
+            &format!("✓ {pip_name} {ver} installed successfully"), false);
+    }
     Ok(())
 }
 
@@ -814,9 +909,9 @@ fn ensure_venv(
     let py_bin = step_verify_venv(venv_dir, app)?;
 
     // 4 — Upgrade pip inside the venv
-    // step_upgrade_pip(&py_bin, app)?;
+    step_upgrade_pip(&py_bin, app)?;
 
-    // 5 — Install sentence-transformers (no-op if already present)
+    // 5 — Install transformers + torch + einops + timm (no-op if already present)
     step_install_deps(venv_dir, &py_bin, app)?;
 
     Ok(py_bin)
@@ -848,6 +943,9 @@ fn launch_sidecar(
             .unwrap_or_default()
     };
 
+    let log_path = venv_dir.parent().unwrap_or(venv_dir).join("log.txt");
+    let log_path_str = log_path.to_string_lossy().into_owned();
+
     let mut child = Command::new(&python)
         .arg("-u")
         .arg(script)
@@ -856,6 +954,7 @@ fn launch_sidecar(
         .env_remove("VIRTUAL_ENV")
         .env_remove("VIRTUAL_ENV_PROMPT")
         .env("LitAtlas_PLUGIN_SCRIPT", &plugin_script)
+        .env("LitAtlas_LOG_PATH", &log_path_str)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -901,7 +1000,7 @@ fn ensure_running<'a>(s: &'a AppState, app: &tauri::AppHandle) -> Result<std::sy
 
 // ── Tauri commands ────────────────────────────────────────────────────────────
 
-/// Quick check: is the Python venv ready and sentence-transformers installed?
+/// Quick check: is the Python venv ready and transformers installed?
 ///
 /// Does NOT start the sidecar or trigger any installation — purely reads the
 /// filesystem.  JS calls this on startup to decide whether to show the
@@ -910,6 +1009,7 @@ fn ensure_running<'a>(s: &'a AppState, app: &tauri::AppHandle) -> Result<std::sy
 /// Returns: { ready: bool, reason?: str }
 #[tauri::command]
 pub fn hf_setup_status(s: State<'_, AppState>) -> CmdResult<serde_json::Value> {
+    logger::log_call("hf_setup_status");
     let py = venv_python(&s.venv_dir());
     if !py.exists() {
         return Ok(serde_json::json!({
@@ -919,9 +1019,10 @@ pub fn hf_setup_status(s: State<'_, AppState>) -> CmdResult<serde_json::Value> {
         }));
     }
 
-    // Quick import check — fast because Python binary already exists
+    // Check every required package is importable — a partial install (e.g.
+    // torch present but einops missing) should also report not-ready.
     let pkg_ok = std::process::Command::new(&py)
-        .args(["-c", "import sentence_transformers"])
+        .args(["-c", "import transformers, torch, huggingface_hub, einops, timm"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
@@ -931,7 +1032,7 @@ pub fn hf_setup_status(s: State<'_, AppState>) -> CmdResult<serde_json::Value> {
     if !pkg_ok {
         return Ok(serde_json::json!({
             "ready":         false,
-            "reason":        "sentence-transformers not installed",
+            "reason":        "one or more required packages (transformers, torch, huggingface_hub, einops, timm) not installed",
             "cached_models": serde_json::Value::Array(vec![]),
         }));
     }
@@ -1012,7 +1113,7 @@ fn model_is_cached(hf_cache: &std::path::Path, model_id: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Set up (or repair) the Python venv and install sentence-transformers.
+/// Set up (or repair) the Python venv and install transformers + torch + einops + timm.
 ///
 /// Runs the full 5-step venv orchestrator: find Python → create venv →
 /// verify → upgrade pip → install deps.  Emits "venv://progress" events
@@ -1035,6 +1136,7 @@ pub fn hf_setup_venv(
     app: tauri::AppHandle,
     s:   State<'_, AppState>,
 ) -> CmdResult<serde_json::Value> {
+    logger::log_call("hf_setup_venv");
     // If a live sidecar is already running, reuse it — no second spawn.
     {
         let mut guard = s.sidecar.lock().unwrap();
@@ -1089,6 +1191,7 @@ pub fn hf_compute_similarity(
     mut papers: Vec<serde_json::Value>,
     config: serde_json::Value,
 ) -> CmdResult<serde_json::Value> {
+    logger::log_call("hf_compute_similarity");
     // Inject any cached embeddings to avoid redundant encoding in Python
     let model = config["model"].as_str()
         .unwrap_or("sentence-transformers/all-MiniLM-L6-v2");
@@ -1110,6 +1213,7 @@ pub fn hf_compute_similarity(
 /// Returns: { models: [...], fields: [...] }
 #[tauri::command]
 pub fn hf_list_models(app: tauri::AppHandle, s: State<'_, AppState>) -> CmdResult<serde_json::Value> {
+    logger::log_call("hf_list_models");
     let mut guard = ensure_running(&s, &app)?;
     guard.as_mut().unwrap().call("list_models", serde_json::Value::Null)
 }
@@ -1120,6 +1224,7 @@ pub fn hf_list_models(app: tauri::AppHandle, s: State<'_, AppState>) -> CmdResul
 /// Returns: { running: bool, details?: { loaded_model, python } }
 #[tauri::command]
 pub fn hf_sidecar_status(s: State<'_, AppState>) -> CmdResult<serde_json::Value> {
+    logger::log_call("hf_sidecar_status");
     let mut guard = s.sidecar.lock().unwrap();
     let alive = guard.as_mut().map(|sc| sc.is_alive()).unwrap_or(false);
     if !alive {
@@ -1145,6 +1250,7 @@ pub fn hf_check_model(
     s:     State<'_, AppState>,
     model: String,
 ) -> CmdResult<serde_json::Value> {
+    logger::log_call("hf_check_model");
     println!("hf_check_model");
     let mut guard = ensure_running(&s, &app)?;
     guard.as_mut().unwrap()
@@ -1160,66 +1266,134 @@ pub fn hf_check_model(
 /// …followed by the final reply:
 ///   { "id": N, "ok": true, "result": { path, done: true } }
 ///
-/// This command reads those lines in a loop, forwarding progress events
-/// until the final reply arrives.
-///
-/// Also emits "venv://progress" with step="download_model" so the full-screen
-/// venv overlay shows the download step as active.
+/// This command returns immediately and does all blocking I/O on a background
+/// thread so the sidecar mutex is not held for the full download duration.
+/// Progress is forwarded as "venv://model-progress" Tauri events.
+/// Completion is signalled via "venv://model-download-done":
+///   { ok: true, model, path }   on success
+///   { ok: false, model, error } on failure
 ///
 /// Called from JS as: invoke("hf_download_model", { model })
-/// Returns (on success): { path: str, done: true }
+/// Returns immediately: { ok: true, background: true }
 #[tauri::command]
 pub fn hf_download_model(
     app:   tauri::AppHandle,
     s:     State<'_, AppState>,
     model: String,
 ) -> CmdResult<serde_json::Value> {
-    // Show the download step in the venv overlay immediately.
-    // emit_progress(&app, "download_model",
-    //     &format!("Downloading {}…", model), false);
+    logger::log_call("hf_download_model");
+    // Send the request while we hold the lock, then release it before
+    // entering the blocking read loop so other commands can proceed.
+    let req_id = {
+        let mut guard = ensure_running(&s, &app)?;
+        let sc = guard.as_mut().unwrap();
 
-    let mut guard = ensure_running(&s, &app)?;
-    let sc = guard.as_mut().unwrap();
+        let id = sc.next_id;
+        sc.next_id += 1;
 
-    // Build and send the JSON-RPC request manually (not via sc.call()) so we
-    // can intercept the intermediate progress lines before the final reply.
-    let id = sc.next_id;
-    sc.next_id += 1;
+        let mut req = serde_json::json!({
+            "id": id,
+            "method": "download_model",
+            "params": { "model": model }
+        }).to_string();
+        req.push('\n');
 
-    let mut req = serde_json::json!({
-        "id": id,
-        "method": "download_model",
-        "params": { "model": model }
-    }).to_string();
-    req.push('\n');
+        sc.stdin.write_all(req.as_bytes())
+            .map_err(|e| format!("sidecar write: {e}"))?;
+        sc.stdin.flush()
+            .map_err(|e| format!("sidecar flush: {e}"))?;
 
-    sc.stdin.write_all(req.as_bytes())
-        .map_err(|e| format!("sidecar write: {e}"))?;
-    sc.stdin.flush()
-        .map_err(|e| format!("sidecar flush: {e}"))?;
+        id   // guard is dropped here, releasing the mutex
+    };
 
-    // Read lines until we receive the final reply.
-    loop {
-        let mut line = String::new();
-        sc.stdout.read_line(&mut line)
-            .map_err(|e| format!("sidecar read: {e}"))?;
+    // Move the blocking read loop to a background thread so this command
+    // returns immediately and the sidecar mutex is free for other commands.
+    std::thread::spawn(move || {
+        let state = app.state::<AppState>();
+        loop {
+            // Re-acquire lock only long enough to read one line.
+            let line = {
+                let mut guard = match state.sidecar.lock() {
+                    Ok(g) => g,
+                    Err(_) => {
+                        let _ = app.emit("venv://model-download-done", serde_json::json!({
+                            "ok": false, "model": &model,
+                            "error": "sidecar mutex poisoned"
+                        }));
+                        return;
+                    }
+                };
+                let sc = match guard.as_mut() {
+                    Some(sc) => sc,
+                    None => {
+                        let _ = app.emit("venv://model-download-done", serde_json::json!({
+                            "ok": false, "model": &model,
+                            "error": "sidecar not running"
+                        }));
+                        return;
+                    }
+                };
+                let mut buf = String::new();
+                match sc.stdout.read_line(&mut buf) {
+                    Ok(0) => {
+                        let _ = app.emit("venv://model-download-done", serde_json::json!({
+                            "ok": false, "model": &model,
+                            "error": "sidecar closed stdout unexpectedly"
+                        }));
+                        return;
+                    }
+                    Err(e) => {
+                        let _ = app.emit("venv://model-download-done", serde_json::json!({
+                            "ok": false, "model": &model,
+                            "error": format!("sidecar read: {e}")
+                        }));
+                        return;
+                    }
+                    Ok(_) => buf,
+                }
+                // guard is dropped here after each line read
+            };
 
-        let v: serde_json::Value = serde_json::from_str(line.trim())
-            .map_err(|e| format!("sidecar parse: {e} — got: {line}"))?;
+            let v: serde_json::Value = match serde_json::from_str(line.trim()) {
+                Ok(v) => v,
+                Err(e) => {
+                    let _ = app.emit("venv://model-download-done", serde_json::json!({
+                        "ok": false, "model": &model,
+                        "error": format!("sidecar parse: {e}")
+                    }));
+                    return;
+                }
+            };
 
-        // Intermediate progress notification — forward to JS and keep reading.
-        if let Some(prog) = v.get("progress") {
-            let _ = app.emit("venv://model-progress", prog);
-            continue;
+            // Skip lines for other request IDs (shouldn't happen, but be safe).
+            if v.get("id").and_then(|id| id.as_u64()) != Some(req_id) {
+                continue;
+            }
+
+            // Intermediate progress — forward to JS and keep reading.
+            if let Some(prog) = v.get("progress") {
+                let _ = app.emit("venv://model-progress", prog);
+                continue;
+            }
+
+            // Final reply.
+            if v["ok"].as_bool() != Some(true) {
+                let err = v["error"].as_str()
+                    .unwrap_or("download failed").to_string();
+                let _ = app.emit("venv://model-download-done", serde_json::json!({
+                    "ok": false, "model": &model, "error": err
+                }));
+            } else {
+                let _ = app.emit("venv://model-download-done", serde_json::json!({
+                    "ok": true, "model": &model,
+                    "path": v["result"]["path"]
+                }));
+            }
+            return;
         }
+    });
 
-        // Final reply.
-        if v["ok"].as_bool() != Some(true) {
-            return Err(v["error"].as_str()
-                .unwrap_or("download failed").to_string());
-        }
-        return Ok(v["result"].clone());
-    }
+    Ok(serde_json::json!({ "ok": true, "background": true }))
 }
 
 // ── Per-paper embedding cache ─────────────────────────────────────────────────
@@ -1363,6 +1537,7 @@ pub fn hf_compute_paper_embedding(
     paper_id: i64,
     config:   serde_json::Value,
 ) -> CmdResult<serde_json::Value> {
+    logger::log_call("hf_compute_paper_embedding");
     // Load the paper from DB so Python has all fields (title, abstract, hashtags…)
     let paper: serde_json::Value = {
         let pool   = s.pool();
@@ -1424,6 +1599,7 @@ pub fn hf_get_paper_embedding(
     paper_id: i64,
     config:   serde_json::Value,
 ) -> CmdResult<serde_json::Value> {
+    logger::log_call("hf_get_paper_embedding");
     let path  = embedding_path_for_paper(&s, paper_id);
     let model = config["model"].as_str().unwrap_or("sentence-transformers/all-MiniLM-L6-v2");
     let fields: Vec<String> = config["fields"]
@@ -1462,6 +1638,7 @@ pub fn hf_compute_all_embeddings(
     s:      State<'_, AppState>,
     config: serde_json::Value,
 ) -> CmdResult<serde_json::Value> {
+    logger::log_call("hf_compute_all_embeddings");
     // Load papers and resolve paths synchronously before spawning the thread,
     // to avoid passing the State<'_> reference (non-Send) across thread boundary.
     let model = config["model"].as_str()
@@ -1591,6 +1768,7 @@ pub fn hf_compute_edges_from_cache(
     papers: Vec<serde_json::Value>,
     config: serde_json::Value,
 ) -> CmdResult<serde_json::Value> {
+    logger::log_call("hf_compute_edges_from_cache");
     let model = config["model"].as_str()
         .unwrap_or("sentence-transformers/all-MiniLM-L6-v2");
     let fields: Vec<String> = config["fields"]
@@ -1722,6 +1900,7 @@ fn inject_cached_embeddings(
 
 #[tauri::command]
 pub fn get_similarity_config(s: State<'_, AppState>) -> CmdResult<serde_json::Value> {
+    logger::log_call("get_similarity_config");
     let path = s.data_dir.join("similarity_config.json");
     if !path.exists() {
         return Ok(serde_json::Value::Null); // JS falls back to its built-in defaults
@@ -1735,6 +1914,7 @@ pub fn save_similarity_config(
     s:      State<'_, AppState>,
     config: serde_json::Value,
 ) -> CmdResult<()> {
+    logger::log_call("save_similarity_config");
     let path = s.data_dir.join("similarity_config.json");
     let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
     std::fs::write(path, json).map_err(|e| e.to_string())
@@ -1753,6 +1933,7 @@ pub fn hf_validate_plugin(
     s:           State<'_, AppState>,
     script_path: String,
 ) -> CmdResult<serde_json::Value> {
+    logger::log_call("hf_validate_plugin");
     let mut guard = ensure_running(&s, &app)?;
     guard.as_mut().unwrap()
         .call("validate_plugin", serde_json::json!({ "script_path": script_path }))
@@ -1772,6 +1953,7 @@ pub fn hf_validate_plugin(
 
 #[tauri::command]
 pub fn get_app_config(s: State<'_, AppState>) -> CmdResult<serde_json::Value> {
+    logger::log_call("get_app_config");
     let path = s.data_dir.join("app_config.json");
     if !path.exists() {
         return Ok(serde_json::json!({ "sidecar_script": null, "custom_models": [] }));
@@ -1785,6 +1967,7 @@ pub fn save_app_config(
     s:      State<'_, AppState>,
     config: serde_json::Value,
 ) -> CmdResult<()> {
+    logger::log_call("save_app_config");
     let path = s.data_dir.join("app_config.json");
     let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
     std::fs::write(path, json).map_err(|e| e.to_string())
@@ -1801,6 +1984,7 @@ pub fn save_app_config(
 /// directly into the settings input, keeping the dependency surface minimal.
 #[tauri::command]
 pub fn pick_sidecar_script(path: String) -> CmdResult<serde_json::Value> {
+    logger::log_call("pick_sidecar_script");
     let p = std::path::Path::new(&path);
     let exists   = p.exists();
     let readable = exists && std::fs::read(&p).is_ok();
@@ -1813,6 +1997,7 @@ pub fn pick_sidecar_script(path: String) -> CmdResult<serde_json::Value> {
 /// Returns: { path: str, is_custom: bool }
 #[tauri::command]
 pub fn get_sidecar_script_info(s: State<'_, AppState>) -> CmdResult<serde_json::Value> {
+    logger::log_call("get_sidecar_script_info");
     // Check for user override in app_config.json
     let cfg_path = s.data_dir.join("app_config.json");
     if cfg_path.exists() {
