@@ -31,12 +31,16 @@ const tauriListen = window.__TAURI__?.event?.listen ?? null;
 
 // ── Known fields (must match Python AVAILABLE_FIELDS) ─────────────────────────
 const FIELDS = [
-  { key: "title",    label: "Title",    defaultWeight: 1.0 },
-  { key: "abstract", label: "Abstract", defaultWeight: 1.0 },
-  { key: "hashtags", label: "Hashtags", defaultWeight: 1.0 },
-  { key: "venue",    label: "Venue",    defaultWeight: 1.0 },
-  { key: "notes",    label: "Notes",    defaultWeight: 1.0 },
-  { key: "year",     label: "Year",     defaultWeight: 1.0 },
+  { key: "title",    label: "Title",        defaultWeight: 1.0 },
+  { key: "abstract", label: "Abstract",     defaultWeight: 1.0 },
+  { key: "hashtags", label: "Hashtags",     defaultWeight: 1.0 },
+  { key: "venue",    label: "Venue",        defaultWeight: 1.0 },
+  { key: "notes",    label: "Notes",        defaultWeight: 1.0 },
+  { key: "year",     label: "Year",         defaultWeight: 1.0 },
+  // PDF visual field — requires Qwen2.5-VL-32B and a PDF uploaded for each paper.
+  // Papers without a PDF silently skip this field during encoding.
+  { key: "pdf",      label: "PDF (visual)", defaultWeight: 1.0,
+    hint: "Requires Qwen2.5-VL-32B and an uploaded PDF. Papers without a PDF are encoded from text fields only." },
 ];
 
 // ── Open / close ──────────────────────────────────────────────────────────────
@@ -55,7 +59,7 @@ export function closeSimilaritySettings() {
 
 // ── Built-in model list (fallback when sidecar is not yet running) ─────────────
 const _BUILTIN_MODELS = [
-  { id: "sentence-transformers/all-MiniLM-L6-v2",
+  { id: "Qwen/Qwen3-VL-2B-Instruct",
     label: "MiniLM-L6-v2 (fast, 384-dim)",
     description: "Lightweight and fast. Good for most cases.", size_mb: 80 },
   // { id: "Qwen/Qwen2.5-VL-32B-Instruct",
@@ -163,6 +167,9 @@ function buildHTML(cfg, models, isHF, hfOk) {
   const fieldRows = FIELDS.map(f => {
     const w     = weights[f.key] ?? f.defaultWeight;
     const check = selFields.has(f.key) ? "checked" : "";
+    const hintHtml = f.hint
+      ? `<div class="sim-field-hint">${f.hint}</div>`
+      : "";
     return `
       <div class="sim-field-row" data-field="${f.key}">
         <label class="sim-field-label">
@@ -175,6 +182,7 @@ function buildHTML(cfg, models, isHF, hfOk) {
                  ${!selFields.has(f.key) ? "disabled" : ""}>
           <span class="sim-weight-val" data-field="${f.key}">${w.toFixed(1)}</span>
         </div>
+        ${hintHtml}
       </div>`;
   }).join("");
 
@@ -481,7 +489,7 @@ async function _startEmbeddingCache(body, cfg) {
 
   try {
     const config = {
-      model:   cfg.model   ?? "sentence-transformers/all-MiniLM-L6-v2",
+      model:   cfg.model   ?? "Qwen/Qwen3-VL-2B-Instruct",
       fields:  getDefaultConfig().fields,
       weights: cfg.weights ?? {},
     };

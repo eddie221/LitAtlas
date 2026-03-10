@@ -59,7 +59,7 @@ export const MAX_EDGES_PER_NODE   = 7;
 export function getDefaultConfig() {
   return {
     strategy:  "js-cosine",
-    model:     "sentence-transformers/all-MiniLM-L6-v2",
+    model:     "Qwen/Qwen3-VL-2B-Instruct",
     fields:    ["title", "abstract", "hashtags", "venue", "notes", "year"],
     weights:   { hashtags: 1.0},
     threshold: SIMILARITY_THRESHOLD,
@@ -70,7 +70,7 @@ export function getDefaultConfig() {
 export function getEmbeddingConfig() {
   return {
     strategy:  "js-cosine",
-    model:     "sentence-transformers/all-MiniLM-L6-v2",
+    model:     "Qwen/Qwen3-VL-2B-Instruct",
     fields:    ["title", "abstract", "hashtags", "venue", "notes", "year"],
     weights:   { hashtags: 1.0},
     threshold: SIMILARITY_THRESHOLD,
@@ -287,6 +287,17 @@ function _jsEdgesForNew(np, existing, thr, max) {
 
 // ── HF-Embeddings strategy ────────────────────────────────────────────────────
 //
+// Embeddings are always pre-computed and stored on disk BEFORE similarity is
+// calculated.  The Python sidecar is NEVER called during edge computation.
+//
+// Three triggers write embeddings to disk:
+//   • Adding a new paper      → hf_compute_paper_embedding (graph.js)
+//   • Saving paper info edits → hf_compute_paper_embedding (paper-page.js)
+//   • Manual "Cache All"      → hf_compute_all_embeddings  (graph.js, Rust+Python)
+//
+// Similarity computation reads only from cached field_vectors — no sidecar fallback.
+// Papers without a cached embedding are silently skipped.
+//
 // Recompute flow (triggered by the "Recompute Graph" button):
 //   Step 1 — graph.js calls hf_compute_all_embeddings (Rust+Python):
 //              • Re-encodes every paper unconditionally via the Python sidecar.
@@ -299,11 +310,10 @@ function _jsEdgesForNew(np, existing, thr, max) {
 //              • Zero Python calls in this step — pure Rust arithmetic.
 //
 // New-paper flow (single paper added to graph):
-//   1. hf_compute_paper_embedding encodes the new paper's fields → writes JSON.
-//   2. _getCachedFieldVectors loads field_vectors for all papers from disk.
-//   3. _recompose() applies current weights to produce composites in JS.
-//   4. _cosineEdgesFromVectors computes similarity in JS.
-//   Falls back to hf_compute_similarity (sidecar) if any step fails.
+//   graph.js writes the embedding via hf_compute_paper_embedding BEFORE calling
+//   computeEdgesForNewPaper.  _hfEdgesForNew then reads cached field_vectors for
+//   all papers (new + existing), recomposes weighted composites in JS, and computes
+//   pairwise cosine.  Papers still missing a cache are skipped — no sidecar call.
 
 const _invoke = (
   window.__TAURI__?.core?.invoke ??
@@ -399,7 +409,7 @@ function _cosineEdgesFromVectors(papers, vectors, thr, max) {
  */
 function _embConfig(cfg) {
   return {
-    model:   cfg.model   ?? "sentence-transformers/all-MiniLM-L6-v2",
+    model:   cfg.model   ?? "Qwen/Qwen3-VL-2B-Instruct",
     fields:  cfg.fields  ?? ["title", "abstract", "hashtags"],
     weights: cfg.weights ?? {},
   };
@@ -428,42 +438,65 @@ async function _hfEdgesForNew(np, existing, cfg) {
   const thr    = cfg.threshold ?? SIMILARITY_THRESHOLD;
   const max    = cfg.max_edges ?? MAX_EDGES_PER_NODE;
 
-  try {
-    // 1. Encode the new paper's fields and save to disk.
-    await _invoke("hf_compute_paper_embedding", { paperId: np.id, config: embCfg });
+  // Similarity computation is cache-only — embeddings must have been pre-computed
+  // via hf_compute_paper_embedding (triggered on add/edit) or hf_compute_all_embeddings.
+  // Papers without a cached embedding are silently skipped (no Python sidecar call here).
 
-    // 2. Load field_vectors for all papers (new + existing) from JSON.
-    const allPapers = [...existing.filter(p => p.id !== np.id), np];
-    const fvResults = await Promise.all(
-      allPapers.map(p => _getCachedFieldVectors(p.id, embCfg))
-    );
+  const allPapers = [...existing.filter(p => p.id !== np.id), np];
 
-    if (fvResults.every(r => r !== null)) {
-      // 3. Recompose weighted composites from field_vectors + current weights.
-      const vectors = fvResults.map(r =>
-        _recompose(r.field_vectors, embCfg.fields, embCfg.weights)
-      );
-      if (vectors.every(v => v !== null)) {
-        const allEdges = _cosineEdgesFromVectors(allPapers, vectors, thr, max);
-        return allEdges
-          .filter(e => e.source_id === np.id || e.target_id === np.id)
-          .slice(0, max);
-      }
-    }
-  } catch (e) {
-    console.warn("[similarity] new-paper cache-path failed, falling back to sidecar:", e);
+  // Load field_vectors for all papers from disk cache (null = no cache for that paper).
+  const fvResults = await Promise.all(
+    allPapers.map(p => _getCachedFieldVectors(p.id, embCfg))
+  );
+
+  // Recompose weighted composites only for papers that have a cached embedding.
+  // Papers with null cache produce a null vector and are excluded from edge computation.
+  const vectors = fvResults.map(r =>
+    r ? _recompose(r.field_vectors, embCfg.fields, embCfg.weights) : null
+  );
+
+  const cachedCount = vectors.filter(v => v !== null).length;
+  if (cachedCount < 2) {
+    // Fewer than 2 embeddings available — no edges can be computed.
+    console.warn("[similarity] new-paper: fewer than 2 cached embeddings available, skipping HF edge computation.");
+    return [];
   }
 
-  // Fallback: let Rust handle everything via sidecar.
-  const all = [...existing.filter(p => p.id !== np.id), np];
-  const res = await _invoke("hf_compute_similarity", {
-    papers: all,
-    config: { ...embCfg, threshold: thr, max_edges: max },
-  });
-  return (res.edges ?? [])
+  // Build pairs only between papers that both have cached embeddings.
+  const n = allPapers.length;
+  const cands = [];
+  for (let i = 0; i < n; i++) {
+    if (!vectors[i]) continue;
+    for (let j = i + 1; j < n; j++) {
+      if (!vectors[j]) continue;
+      const sim = cosine(vectors[i], vectors[j]);
+      if (sim >= thr) {
+        cands.push({
+          source_id:  allPapers[i].id,
+          target_id:  allPapers[j].id,
+          similarity: parseFloat(sim.toFixed(6)),
+          weight:     edgeWeight(sim),
+          edge_type:  edgeType(allPapers[i], allPapers[j]),
+          _i: i, _j: j,
+        });
+      }
+    }
+  }
+  cands.sort((a, b) => b.similarity - a.similarity);
+  const cnt = new Array(n).fill(0);
+  const res = [];
+  for (const e of cands) {
+    if (cnt[e._i] < max && cnt[e._j] < max) {
+      cnt[e._i]++; cnt[e._j]++;
+      res.push({ source_id: e.source_id, target_id: e.target_id,
+                 similarity: e.similarity, weight: e.weight,
+                 edge_type: e.edge_type, source_type: "hf-embeddings" });
+    }
+  }
+
+  return res
     .filter(e => e.source_id === np.id || e.target_id === np.id)
-    .slice(0, max)
-    .map(e => ({ ...e, source_type: "hf-embeddings" }));
+    .slice(0, max);
 }
 
 

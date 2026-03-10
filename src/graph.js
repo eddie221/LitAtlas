@@ -625,7 +625,7 @@ export async function triggerEdgeRecompute() {
   if (_hfEnabled && _simConfig.strategy === "hf-embeddings") {
     // ── HF two-step recompute ──────────────────────────────────────────────
     const embCfg = {
-      model:   _simConfig.model   ?? "sentence-transformers/all-MiniLM-L6-v2",
+      model:   _simConfig.model   ?? "Qwen/Qwen3-VL-2B-Instruct",
       fields:  _simConfig.fields  ?? ["title", "abstract", "hashtags"],
       weights: _simConfig.weights ?? {},
     };
@@ -638,10 +638,10 @@ export async function triggerEdgeRecompute() {
     _embedTitle = "";
     _showEmbeddingOverlay();
 
-    const embDone = _waitForEmbeddingDone();
-    await invoke("hf_compute_all_embeddings", { config: embCfg });
-    // Wait for embedding://progress { done } — overlay hides itself.
-    await embDone;
+    // const embDone = _waitForEmbeddingDone();
+    // await invoke("hf_compute_all_embeddings", { config: embCfg });
+    // // Wait for embedding://progress { done } — overlay hides itself.
+    // await embDone;
 
     // Step 2: Load field_vectors from JSON, apply current weights in Rust,
     //         compute cosine similarity — zero Python in this step.

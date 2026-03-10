@@ -36,7 +36,15 @@ static LOG_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 /// Initialise the logger with an absolute path.
 /// Must be called once from `lib.rs` before any command is invoked.
+/// Truncates any existing log file so each app session starts clean.
 pub fn init(path: PathBuf) {
+    // Truncate (or create) the log file before storing the path.
+    let _ = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&path);
+
     let mut guard = LOG_PATH.lock().unwrap();
     *guard = Some(path);
 }

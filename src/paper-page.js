@@ -40,7 +40,7 @@ async function _triggerPaperEmbedding(paperId) {
   // Only bother if HF strategy is in use — no-op for js-cosine
   if (cfg.strategy !== "hf-embeddings") return;
   const config = {
-    model:   cfg.model   ?? "sentence-transformers/all-MiniLM-L6-v2",
+    model:   cfg.model   ?? "Qwen/Qwen3-VL-2B-Instruct",
     fields:  cfg.fields  ?? ["title", "abstract", "hashtags"],
     weights: cfg.weights ?? {},
   };
