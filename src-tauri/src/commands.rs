@@ -210,6 +210,19 @@ pub async fn get_edges(s: State<'_, AppState>) -> CmdResult<Vec<EdgeRow>> {
     db::get_all_edges(&s.pool()).await.map_err(map_log_err!("get_edges"))
 }
 
+/// Return only the edges for one strategy engine ("js-cosine" or "hf-embeddings").
+/// Called by graph.js on load and on every strategy switch so the canvas shows
+/// only the active mode's edges without touching or recomputing the other set.
+#[tauri::command]
+pub async fn get_edges_by_source(
+    s: State<'_, AppState>,
+    source_type: String,
+) -> CmdResult<Vec<EdgeRow>> {
+    logger::log_call("get_edges_by_source");
+    db::get_edges_by_source(&s.pool(), &source_type)
+        .await.map_err(map_log_err!("get_edges_by_source"))
+}
+
 #[tauri::command]
 pub async fn recompute_edges(s: State<'_, AppState>, edges: Vec<EdgeInput>) -> CmdResult<usize> {
     logger::log_call("recompute_edges");
@@ -220,6 +233,22 @@ pub async fn recompute_edges(s: State<'_, AppState>, edges: Vec<EdgeInput>) -> C
 pub async fn append_edges(s: State<'_, AppState>, edges: Vec<EdgeInput>) -> CmdResult<usize> {
     logger::log_call("append_edges");
     db::append_edges(&s.pool(), edges).await.map_err(map_log_err!("append_edges"))
+}
+
+/// Replace only the edges produced by a specific strategy engine, leaving all
+/// edges from the other engine intact.
+///
+/// `source_type` must be either `"js-cosine"` or `"hf-embeddings"`.
+/// All entries in `edges` are expected to carry the same `source_type`.
+#[tauri::command]
+pub async fn replace_edges_by_source(
+    s: State<'_, AppState>,
+    source_type: String,
+    edges: Vec<EdgeInput>,
+) -> CmdResult<usize> {
+    logger::log_call("replace_edges_by_source");
+    db::replace_edges_by_source(&s.pool(), &source_type, edges)
+        .await.map_err(map_log_err!("replace_edges_by_source"))
 }
 
 // ── PDF storage ───────────────────────────────────────────────────────────────
@@ -943,9 +972,6 @@ fn launch_sidecar(
             .unwrap_or_default()
     };
 
-    let log_path = venv_dir.parent().unwrap_or(venv_dir).join("log.txt");
-    let log_path_str = log_path.to_string_lossy().into_owned();
-
     let mut child = Command::new(&python)
         .arg("-u")
         .arg(script)
@@ -954,7 +980,6 @@ fn launch_sidecar(
         .env_remove("VIRTUAL_ENV")
         .env_remove("VIRTUAL_ENV_PROMPT")
         .env("LitAtlas_PLUGIN_SCRIPT", &plugin_script)
-        .env("LitAtlas_LOG_PATH", &log_path_str)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -1044,9 +1069,9 @@ pub fn hf_setup_status(s: State<'_, AppState>) -> CmdResult<serde_json::Value> {
     // needing to start the sidecar first.
     let mut known_models: Vec<String> = vec![
         "sentence-transformers/all-MiniLM-L6-v2".into(),
-        "sentence-transformers/all-mpnet-base-v2".into(),
-        "sentence-transformers/multi-qa-MiniLM-L6-cos-v1".into(),
-        "allenai/specter2_base".into(),
+        // "sentence-transformers/all-mpnet-base-v2".into(),
+        // "sentence-transformers/multi-qa-MiniLM-L6-cos-v1".into(),
+        // "allenai/specter2_base".into(),
     ];
 
     // Merge custom models from app_config.json so user-defined models are
@@ -1816,11 +1841,12 @@ pub fn hf_compute_edges_from_cache(
             let weight = if sim >= 0.75 { 3 } else if sim >= 0.55 { 2 } else { 1 };
             let etype  = edge_type_for(&papers[i], &papers[j]);
             edges.push(serde_json::json!({
-                "source_id":  papers[i]["id"],
-                "target_id":  papers[j]["id"],
-                "similarity": (sim * 1_000_000.0).round() / 1_000_000.0,
-                "weight":     weight,
-                "edge_type":  etype,
+                "source_id":   papers[i]["id"],
+                "target_id":   papers[j]["id"],
+                "similarity":  (sim * 1_000_000.0).round() / 1_000_000.0,
+                "weight":      weight,
+                "edge_type":   etype,
+                "source_type": "hf-embeddings",
             }));
         }
     }

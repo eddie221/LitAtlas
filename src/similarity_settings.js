@@ -17,9 +17,10 @@ import { getCustomModels } from "./app_settings.js";
  *   • On error       → red badge + message + Retry button
  */
 
-function _getSimConfig()           { return window.LitAtlas?.getSimConfig?.()    ?? {}; }
-async function _saveSimConfig(cfg) { return window.LitAtlas?.saveSimConfig?.(cfg); }
-async function _recompute()        { return window.LitAtlas?.triggerEdgeRecompute?.(); }
+function _getSimConfig()                { return window.LitAtlas?.getSimConfig?.()    ?? {}; }
+async function _saveSimConfig(cfg)      { return window.LitAtlas?.saveSimConfig?.(cfg); }
+async function _recompute()             { return window.LitAtlas?.triggerEdgeRecompute?.(); }
+async function _switchStrategy(strat)  { return window.LitAtlas?.switchEdgeStrategy?.(strat); }
 
 const invoke = (
   window.__TAURI__?.core?.invoke ??
@@ -57,23 +58,10 @@ const _BUILTIN_MODELS = [
   { id: "sentence-transformers/all-MiniLM-L6-v2",
     label: "MiniLM-L6-v2 (fast, 384-dim)",
     description: "Lightweight and fast. Good for most cases.", size_mb: 80 },
-  { id: "Qwen/Qwen2.5-VL-32B-Instruct",
-    label: "Qwen2.5-VL-32B-Instruct (MLLM, 5120-dim)",
-    description: "Large, more precise and powerful."
-  }
-  // { id: "OpenGVLab/InternVL3_5-14B",
-  //   label: "InternVL3_5-14B (MLLM, 5120-dim)",
-  //   description: "Large, more precise and powerful." },
-  
-  // { id: "sentence-transformers/all-mpnet-base-v2",
-  //   label: "MPNet-base-v2 (accurate, 768-dim)",
-  //   description: "Higher accuracy, slower. Best for research quality.", size_mb: 420 },
-  // { id: "sentence-transformers/multi-qa-MiniLM-L6-cos-v1",
-  //   label: "Multi-QA MiniLM (semantic search)",
-  //   description: "Optimised for semantic similarity search.", size_mb: 80 },
-  // { id: "allenai/specter2_base",
-  //   label: "SPECTER2 (academic papers)",
-  //   description: "Trained on scientific paper citations. Best for academic similarity.", size_mb: 440 },
+  // { id: "Qwen/Qwen2.5-VL-32B-Instruct",
+  //   label: "Qwen2.5-VL-32B-Instruct (MLLM, 5120-dim)",
+  //   description: "Large, more precise and powerful."
+  // }
 ];
 
 // ── Per-model cache status memo: modelId → true | false | null (unknown) ──────
@@ -103,10 +91,9 @@ async function renderSettings(panel) {
   body.innerHTML = buildHTML(cfg, models, isHF, hfOk);
   wireEvents(panel, cfg, models, hfOk);
 
-  // Check cache for the currently selected model.
-  if (isHF) {
-    await refreshModelSelect(body);
-  }
+  // Always refresh the model list so custom models added in App Settings
+  // are present immediately, regardless of which strategy is active.
+  await refreshModelSelect(body);
 }
 
 // ── Refresh the model <select> in an already-rendered panel ──────────────────
@@ -129,7 +116,9 @@ export async function refreshModelSelect(bodyOrPanel) {
         getCustomModels().catch(() => []),
       ]);
 
-      let baseModels = sidecarRes?.models?.length ? sidecarRes.models : _BUILTIN_MODELS;
+      // Use sidecar's list as base when available; otherwise fall back to builtin.
+      // Custom models are always merged on top regardless of sidecar state.
+      const baseModels = sidecarRes?.models?.length ? sidecarRes.models : _BUILTIN_MODELS;
 
       const knownIds = new Set(baseModels.map(m => m.id));
       const extras   = customModels
@@ -148,7 +137,7 @@ export async function refreshModelSelect(bodyOrPanel) {
       if (sel) {
         const cur = sel.value;
         sel.innerHTML = models.map(m => {
-          const label = m.cached ? `✓ ${m.label}` : m.label;
+          const label = m.cached ? `${m.label}` : m.label;
           return `<option value="${m.id}" ${m.id === cur ? "selected" : ""}>${label}</option>`;
         }).join("");
         _setModelDesc(body, models, sel.value);
@@ -535,7 +524,7 @@ function wireEvents(panel, initialCfg, models, hfOk) {
 
   // Strategy toggle — HF button is a no-op when HF is disabled this session
   body.querySelectorAll(".sim-strat-btn").forEach(btn => {
-    btn.addEventListener("click", () => {
+    btn.addEventListener("click", async () => {
       if (btn.disabled) return; // HF locked
       cfg.strategy = btn.dataset.strat;
       body.querySelectorAll(".sim-strat-btn").forEach(b =>
@@ -546,6 +535,10 @@ function wireEvents(panel, initialCfg, models, hfOk) {
         const sel = body.querySelector("#sim-model-select");
         _refreshDownloadUI(body, sel?.value ?? cfg.model, models);
       }
+      // Save the new strategy immediately so graph.js _simConfig is in sync,
+      // then swap to cached edges (or trigger a first-time compute if none exist).
+      await _saveSimConfig(cfg);
+      await _switchStrategy(cfg.strategy);
     });
   });
 

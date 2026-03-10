@@ -193,6 +193,7 @@ function adaptEdge(r) {
     similarity: Number(r.similarity),
     weight:     Number(r.weight),
     type:       r.edge_type,
+    sourceType: r.source_type ?? "js-cosine",
   };
 }
 
@@ -569,9 +570,9 @@ function _showLlmErrorDialog(msg) {
 async function loadFromDB() {
   showOverlay("Opening database…");
   try {
-    _simConfig.strategy = "js-cosine";
     // Load similarity config first so compute uses user's settings
     await loadSimConfig();
+    _simConfig.strategy = "js-cosine";
     await loadNodeColors();
     // ── LLM module consent ──────────────────────────────────────────────────
     // Ask on every launch whether the user wants HF active this session.
@@ -595,14 +596,15 @@ async function loadFromDB() {
     setTagVocab(dbTags);
 
     showOverlay("Loading similarity graph…");
-    let rawEdges = await invoke("get_edges");
+    const srcType  = _simConfig.strategy === "hf-embeddings" ? "hf-embeddings" : "js-cosine";
+    let rawEdges = await invoke("get_edges_by_source", { sourceType: srcType });
 
     if (rawEdges.length === 0) {
       const stratLabel = _simConfig.strategy === "hf-embeddings" ? "HuggingFace embeddings" : "cosine similarity";
       showOverlay(`First run — computing edges via ${stratLabel}…`);
       const computed = await computeEdges(getPapersCache(), _simConfig);
-      await invoke("recompute_edges", { edges: computed });
-      rawEdges = await invoke("get_edges");
+      await invoke("replace_edges_by_source", { sourceType: srcType, edges: computed });
+      rawEdges = await invoke("get_edges_by_source", { sourceType: srcType });
     }
 
     setEdgesCache(rawEdges.map(adaptEdge));
@@ -656,19 +658,41 @@ export async function triggerEdgeRecompute() {
         max_edges: _simConfig.max_edges ?? 7,
       },
     });
+    console.log("edgeRes : ", edgeRes);
     const computed = edgeRes.edges ?? [];
-    await invoke("recompute_edges", { edges: computed });
+    await invoke("replace_edges_by_source", { sourceType: "hf-embeddings", edges: computed });
   } else {
     // ── JS-cosine strategy ─────────────────────────────────────────────────
     const computed = await computeEdges(getPapersCache(), _simConfig);
-    await invoke("recompute_edges", { edges: computed });
+    await invoke("replace_edges_by_source", { sourceType: "js-cosine", edges: computed });
   }
 
-  const fresh = await invoke("get_edges");
+  const fresh = await invoke("get_edges_by_source", { sourceType: _simConfig.strategy === "hf-embeddings" ? "hf-embeddings" : "js-cosine" });
   setEdgesCache(fresh.map(adaptEdge));
   rebuildEdgeRefs();
   hideOverlay();
   document.getElementById("stat-connections").textContent = getEdgesCache().length;
+  draw();
+}
+
+// ── Switch active strategy without recomputing ────────────────────────────────
+// Called by the similarity settings panel when the user changes strategy.
+// If edges for the target strategy are already in the DB they are loaded
+// immediately.  If not, a full recompute is triggered automatically.
+export async function switchEdgeStrategy(newStrategy) {
+  const srcType = newStrategy === "hf-embeddings" ? "hf-embeddings" : "js-cosine";
+  const cached  = await invoke("get_edges_by_source", { sourceType: srcType });
+
+  if (cached.length > 0) {
+    // Cached edges exist — swap instantly, no computation needed.
+    setEdgesCache(cached.map(adaptEdge));
+    rebuildEdgeRefs();
+    _updateMethodBadge(newStrategy);
+    document.getElementById("stat-connections").textContent = getEdgesCache().length;
+  } else {
+    // No cached edges for this strategy yet — trigger a full recompute.
+    await triggerEdgeRecompute();
+  }
 }
 
 // ── Refresh a single paper from DB ───────────────────────────────────────────
@@ -688,33 +712,40 @@ export async function refreshPaper(id) {
 }
 
 // ── Re-compute edges for a single edited paper ───────────────────────────────
-// Drops all edges touching paperId, computes fresh ones via the active
-// similarity strategy, persists the merged set, then rebuilds canvas refs.
+// Drops only the active strategy's edges that touch paperId, computes fresh
+// ones via that strategy, then does a targeted replace so the other strategy's
+// edges are never disturbed.
 export async function recomputeEdgesForPaper(paperId) {
   const allPapers = getPapersCache();
   const paper     = allPapers.find(p => p.id === paperId);
   if (!paper) return;
 
-  // 1. Compute new edges for this paper against all others
+  const srcType = _simConfig.strategy === "hf-embeddings" ? "hf-embeddings" : "js-cosine";
+
+  // 1. Compute new edges for this paper against all others via active strategy
   const others   = allPapers.filter(p => p.id !== paperId);
   const newEdges = await computeEdgesForNewPaper(paper, others, _simConfig);
 
-  // 2. Keep cached edges that don't involve this paper
+  // 2. Retain all edges of this strategy that don't involve this paper
   const retained = getEdgesCache()
-    .filter(e => e.source !== paperId && e.target !== paperId)
+    .filter(e => e.sourceType === srcType && e.source !== paperId && e.target !== paperId)
     .map(e => ({
-      source_id:  e.source,
-      target_id:  e.target,
-      similarity: e.similarity,
-      weight:     e.weight,
-      edge_type:  e.type,
+      source_id:   e.source,
+      target_id:   e.target,
+      similarity:  e.similarity,
+      weight:      e.weight,
+      edge_type:   e.type,
+      source_type: srcType,
     }));
 
-  // 3. Atomic replace — retained edges + newly computed ones
-  await invoke("recompute_edges", { edges: [...retained, ...newEdges] });
+  // 3. Targeted replace — only touches edges of the active strategy
+  await invoke("replace_edges_by_source", {
+    sourceType: srcType,
+    edges: [...retained, ...newEdges],
+  });
 
   // 4. Sync cache and rebuild canvas refs
-  const fresh = await invoke("get_edges");
+  const fresh = await invoke("get_edges_by_source", { sourceType: srcType });
   setEdgesCache(fresh.map(adaptEdge));
   rebuildEdgeRefs();
   document.getElementById("stat-connections").textContent = getEdgesCache().length;
@@ -1688,7 +1719,8 @@ document.getElementById("npm-submit-btn").addEventListener("click", async () => 
     // 3. Reload from DB
     statusEl.textContent = "Syncing…";
     setPapersCache((await invoke("get_papers")).map(adaptPaper));
-    setEdgesCache((await invoke("get_edges")).map(adaptEdge));
+    const _srcType = _simConfig.strategy === "hf-embeddings" ? "hf-embeddings" : "js-cosine";
+    setEdgesCache((await invoke("get_edges_by_source", { sourceType: _srcType })).map(adaptEdge));
 
     // 4. Add node to running simulation
     const W = canvas.width  / devicePixelRatio;
@@ -1774,6 +1806,7 @@ window.LitAtlas = {
   getSimConfig,
   saveSimConfig,
   triggerEdgeRecompute,
+  switchEdgeStrategy,
   recomputeEdgesForPaper,
   reloadGraph,
   isHfEnabled: () => _hfEnabled,

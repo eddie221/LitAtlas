@@ -248,11 +248,12 @@ function _jsEdges(papers, thr, max) {
       cnt[e._i]++;
       cnt[e._j]++;
       res.push({
-        source_id:  e.source_id,
-        target_id:  e.target_id,
-        similarity: parseFloat(e.similarity.toFixed(6)),
-        weight:     e.weight,
-        edge_type:  e.edge_type,
+        source_id:   e.source_id,
+        target_id:   e.target_id,
+        similarity:  parseFloat(e.similarity.toFixed(6)),
+        weight:      e.weight,
+        edge_type:   e.edge_type,
+        source_type: "js-cosine",
       });
     }
   }
@@ -269,11 +270,12 @@ function _jsEdgesForNew(np, existing, thr, max) {
     const sim = _blendedSim(nEnc, encode(o));
     if (sim > thr) {
       edges.push({
-        source_id:  np.id,
-        target_id:  o.id,
-        similarity: parseFloat(sim.toFixed(6)),
-        weight:     edgeWeight(sim),
-        edge_type:  edgeType(np, o),
+        source_id:   np.id,
+        target_id:   o.id,
+        similarity:  parseFloat(sim.toFixed(6)),
+        weight:      edgeWeight(sim),
+        edge_type:   edgeType(np, o),
+        source_type: "js-cosine",
       });
     }
   }
@@ -384,7 +386,8 @@ function _cosineEdgesFromVectors(papers, vectors, thr, max) {
     if (cnt[e._i] < max && cnt[e._j] < max) {
       cnt[e._i]++; cnt[e._j]++;
       res.push({ source_id: e.source_id, target_id: e.target_id,
-                 similarity: e.similarity, weight: e.weight, edge_type: e.edge_type });
+                 similarity: e.similarity, weight: e.weight, edge_type: e.edge_type,
+                 source_type: "hf-embeddings" });
     }
   }
   return res;
@@ -459,7 +462,8 @@ async function _hfEdgesForNew(np, existing, cfg) {
   });
   return (res.edges ?? [])
     .filter(e => e.source_id === np.id || e.target_id === np.id)
-    .slice(0, max);
+    .slice(0, max)
+    .map(e => ({ ...e, source_type: "hf-embeddings" }));
 }
 
 

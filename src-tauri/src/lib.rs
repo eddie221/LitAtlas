@@ -176,7 +176,8 @@ pub fn run() {
             get_relations, get_all_relations, add_relation,
             update_relation_note, delete_relation,
             // Similarity edges (JS-cosine results committed here)
-            get_edges, recompute_edges, append_edges,
+            get_edges, get_edges_by_source,
+            recompute_edges, append_edges, replace_edges_by_source,
             // PDF
             copy_pdf, get_pdf_url, store_pdf_bytes, read_pdf_bytes,
             delete_pdf_file,

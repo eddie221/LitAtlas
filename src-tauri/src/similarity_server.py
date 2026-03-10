@@ -30,6 +30,13 @@ import traceback
 from typing import Any
 import torch
 
+if torch.cuda.is_available():
+    device = "cuda"
+elif torch.backends.mps.is_available():
+    device = "mps"
+else:
+    device = "cpu"
+
 # ── User plugin ──────────────────────────────────────────────────────────────
 #
 # Users can extend LitAtlas with a custom similarity function by creating a
@@ -250,7 +257,7 @@ def handle_download_model(req_id: Any, model_id: str) -> None:
 
     The model stays loaded in memory after this call so the first
     compute_embedding request is instant.  Elapsed wall-clock time is
-    written to log.txt via sys.stderr.
+    written to stderr.
     """
     try:
         t0 = time.monotonic()
@@ -326,7 +333,8 @@ def paper_embedding(paper: dict, fields: list, weights: dict, model) -> list:
     # Batch encode all field texts at once (single GPU/CPU pass)
     texts = [text for _, text, _ in items]
     tokenizer, hf_model = model
-    inputs = tokenizer(texts, padding=True, truncation=True, max_length=512, return_tensors="pt")
+    hf_model.to(device)
+    inputs = tokenizer(texts, padding=True, truncation=True, max_length=512, return_tensors="pt").to(device)
     with torch.no_grad():
         outputs = hf_model(**inputs)
     vecs = _mean_pool(outputs, inputs["attention_mask"])
@@ -371,15 +379,7 @@ AVAILABLE_MODELS = [
     { "id": "sentence-transformers/all-MiniLM-L6-v2",
       "label": "MiniLM-L6-v2 (fast, 384-dim)",
       "description": "Lightweight and fast. Good for most cases.", "size_mb": 80 },
-    { "id": "sentence-transformers/all-mpnet-base-v2",
-      "label": "MPNet-base-v2 (accurate, 768-dim)",
-      "description": "Higher accuracy, slower. Best for research quality.", "size_mb": 420 },
-    { "id": "sentence-transformers/multi-qa-MiniLM-L6-cos-v1",
-      "label": "Multi-QA MiniLM (semantic search)",
-      "description": "Optimised for semantic similarity search.", "size_mb": 80 },
-    { "id": "allenai/specter2_base",
-      "label": "SPECTER2 (academic papers)",
-      "description": "Trained on scientific paper citations. Best for academic similarity.", "size_mb": 440 },
+      
 ]
 
 AVAILABLE_FIELDS = [
@@ -437,7 +437,8 @@ def compute_embedding(paper: dict, config: dict) -> dict:
     # Batch-encode all field texts in one GPU/CPU pass
     texts = [text for _, text in items]
     tokenizer, hf_model = model
-    inputs = tokenizer(texts, padding=True, truncation=True, max_length=512, return_tensors="pt")
+    hf_model.to(device)
+    inputs = tokenizer(texts, padding=True, truncation=True, max_length=512, return_tensors="pt").to(device)
     with torch.no_grad():
         outputs = hf_model(**inputs)
     vecs = _mean_pool(outputs, inputs["attention_mask"])
@@ -493,7 +494,7 @@ def compute(papers: list, config: dict) -> list:
             papers_to_encode.append((i, p))
 
     for i, p in papers_to_encode:
-        vecs[i] = paper_embedding(p, fields, weights, model)
+        vecs[i] = paper_embedding(p, fields, weights, model).to(device)
 
     n = len(papers)
     candidates = []
@@ -612,37 +613,6 @@ def handle(line: str) -> None:
 
 
 def main() -> None:
-    # ── Redirect all output to log.txt ───────────────────────────────────────
-    # Derive log path from LitAtlas_LOG_PATH env var (set by Rust), falling
-    # back to a log.txt next to this script so it always works.
-    log_path = (
-        os.environ.get("LitAtlas_LOG_PATH")
-        or os.path.join(os.path.dirname(os.path.abspath(__file__)), "log.txt")
-    )
-    try:
-        # line-buffered (buffering=1) so every print() appears immediately
-        _log = open(log_path, "a", buffering=1, encoding="utf-8")
-        sys.stderr = _log
-        # Also capture stray print() calls that go to stdout by mistake —
-        # wrap stdout so JSON-RPC lines pass through and everything else logs.
-        _real_stdout = sys.stdout
-        class _TeeStdout:
-            """Pass JSON lines through; log anything that looks like plain text."""
-            def write(self, s):
-                stripped = s.strip()
-                if not stripped:
-                    return
-                if stripped.startswith("{") and stripped.endswith("}"):
-                    _real_stdout.write(s)
-                else:
-                    _log.write(s if s.endswith("\n") else s + "\n")
-                    _log.flush()
-            def flush(self):
-                _real_stdout.flush()
-        sys.stdout = _TeeStdout()
-    except OSError:
-        pass  # if log file can't be opened, fall back silently
-
     # Load user plugin script (if LitAtlas_PLUGIN_SCRIPT env var is set).
     _load_plugin()
     sys.stdout.write(json.dumps({"id": 0, "ok": True, "result": "ready"}) + "\n")

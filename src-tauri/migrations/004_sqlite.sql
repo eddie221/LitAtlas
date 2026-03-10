@@ -109,14 +109,19 @@ CREATE TABLE paper_relations (
 
 
 -- ── paper_edges ───────────────────────────────────────────────────────────────
+-- Each paper pair can have up to two edges — one per strategy engine.
+-- The unique key is (source_id, target_id, source_type) so js-cosine and
+-- hf-embeddings results are stored independently and never overwrite each other.
 CREATE TABLE paper_edges (
-  id         INTEGER NOT NULL PRIMARY KEY,
-  source_id  INTEGER NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
-  target_id  INTEGER NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
-  similarity REAL    NOT NULL,
-  weight     INTEGER NOT NULL DEFAULT 1,
-  edge_type  TEXT    NOT NULL DEFAULT 'related',
-  UNIQUE (source_id, target_id)
+  id          INTEGER NOT NULL PRIMARY KEY,
+  source_id   INTEGER NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
+  target_id   INTEGER NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
+  similarity  REAL    NOT NULL,
+  weight      INTEGER NOT NULL DEFAULT 1,
+  edge_type   TEXT    NOT NULL DEFAULT 'related',
+  source_type TEXT    NOT NULL DEFAULT 'js-cosine'
+                      CHECK (source_type IN ('js-cosine', 'hf-embeddings')),
+  UNIQUE (source_id, target_id, source_type)
 );
 
 

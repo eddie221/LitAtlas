@@ -146,21 +146,29 @@ pub struct HashtagRow {
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct EdgeRow {
-    pub source_id:  i64,
-    pub target_id:  i64,
-    pub similarity: f64,
-    pub weight:     i64,
-    pub edge_type:  String,
+    pub source_id:   i64,
+    pub target_id:   i64,
+    pub similarity:  f64,
+    pub weight:      i64,
+    pub edge_type:   String,
+    /// Which engine produced this edge: "js-cosine" or "hf-embeddings".
+    pub source_type: String,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct EdgeInput {
-    pub source_id:  i64,
-    pub target_id:  i64,
-    pub similarity: f64,
-    pub weight:     i64,
-    pub edge_type:  String,
+    pub source_id:   i64,
+    pub target_id:   i64,
+    pub similarity:  f64,
+    pub weight:      i64,
+    pub edge_type:   String,
+    /// Which engine produced this edge: "js-cosine" or "hf-embeddings".
+    /// Defaults to "js-cosine" when absent (backwards-compat with older callers).
+    #[serde(default = "default_source_type")]
+    pub source_type: String,
 }
+
+fn default_source_type() -> String { "js-cosine".to_owned() }
 
 // ── NewPaper ──────────────────────────────────────────────────────────────────
 
@@ -217,9 +225,19 @@ pub async fn get_paper(pool: &SqlitePool, id: i64) -> Result<PaperFull, DbError>
 
 pub async fn get_all_edges(pool: &SqlitePool) -> Result<Vec<EdgeRow>, DbError> {
     Ok(sqlx::query_as(
-        "SELECT source_id, target_id, similarity, weight, edge_type
+        "SELECT source_id, target_id, similarity, weight, edge_type, source_type
          FROM paper_edges ORDER BY similarity DESC"
     ).fetch_all(pool).await?)
+}
+
+/// Return only the edges produced by one strategy engine.
+/// Used by graph.js when loading or switching the active strategy so the
+/// canvas only renders edges relevant to the current mode.
+pub async fn get_edges_by_source(pool: &SqlitePool, source_type: &str) -> Result<Vec<EdgeRow>, DbError> {
+    Ok(sqlx::query_as(
+        "SELECT source_id, target_id, similarity, weight, edge_type, source_type
+         FROM paper_edges WHERE source_type = ? ORDER BY similarity DESC"
+    ).bind(source_type).fetch_all(pool).await?)
 }
 
 pub async fn get_all_hashtags(pool: &SqlitePool) -> Result<Vec<HashtagRow>, DbError> {
@@ -418,45 +436,42 @@ pub async fn replace_all_edges(pool: &SqlitePool, edges: Vec<EdgeInput>) -> Resu
     let mut tx = pool.begin().await?;
 
     // ── 1. Upsert every incoming edge ────────────────────────────────────────
-    // INSERT OR REPLACE honours the PRIMARY KEY (source_id, target_id) and
-    // updates similarity / weight / edge_type in-place when the pair already
-    // exists — no row is deleted and re-inserted unnecessarily.
+    // ON CONFLICT now targets (source_id, target_id, source_type) so a js-cosine
+    // edge and an hf-embeddings edge for the same paper pair are distinct rows.
     for e in &edges {
         sqlx::query(
-            "INSERT INTO paper_edges (source_id, target_id, similarity, weight, edge_type)
-             VALUES (?, ?, ?, ?, ?)
-             ON CONFLICT (source_id, target_id) DO UPDATE SET
-               similarity = excluded.similarity,
-               weight     = excluded.weight,
-               edge_type  = excluded.edge_type"
+            "INSERT INTO paper_edges (source_id, target_id, similarity, weight, edge_type, source_type)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT (source_id, target_id, source_type) DO UPDATE SET
+               similarity  = excluded.similarity,
+               weight      = excluded.weight,
+               edge_type   = excluded.edge_type"
         )
         .bind(e.source_id).bind(e.target_id)
-        .bind(e.similarity).bind(e.weight).bind(&e.edge_type)
+        .bind(e.similarity).bind(e.weight).bind(&e.edge_type).bind(&e.source_type)
         .execute(&mut *tx).await?;
     }
 
     // ── 2. Prune edges that are no longer in the new set ─────────────────────
-    // Build a temporary table of (source_id, target_id) pairs to keep, then
-    // delete everything not in that set.  For the common case (full recompute)
-    // this removes stale edges without touching any valid row.
+    // The keep table now tracks (source_id, target_id, source_type) so edges
+    // from the other strategy are never touched by a full replace.
     if count == 0 {
         sqlx::query("DELETE FROM paper_edges").execute(&mut *tx).await?;
     } else {
-        // SQLite doesn't support DELETE … WHERE (a,b) NOT IN (VALUES …) with
-        // large value lists via bound params, so we stage into a temp table.
         sqlx::query(
             "CREATE TEMPORARY TABLE IF NOT EXISTS _keep_edges
              (source_id INTEGER NOT NULL, target_id INTEGER NOT NULL,
-              PRIMARY KEY (source_id, target_id))"
+              source_type TEXT NOT NULL,
+              PRIMARY KEY (source_id, target_id, source_type))"
         ).execute(&mut *tx).await?;
 
         sqlx::query("DELETE FROM _keep_edges").execute(&mut *tx).await?;
 
         for e in &edges {
             sqlx::query(
-                "INSERT OR IGNORE INTO _keep_edges (source_id, target_id) VALUES (?, ?)"
+                "INSERT OR IGNORE INTO _keep_edges (source_id, target_id, source_type) VALUES (?, ?, ?)"
             )
-            .bind(e.source_id).bind(e.target_id)
+            .bind(e.source_id).bind(e.target_id).bind(&e.source_type)
             .execute(&mut *tx).await?;
         }
 
@@ -464,8 +479,9 @@ pub async fn replace_all_edges(pool: &SqlitePool, edges: Vec<EdgeInput>) -> Resu
             "DELETE FROM paper_edges
              WHERE NOT EXISTS (
                SELECT 1 FROM _keep_edges k
-               WHERE k.source_id = paper_edges.source_id
-                 AND k.target_id = paper_edges.target_id
+               WHERE k.source_id   = paper_edges.source_id
+                 AND k.target_id   = paper_edges.target_id
+                 AND k.source_type = paper_edges.source_type
              )"
         ).execute(&mut *tx).await?;
 
@@ -481,12 +497,82 @@ pub async fn append_edges(pool: &SqlitePool, edges: Vec<EdgeInput>) -> Result<us
     for e in &edges {
         sqlx::query(
             "INSERT OR IGNORE INTO paper_edges
-               (source_id, target_id, similarity, weight, edge_type)
-             VALUES (?, ?, ?, ?, ?)"
+               (source_id, target_id, similarity, weight, edge_type, source_type)
+             VALUES (?, ?, ?, ?, ?, ?)"
         )
         .bind(e.source_id).bind(e.target_id)
-        .bind(e.similarity).bind(e.weight).bind(&e.edge_type)
+        .bind(e.similarity).bind(e.weight).bind(&e.edge_type).bind(&e.source_type)
         .execute(pool).await?;
     }
+    Ok(count)
+}
+
+/// Replace all edges that were produced by a specific engine (`source_type`),
+/// leaving edges from other engines completely untouched.
+///
+/// - Upserts every edge in `edges` (which must all share `source_type`).
+/// - Deletes any pre-existing edge whose `source_type` matches but that is
+///   absent from the new set — i.e. a clean targeted rebuild per strategy.
+pub async fn replace_edges_by_source(
+    pool: &SqlitePool,
+    source_type: &str,
+    edges: Vec<EdgeInput>,
+) -> Result<usize, DbError> {
+    let count = edges.len();
+    let mut tx = pool.begin().await?;
+
+    // 1. Upsert incoming edges.
+    for e in &edges {
+        sqlx::query(
+            "INSERT INTO paper_edges (source_id, target_id, similarity, weight, edge_type, source_type)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT (source_id, target_id, source_type) DO UPDATE SET
+               similarity  = excluded.similarity,
+               weight      = excluded.weight,
+               edge_type   = excluded.edge_type"
+        )
+        .bind(e.source_id).bind(e.target_id)
+        .bind(e.similarity).bind(e.weight).bind(&e.edge_type).bind(&e.source_type)
+        .execute(&mut *tx).await?;
+    }
+
+    // 2. Prune stale edges for this source_type that are no longer in the set.
+    if count == 0 {
+        sqlx::query("DELETE FROM paper_edges WHERE source_type = ?")
+            .bind(source_type)
+            .execute(&mut *tx).await?;
+    } else {
+        sqlx::query(
+            "CREATE TEMPORARY TABLE IF NOT EXISTS _keep_edges_src
+             (source_id INTEGER NOT NULL, target_id INTEGER NOT NULL,
+              PRIMARY KEY (source_id, target_id))"
+        ).execute(&mut *tx).await?;
+
+        sqlx::query("DELETE FROM _keep_edges_src").execute(&mut *tx).await?;
+
+        for e in &edges {
+            sqlx::query(
+                "INSERT OR IGNORE INTO _keep_edges_src (source_id, target_id) VALUES (?, ?)"
+            )
+            .bind(e.source_id).bind(e.target_id)
+            .execute(&mut *tx).await?;
+        }
+
+        sqlx::query(
+            "DELETE FROM paper_edges
+             WHERE source_type = ?
+               AND NOT EXISTS (
+                 SELECT 1 FROM _keep_edges_src k
+                 WHERE k.source_id = paper_edges.source_id
+                   AND k.target_id = paper_edges.target_id
+               )"
+        )
+        .bind(source_type)
+        .execute(&mut *tx).await?;
+
+        sqlx::query("DROP TABLE IF EXISTS _keep_edges_src").execute(&mut *tx).await?;
+    }
+
+    tx.commit().await?;
     Ok(count)
 }
