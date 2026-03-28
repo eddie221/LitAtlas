@@ -43,6 +43,7 @@ impl From<DbError>           for String  { fn from(e: DbError) -> Self { e.to_st
 struct PaperRow {
     id:              i64,
     title:           String,
+    alias:           Option<String>,
     venue:           String,
     year:            i64,
     notes:           Option<String>,
@@ -67,6 +68,7 @@ pub struct PaperAttribute {
 pub struct PaperFull {
     pub id:         i64,
     pub title:      String,
+    pub alias:      Option<String>,
     pub venue:      String,
     pub year:       i64,
     pub notes:      Option<String>,
@@ -104,6 +106,7 @@ impl TryFrom<PaperRow> for PaperFull {
         Ok(PaperFull {
             id:         r.id,
             title:      r.title,
+            alias:      r.alias,
             venue:      r.venue,
             year:       r.year,
             notes:      r.notes,
@@ -287,6 +290,12 @@ pub async fn update_paper_core(
 pub async fn save_notes(pool: &SqlitePool, id: i64, notes: &str) -> Result<(), DbError> {
     sqlx::query("UPDATE papers SET notes = ? WHERE id = ?")
         .bind(notes).bind(id).execute(pool).await?;
+    Ok(())
+}
+
+pub async fn save_alias(pool: &SqlitePool, id: i64, alias: Option<&str>) -> Result<(), DbError> {
+    sqlx::query("UPDATE papers SET alias = ? WHERE id = ?")
+        .bind(alias).bind(id).execute(pool).await?;
     Ok(())
 }
 

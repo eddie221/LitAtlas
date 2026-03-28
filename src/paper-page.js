@@ -277,6 +277,13 @@ function renderInfoTab(paper) {
 
   document.getElementById("pp-info-content").innerHTML = `
     <div class="pp-info-grid">
+      <div class="pp-field pp-field-full">
+        <label class="pp-label">Alias
+          <span style="color:var(--text-dim);font-size:.55rem"> — shown on graph instead of title when set</span>
+        </label>
+        <input class="pp-input" id="ppi-alias" value="${esc(paper.alias ?? "")}" placeholder="Short label for the graph node…">
+      </div>
+
       <div class="pp-field">
         <label class="pp-label">Year</label>
         <input class="pp-input" id="ppi-year" type="number" value="${paper.year}">
@@ -355,6 +362,7 @@ function renderInfoTab(paper) {
       const year  = Number(document.getElementById("ppi-year").value)  || paper.year;
       const venue = document.getElementById("ppi-venue").value.trim();
 
+      const alias = document.getElementById("ppi-alias").value.trim() || null;
       const rawTags = document.getElementById("ppi-tags").value.trim();
       const hashtags = rawTags
         ? rawTags.split(/[\s,]+/).map(t => t.trim()).filter(Boolean)
@@ -377,8 +385,16 @@ function renderInfoTab(paper) {
       }
 
       await invoke("update_paper_core", { id: paper.id, venue, year });
+      await invoke("save_alias",        { id: paper.id, alias });
       await invoke("set_tags",          { id: paper.id, tags: hashtags });
       await invoke("set_attributes",    { id: paper.id, attributes });
+
+      // Update alias on the graph node immediately
+      const node = state.nodes?.find(n => n.id === paper.id);
+      if (node) node.alias = alias;
+      paper.alias = alias;
+      const cachedPaper = getPapersCache().find(p => p.id === paper.id);
+      if (cachedPaper) cachedPaper.alias = alias;
 
       // compute new embedding for modification 
       if (window.LitAtlas?.isHfEnabled?.()){

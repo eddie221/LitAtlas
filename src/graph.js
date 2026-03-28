@@ -176,6 +176,7 @@ function adaptPaper(r) {
   return {
     id:         Number(r.id),            // SQLite rowid → JS number
     title:      r.title      ?? "",
+    alias:      r.alias      ?? null,
     venue:      r.venue      ?? "",
     year:       Number(r.year ?? 0),
     notes:      r.notes      ?? null,
@@ -198,40 +199,28 @@ function adaptEdge(r) {
 }
 
 // ── Loading overlay ───────────────────────────────────────────────────────────
+// #pg-loading is declared statically in index.html so its CSS (including
+// @keyframes _pg-spin) is guaranteed parsed before any JS runs — this is the
+// key difference vs. build mode where styles.css may not yet be fetched when
+// graph.js first executes.
 function _overlayEl() {
-  let el = document.getElementById("pg-loading");
-  if (!el) {
-    el = document.createElement("div");
-    el.id = "pg-loading";
-    Object.assign(el.style, {
-      position: "fixed", inset: "0", zIndex: "9999",
-      background: "rgba(10,12,16,0.97)",
-      display: "flex", flexDirection: "column",
-      alignItems: "center", justifyContent: "center", gap: "18px",
-      fontFamily: "'Space Mono',monospace", color: "#e8eaf0",
-      textAlign: "center", whiteSpace: "pre-wrap", padding: "40px",
-    });
-    document.body.appendChild(el);
-  }
-  return el;
+  // Always return the static element; never create dynamically.
+  return document.getElementById("pg-loading");
 }
 
 function showOverlay(msg) {
   const el = _overlayEl();
+  if (!el) return;
   el.innerHTML = `
-    <div style="font-family:'DM Serif Display',serif;font-size:1.6rem;color:#c8ff00">
-      Paper<span style="color:#e8eaf0">Graph</span></div>
-    <div style="font-size:.75rem;color:#6b7280;max-width:380px;line-height:1.8">${msg}</div>
-    <div style="width:36px;height:36px;border:2px solid #1e2230;
-                border-top-color:#c8ff00;border-radius:50%;
-                animation:_spin .75s linear infinite"></div>
-    <style>@keyframes _spin{to{transform:rotate(360deg)}}</style>`;
-  el.style.display = "flex";
+    <div class="pg-title">Paper<span>Graph</span></div>
+    <div class="pg-msg">${msg}</div>
+    <div class="pg-spinner"></div>`;
+  el.classList.add("visible");
 }
 
 function hideOverlay() {
-  const el = document.getElementById("pg-loading");
-  if (el) el.style.display = "none";
+  const el = _overlayEl();
+  if (el) el.classList.remove("visible");
 }
 
 // ── Venv setup overlay ────────────────────────────────────────────────────────
@@ -271,12 +260,11 @@ function _renderVenvOverlay() {
     const done    = _venvStepsDone.has(s.key) && s.key !== _venvCurrentStep;
     const current = s.key === _venvCurrentStep;
     const icon    = done    ? "✓"
-                  : current ? `<span class="venv-spin"></span>`
+                  : current ? `<span class="pg-venv-spin"></span>`
                   : "·";
-    const color   = done ? "#c8ff00" : current ? "#e8eaf0" : "#3a3f50";
-    return `<div style="display:flex;align-items:center;gap:10px;color:${color};
-                         font-size:.7rem;padding:3px 0">
-              <span style="width:14px;text-align:center;line-height:1">${icon}</span>
+    const state   = done ? "done" : current ? "current" : "pending";
+    return `<div class="pg-step-row pg-step-row--${state}">
+              <span class="pg-step-icon">${icon}</span>
               <span>${s.label}</span>
             </div>`;
   }).join("");
@@ -284,71 +272,31 @@ function _renderVenvOverlay() {
   // Terminal log box — only shown when pip output exists.
   const showTerminal = _pipLog.length > 0;
   const logHTML = showTerminal
-    ? `<div id="venv-terminal">
-         <div id="venv-terminal-inner">${
+    ? `<div id="pg-venv-terminal">
+         <div id="pg-venv-terminal-inner">${
            _pipLog.map(({ text, cls }) =>
-             `<div class="venv-log-line ${cls}">${
+             `<div class="pg-log-line ${cls.replace("venv-log-", "pg-log-")}">${
                text.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
              }</div>`
            ).join("")
-         }<span class="venv-cursor"></span></div>
+         }<span class="pg-log-cursor"></span></div>
        </div>`
     : "";
 
   const el = _overlayEl();
   el.innerHTML = `
-    <div style="font-family:'DM Serif Display',serif;font-size:1.6rem;color:#c8ff00">
-      Paper<span style="color:#e8eaf0">Graph</span></div>
-    <div style="font-size:.8rem;color:#9ca3af;margin-bottom:4px">
-      Setting up similarity engine — first launch only</div>
-    <div style="background:#0d0f14;border:1px solid #1e2230;border-radius:8px;
-                padding:14px 20px;min-width:300px;text-align:left">
-      ${stepRows}
-    </div>
-    <div style="font-size:.65rem;color:#6b7280;max-width:340px;line-height:1.7;
-                margin-top:4px">${_venvDetail}</div>
+    <div class="pg-title">Paper<span>Graph</span></div>
+    <div class="pg-subtitle">Setting up similarity engine — first launch only</div>
+    <div class="pg-steps-box">${stepRows}</div>
+    <div class="pg-step-detail">${_venvDetail}</div>
     ${logHTML}
-    <div style="width:28px;height:28px;border:2px solid #1e2230;
-                border-top-color:#c8ff00;border-radius:50%;
-                animation:_spin .75s linear infinite"></div>
-    <style>
-      @keyframes _spin  { to { transform: rotate(360deg); } }
-      @keyframes _blink { 0%,100% { opacity:1; } 50% { opacity:0; } }
-      .venv-spin {
-        display:inline-block; width:10px; height:10px; border-radius:50%;
-        border:2px solid #1e2230; border-top-color:#c8ff00;
-        animation:_spin .75s linear infinite; vertical-align:middle;
-      }
-      #venv-terminal {
-        width:380px; max-width:84vw;
-        background:#050608; border:1px solid #141618; border-radius:6px;
-        overflow:hidden; margin-top:2px;
-      }
-      #venv-terminal-inner {
-        max-height:130px; overflow-y:auto; padding:8px 10px;
-        scroll-behavior:smooth; font-family:'Space Mono',monospace;
-      }
-      #venv-terminal-inner::-webkit-scrollbar { width:3px; }
-      #venv-terminal-inner::-webkit-scrollbar-thumb { background:#1a2a1a; border-radius:2px; }
-      .venv-log-line {
-        font-size:9px; line-height:1.65; color:#2e4a36;
-        white-space:pre-wrap; word-break:break-all;
-      }
-      .venv-log-ok   { color:#00c878; }
-      .venv-log-warn { color:#c8a000; }
-      .venv-log-err  { color:#c84040; }
-      .venv-cursor {
-        display:inline-block; width:6px; height:10px;
-        background:#00c87880; vertical-align:text-bottom;
-        border-radius:1px; animation:_blink 1s step-end infinite;
-      }
-    </style>`;
-  el.style.display = "flex";
+    <div class="pg-spinner-sm"></div>`;
+  el.classList.add("visible");
 
   // Auto-scroll terminal to bottom after render.
   if (showTerminal) {
     requestAnimationFrame(() => {
-      const inner = document.getElementById("venv-terminal-inner");
+      const inner = document.getElementById("pg-venv-terminal-inner");
       if (inner) inner.scrollTop = inner.scrollHeight;
     });
   }
@@ -382,29 +330,20 @@ let _embedTitle    = "";
 
 function _showEmbeddingOverlay() {
   const pct     = _embedTotal > 0 ? Math.round((_embedIndex / _embedTotal) * 100) : 0;
-  const barFill = `width:${pct}%`;
   const el      = _overlayEl();
   el.innerHTML = `
-    <div style="font-family:'DM Serif Display',serif;font-size:1.6rem;color:#c8ff00">
-      Paper<span style="color:#e8eaf0">Graph</span></div>
-    <div style="font-size:.8rem;color:#9ca3af;margin-bottom:4px">
-      Re-encoding papers for similarity search</div>
-    <div style="background:#0d0f14;border:1px solid #1e2230;border-radius:8px;
-                padding:14px 20px;min-width:300px;text-align:left">
-      <div style="font-size:.68rem;color:#e8eaf0;margin-bottom:8px;white-space:nowrap;
-                  overflow:hidden;text-overflow:ellipsis;max-width:280px"
+    <div class="pg-title">Paper<span>Graph</span></div>
+    <div class="pg-subtitle">Re-encoding papers for similarity search</div>
+    <div class="pg-bar-box">
+      <div class="pg-bar-title"
            title="${_embedTitle.replace(/"/g,'&quot;')}">${_embedTitle || "Starting…"}</div>
-      <div style="background:#1a1d26;border-radius:4px;height:6px;overflow:hidden">
-        <div style="background:#c8ff00;height:100%;border-radius:4px;transition:width .2s;${barFill}"></div>
+      <div class="pg-bar-track">
+        <div class="pg-bar-fill" style="width:${pct}%"></div>
       </div>
-      <div style="font-size:.62rem;color:#6b7280;margin-top:6px;text-align:right">
-        ${_embedIndex} / ${_embedTotal}</div>
+      <div class="pg-bar-count">${_embedIndex} / ${_embedTotal}</div>
     </div>
-    <div style="width:28px;height:28px;border:2px solid #1e2230;
-                border-top-color:#c8ff00;border-radius:50%;
-                animation:_spin .75s linear infinite"></div>
-    <style>@keyframes _spin{to{transform:rotate(360deg)}}</style>`;
-  el.style.display = "flex";
+    <div class="pg-spinner-sm"></div>`;
+  el.classList.add("visible");
 }
 
 if (tauriListen) {
@@ -1125,7 +1064,8 @@ function drawNode(n, edgeHighlight = false) {
   ctx.lineWidth   = (sel || edgeHighlight) ? 2.5 : 1.5;
   ctx.stroke();
 
-  const label = n.title.length > 18 ? n.title.slice(0, 16) + "…" : n.title;
+  const display = n.alias || n.title;
+  const label = display.length > 18 ? display.slice(0, 16) + "…" : display;
   ctx.fillStyle    = (sel || edgeHighlight) ? "#fff" : "#c8d0e0";
   const _fontScale = getUiFontSize() / _UI_FONT_DEFAULT;
   ctx.font         = `${(sel || edgeHighlight) ? "bold " : ""}${Math.max(16, r * 0.42 * _fontScale)}px 'Space Mono'`;

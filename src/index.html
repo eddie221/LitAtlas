@@ -59,9 +59,23 @@
                      U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
     }
   </style>
+  <!-- Preload ensures styles.css is fetched at highest priority so its
+       @keyframes and #pg-loading rules are parsed before any deferred
+       JS module executes — including in Tauri's asset: protocol. -->
+  <link rel="preload" href="styles.css" as="style" />
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
+
+  <!-- ══════════════════════════════════════════════════
+       LOADING OVERLAY
+       Declared statically so its CSS (above) is parsed before
+       any JS module runs — avoids the missing @keyframes in build mode.
+  ══════════════════════════════════════════════════ -->
+  <div id="pg-loading">
+    <!-- Content is stamped by showOverlay() / _renderVenvOverlay() /
+         _showEmbeddingOverlay() in graph.js -->
+  </div>
 
   <!-- ══════════════════════════════════════════════════
        LEFT PROJECT SIDEBAR

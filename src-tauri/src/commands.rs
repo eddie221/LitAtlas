@@ -95,6 +95,12 @@ pub async fn save_notes(s: State<'_, AppState>, id: i64, notes: String) -> CmdRe
 }
 
 #[tauri::command]
+pub async fn save_alias(s: State<'_, AppState>, id: i64, alias: Option<String>) -> CmdResult<()> {
+    logger::log_call("save_alias");
+    db::save_alias(&s.pool(), id, alias.as_deref()).await.map_err(map_log_err!("save_alias"))
+}
+
+#[tauri::command]
 pub async fn save_pdf_path(s: State<'_, AppState>, id: i64, path: Option<String>) -> CmdResult<()> {
     logger::log_call("save_pdf_path");
     db::save_pdf_path(&s.pool(), id, path.as_deref()).await.map_err(map_log_err!("save_pdf_path"))

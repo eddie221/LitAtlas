@@ -99,6 +99,49 @@ fn seed_db(pool: &SqlitePool) {
     });
 }
 
+/// Incremental migrations for existing databases.
+/// Called after seed_db() — only adds columns/recreates views that are missing.
+fn run_migrations(pool: &SqlitePool) {
+    tauri::async_runtime::block_on(async {
+        // Add alias column if it doesn't exist yet (idempotent).
+        let _ = sqlx::query(
+            "ALTER TABLE papers ADD COLUMN alias TEXT DEFAULT NULL"
+        ).execute(pool).await;
+
+        // Recreate v_papers so it always includes all current columns.
+        let _ = sqlx::query("DROP VIEW IF EXISTS v_papers").execute(pool).await;
+        let _ = sqlx::query(
+            "CREATE VIEW v_papers AS
+             SELECT
+                 p.id, p.title, p.alias, p.venue, p.year, p.notes, p.pdf_path,
+                 p.created_at, p.updated_at,
+                 COALESCE(
+                   (SELECT GROUP_CONCAT(pa.name, ', ')
+                    FROM (SELECT name FROM paper_authors
+                          WHERE paper_id = p.id ORDER BY position) pa),
+                   ''
+                 ) AS authors,
+                 COALESCE(
+                   (SELECT GROUP_CONCAT('#' || h.name, ',')
+                    FROM (SELECT h2.name FROM hashtags h2
+                          JOIN paper_tags pt ON pt.tag_id = h2.id
+                          WHERE pt.paper_id = p.id ORDER BY h2.name) h),
+                   ''
+                 ) AS hashtags,
+                 COALESCE(
+                   (SELECT '[' || GROUP_CONCAT(
+                               json_object('key', attr_key, 'value', attr_value, 'order', display_order)
+                             , ',') || ']'
+                    FROM (SELECT attr_key, attr_value, display_order FROM paper_attributes
+                          WHERE paper_id = p.id ORDER BY display_order, attr_key)),
+                   '[]'
+                 ) AS attributes_json
+             FROM papers p
+             ORDER BY p.year ASC, p.id ASC"
+        ).execute(pool).await;
+    });
+}
+
 pub fn open_project(projects_dir: &PathBuf, slug: &str) -> SqlitePool {
     let proj = projects_dir.join(slug);
     std::fs::create_dir_all(&proj).unwrap();
@@ -108,6 +151,7 @@ pub fn open_project(projects_dir: &PathBuf, slug: &str) -> SqlitePool {
         db::create_pool(&db_path.to_string_lossy())
     ).expect("Failed to open DB");
     seed_db(&pool);
+    run_migrations(&pool);
     pool
 }
 
@@ -167,7 +211,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             // Papers
             get_papers, get_paper, add_paper, delete_paper,
-            update_paper_core, save_notes, save_pdf_path,
+            update_paper_core, save_notes, save_alias, save_pdf_path,
             // Authors / tags / attributes
             set_authors,
             get_hashtags, set_tags,

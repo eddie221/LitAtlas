@@ -1328,6 +1328,38 @@
   gap: 8px;
   margin-top: 6px;
 }
+
+
+@keyframes _spin  { to { transform: rotate(360deg); } }
+@keyframes _blink { 0%,100% { opacity:1; } 50% { opacity:0; } }
+.venv-spin {
+  display:inline-block; width:10px; height:10px; border-radius:50%;
+  border:2px solid #1e2230; border-top-color:#c8ff00;
+  animation:_spin .75s linear infinite; vertical-align:middle;
+}
+#venv-terminal {
+  width:380px; max-width:84vw;
+  background:#050608; border:1px solid #141618; border-radius:6px;
+  overflow:hidden; margin-top:2px;
+}
+#venv-terminal-inner {
+  max-height:130px; overflow-y:auto; padding:8px 10px;
+  scroll-behavior:smooth; font-family:'Space Mono',monospace;
+}
+#venv-terminal-inner::-webkit-scrollbar { width:3px; }
+#venv-terminal-inner::-webkit-scrollbar-thumb { background:#1a2a1a; border-radius:2px; }
+.venv-log-line {
+  font-size:9px; line-height:1.65; color:#2e4a36;
+  white-space:pre-wrap; word-break:break-all;
+}
+.venv-log-ok   { color:#00c878; }
+.venv-log-warn { color:#c8a000; }
+.venv-log-err  { color:#c84040; }
+.venv-cursor {
+  display:inline-block; width:6px; height:10px;
+  background:#00c87880; vertical-align:text-bottom;
+  border-radius:1px; animation:_blink 1s step-end infinite;
+}
 /* ═══════════════════════════════════════════════════════
    SIMILARITY SETTINGS PANEL
 ══════════════════════════════════════════════════════ */
@@ -2380,4 +2412,187 @@
 }
 .tag-ac-rest {
   color: var(--accent, #c8ff00);
+}
+
+/* ═══════════════════════════════════════════════════════════
+   LOADING OVERLAY  (#pg-loading)
+   Declared here (not inline in index.html) so a single
+   stylesheet covers all overlay states.  The <link> tag is
+   given rel="preload" in index.html so styles.css is fetched
+   at highest priority before any deferred JS module runs.
+═══════════════════════════════════════════════════════════ */
+
+@keyframes _pg-spin  { to   { transform: rotate(360deg); } }
+@keyframes _pg-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+
+#pg-loading {
+  position: fixed; inset: 0; z-index: 9999;
+  background: rgba(10,12,16,0.97);
+  display: none;              /* hidden by default; JS adds .visible */
+  flex-direction: column;
+  align-items: center; justify-content: center; gap: 18px;
+  font-family: 'Space Mono', monospace;
+  color: #e8eaf0;
+  text-align: center;
+  white-space: pre-wrap;
+  padding: 40px;
+}
+#pg-loading.visible { display: flex; }
+
+/* ── Title ("PaperGraph") ─────────────────────────────────────────────────── */
+.pg-title {
+  font-family: 'DM Serif Display', serif;
+  font-size: 1.6rem;
+  color: #c8ff00;
+}
+.pg-title span { color: #e8eaf0; }
+
+/* ── Sub-heading and body text ────────────────────────────────────────────── */
+.pg-subtitle {
+  font-size: .8rem;
+  color: #9ca3af;
+  margin-bottom: 4px;
+}
+.pg-msg {
+  font-size: .75rem;
+  color: #6b7280;
+  max-width: 380px;
+  line-height: 1.8;
+}
+
+/* ── Spinners ─────────────────────────────────────────────────────────────── */
+.pg-spinner {
+  width: 36px; height: 36px;
+  border: 2px solid #1e2230;
+  border-top-color: #c8ff00;
+  border-radius: 50%;
+  animation: _pg-spin .75s linear infinite;
+  flex-shrink: 0;
+}
+.pg-spinner-sm {
+  width: 28px; height: 28px;
+  border: 2px solid #1e2230;
+  border-top-color: #c8ff00;
+  border-radius: 50%;
+  animation: _pg-spin .75s linear infinite;
+  flex-shrink: 0;
+}
+
+/* ── Venv step list ───────────────────────────────────────────────────────── */
+.pg-steps-box {
+  background: #0d0f14;
+  border: 1px solid #1e2230;
+  border-radius: 8px;
+  padding: 14px 20px;
+  min-width: 300px;
+  text-align: left;
+}
+.pg-step-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: .7rem;
+  padding: 3px 0;
+}
+.pg-step-row--done    { color: #c8ff00; }
+.pg-step-row--current { color: #e8eaf0; }
+.pg-step-row--pending { color: #3a3f50; }
+.pg-step-icon {
+  width: 14px;
+  text-align: center;
+  line-height: 1;
+}
+.pg-step-detail {
+  font-size: .65rem;
+  color: #6b7280;
+  max-width: 340px;
+  line-height: 1.7;
+  margin-top: 4px;
+}
+
+/* Inline spinner used for the currently-active venv step */
+.pg-venv-spin {
+  display: inline-block;
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  border: 2px solid #1e2230;
+  border-top-color: #c8ff00;
+  animation: _pg-spin .75s linear infinite;
+  vertical-align: middle;
+}
+
+/* ── Embedding progress bar ───────────────────────────────────────────────── */
+.pg-bar-box {
+  background: #0d0f14;
+  border: 1px solid #1e2230;
+  border-radius: 8px;
+  padding: 14px 20px;
+  min-width: 300px;
+  text-align: left;
+}
+.pg-bar-title {
+  font-size: .68rem;
+  color: #e8eaf0;
+  margin-bottom: 8px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 280px;
+}
+.pg-bar-track {
+  background: #1a1d26;
+  border-radius: 4px;
+  height: 6px;
+  overflow: hidden;
+}
+.pg-bar-fill {
+  background: #c8ff00;
+  height: 100%;
+  border-radius: 4px;
+  transition: width .2s;
+}
+.pg-bar-count {
+  font-size: .62rem;
+  color: #6b7280;
+  margin-top: 6px;
+  text-align: right;
+}
+
+/* ── Pip terminal log ─────────────────────────────────────────────────────── */
+#pg-venv-terminal {
+  width: 380px; max-width: 84vw;
+  background: #050608;
+  border: 1px solid #141618;
+  border-radius: 6px;
+  overflow: hidden;
+  margin-top: 2px;
+}
+#pg-venv-terminal-inner {
+  max-height: 130px;
+  overflow-y: auto;
+  padding: 8px 10px;
+  scroll-behavior: smooth;
+  font-family: 'Space Mono', monospace;
+}
+#pg-venv-terminal-inner::-webkit-scrollbar { width: 3px; }
+#pg-venv-terminal-inner::-webkit-scrollbar-thumb { background: #1a2a1a; border-radius: 2px; }
+
+.pg-log-line {
+  font-size: 9px;
+  line-height: 1.65;
+  color: #2e4a36;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.pg-log-ok   { color: #00c878; }
+.pg-log-warn { color: #c8a000; }
+.pg-log-err  { color: #c84040; }
+
+.pg-log-cursor {
+  display: inline-block;
+  width: 6px; height: 10px;
+  background: #00c87880;
+  vertical-align: text-bottom;
+  border-radius: 1px;
+  animation: _pg-blink 1s step-end infinite;
 }

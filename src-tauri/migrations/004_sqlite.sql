@@ -36,6 +36,7 @@ DROP TABLE IF EXISTS papers;
 CREATE TABLE papers (
   id         INTEGER  NOT NULL PRIMARY KEY,  -- rowid alias, auto-increments
   title      TEXT     NOT NULL,
+  alias      TEXT              DEFAULT NULL,
   venue      TEXT     NOT NULL DEFAULT '',
   year       INTEGER  NOT NULL DEFAULT 0,
   notes      TEXT              DEFAULT NULL,
@@ -131,6 +132,7 @@ CREATE VIEW v_papers AS
 SELECT
     p.id,
     p.title,
+    p.alias,
     p.venue,
     p.year,
     p.notes,
