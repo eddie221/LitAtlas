@@ -156,7 +156,8 @@
       color: var(--text-primary);
       border-color: var(--accent2, #00d4ff);
     }
-    .ctrl-icon-btn svg { flex-shrink: 0; }
+    .ctrl-icon-btn svg,
+    .ctrl-icon-btn i { flex-shrink: 0; }
     .ctrl-icon-label {
       font-family: 'Space Mono', monospace;
       font-size: 0.55rem;

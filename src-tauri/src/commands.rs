@@ -1442,6 +1442,50 @@ pub fn hf_download_model(
 // This means embeddings persist across PDF replacements and don't require a
 // PDF to exist at all.
 
+/// Current UTC time as an ISO 8601 string, e.g. "2026-03-28T12:34:56.789Z".
+/// Used to stamp `written_at` inside embedding.json so staleness can be
+/// detected by comparing against `papers.updated_at`.
+fn chrono_now_iso() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let secs  = ms / 1000;
+    let millis = ms % 1000;
+    // Decompose unix seconds into calendar fields (no external crate needed).
+    let (y, mo, d, h, mi, s) = unix_secs_to_ymd_hms(secs as u64);
+    format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}.{millis:03}Z")
+}
+
+fn unix_secs_to_ymd_hms(secs: u64) -> (u64, u64, u64, u64, u64, u64) {
+    let h  = (secs / 3600) % 24;
+    let mi = (secs / 60)   % 60;
+    let s  = secs % 60;
+    let days = secs / 86400;
+    // Shift epoch to 1 Mar 0000 for easy leap-year math (Gregorian).
+    let z   = days + 719468;
+    let era = z / 146097;
+    let doe = z % 146097;
+    let yoe = (doe - doe/1460 + doe/36524 - doe/146096) / 365;
+    let y   = yoe + era * 400;
+    let doy = doe - (365*yoe + yoe/4 - yoe/100);
+    let mp  = (5*doy + 2) / 153;
+    let d   = doy - (153*mp + 2)/5 + 1;
+    let mo  = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y   = if mo <= 2 { y + 1 } else { y };
+    (y, mo, d, h, mi, s)
+}
+
+/// Returns true when the paper has been updated after the embedding was written,
+/// or when the embedding predates this staleness-tracking feature (no `written_at`).
+fn is_embedding_stale(paper_updated_at: &str, cache: &serde_json::Value) -> bool {
+    match cache["written_at"].as_str() {
+        Some(written) => paper_updated_at > written, // ISO 8601 lexicographic compare
+        None          => true,                        // old format — treat as stale
+    }
+}
+
 fn embedding_path_for_paper(s: &AppState, paper_id: i64) -> std::path::PathBuf {
     // Primary: alongside the PDF directory
     let pdf_sibling = s.pdfs_dir().join(paper_id.to_string()).join("embedding.json");
@@ -1617,10 +1661,12 @@ pub fn hf_compute_paper_embedding(
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("Cannot create embedding dir: {e}"))?;
     }
+    let written_at = chrono_now_iso();
     let payload = serde_json::json!({
         "model":         model,
         "fields":        fields,
         "field_vectors": field_vectors,
+        "written_at":    written_at,
         // NOTE: no "weights" key, no "vector" key — composite recomposed at query time.
     });
     std::fs::write(&path, serde_json::to_string(&payload).map_err(|e| e.to_string())?)
@@ -1735,7 +1781,28 @@ pub fn hf_compute_all_embeddings(
         }
     }).collect();
 
-    let total = papers.len();
+    // skip_fresh: when true, papers whose embedding is already up-to-date are
+    // skipped — only stale or missing embeddings are re-encoded.
+    let skip_fresh = config["skip_fresh"].as_bool().unwrap_or(false);
+
+    // Pre-filter when skip_fresh is requested: pair each paper with its path,
+    // keeping only those that are actually stale. This lets us report the true
+    // work count to JS before spawning the thread.
+    let work: Vec<(crate::db::PaperFull, std::path::PathBuf)> = papers
+        .into_iter()
+        .zip(embedding_paths.into_iter())
+        .filter(|(paper, emb_path)| {
+            if !skip_fresh { return true; }
+            // Fresh = embedding exists, model+fields match, AND written after last edit.
+            match read_embedding_cache(emb_path) {
+                Some(ref cache) if embedding_cache_matches(cache, &model, &fields)
+                    && !is_embedding_stale(&paper.updated_at, cache) => false,
+                _ => true,
+            }
+        })
+        .collect();
+
+    let total = work.len();
 
     // Emit "started" immediately so the JS overlay appears before the thread runs.
     let _ = app.emit("embedding://progress", serde_json::json!({
@@ -1757,7 +1824,7 @@ pub fn hf_compute_all_embeddings(
     std::thread::spawn(move || {
         let mut computed = 0usize;
 
-        for (index, (paper, emb_path)) in papers.iter().zip(embedding_paths.iter()).enumerate() {
+        for (index, (paper, emb_path)) in work.iter().enumerate() {
             let _ = app.emit("embedding://progress", serde_json::json!({
                 "paper_id": paper.id,
                 "title":    &paper.title,
@@ -1801,10 +1868,12 @@ pub fn hf_compute_all_embeddings(
             if let Some(parent) = emb_path.parent() {
                 std::fs::create_dir_all(parent).ok();
             }
+            let written_at = chrono_now_iso();
             let payload = serde_json::json!({
                 "model":         &model,
                 "fields":        &fields,
                 "field_vectors": field_vectors,
+                "written_at":    written_at,
             });
             if let Err(e) = serde_json::to_string(&payload)
                 .map_err(|e| e.to_string())
@@ -1862,16 +1931,16 @@ pub fn hf_compute_edges_from_cache(
     let max_edges = config["max_edges"].as_u64().unwrap_or(7) as usize;
 
     // Build (paper_json, composite_vector) pairs.
-    // Papers without a cache file are given an empty vector and will produce
-    // no edges — callers should ensure embeddings exist before calling this.
+    // Papers without a cache file, with a stale cache, or with a mismatched
+    // model/fields are given None and produce no edges.
     let mut vecs: Vec<Option<Vec<f64>>> = Vec::with_capacity(papers.len());
     for paper in &papers {
         let id = match paper["id"].as_i64() { Some(v) => v, None => { vecs.push(None); continue; } };
+        let updated_at = paper["updated_at"].as_str().unwrap_or("");
         let path = embedding_path_for_paper(&s, id);
-        // println!("{}", path.display());
-        // println!("{:?}", read_embedding_cache(&path).filter(|cache| embedding_cache_in_matches(cache, model, &fields)));
         let composite = read_embedding_cache(&path)
             .filter(|cache| embedding_cache_in_matches(cache, model, &fields))
+            .filter(|cache| !is_embedding_stale(updated_at, cache))
             .and_then(|cache| recompose_embedding(&cache["field_vectors"], &fields, &weights));
         vecs.push(composite);
     }

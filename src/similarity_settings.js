@@ -480,7 +480,7 @@ async function _startEmbeddingCache(body, cfg) {
       if (bar)   bar.style.width    = `${pct}%`;
       if (count) count.textContent  = `${payload.index + 1} / ${payload.total}`;
       if (paper) {
-        const icon = payload.skipped ? "↩" : "✓";
+        const icon = payload.skipped ? '<i class="bi bi-arrow-return-left"></i>' : '<i class="bi bi-check"></i>';
         const dim  = payload.skipped ? "color:var(--text-dim)" : "color:var(--accent)";
         paper.innerHTML = `<span style="${dim}">${icon}</span> ${payload.title ?? ""}`;
       }

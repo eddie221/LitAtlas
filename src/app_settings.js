@@ -179,7 +179,7 @@ function _buildHTML(cfg, scriptInfo, customModels, currentFontPx = 18) {
     <!-- ── Section 3: Plugin Contract Reference ── -->
     <div class="app-cfg-section">
       <button class="app-cfg-toggle" id="app-cfg-contract-toggle">
-        Plugin Contract Reference <span class="app-cfg-toggle-icon">▶</span>
+        Plugin Contract Reference <span class="app-cfg-toggle-icon"><i class="bi bi-caret-right-fill"></i></span>
       </button>
       <div id="app-cfg-contract-body" class="app-cfg-contract hidden">
         <p class="app-cfg-hint">Your script can define either or both of these functions:</p>
@@ -356,7 +356,7 @@ function _wireEvents(body, cfg, scriptInfo, customModels) {
     const contractBody = body.querySelector("#app-cfg-contract-body");
     const icon         = body.querySelector(".app-cfg-toggle-icon");
     contractBody?.classList.toggle("hidden");
-    if (icon) icon.textContent = contractBody?.classList.contains("hidden") ? "▶" : "▼";
+    if (icon) icon.innerHTML = contractBody?.classList.contains("hidden") ? '<i class="bi bi-caret-right-fill"></i>' : '<i class="bi bi-caret-down-fill"></i>';
   });
 }
 

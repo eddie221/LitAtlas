@@ -99,7 +99,7 @@ function renderList() {
     // Delete button
     const delBtn = document.createElement("button");
     delBtn.className = "proj-del";
-    delBtn.textContent = "✕";
+    delBtn.innerHTML = '<i class="bi bi-x"></i>';
     delBtn.title = "Delete project";
     delBtn.addEventListener("click", e => { e.stopPropagation(); confirmDelete(p); });
 
@@ -222,6 +222,6 @@ toggleBtn.addEventListener("click", () => {
   _open = !_open;
   sidebar.classList.toggle("collapsed", !_open);
   document.body.classList.toggle("sidebar-collapsed", !_open);
-  toggleBtn.textContent = _open ? "‹" : "›";
+  toggleBtn.innerHTML = _open ? '<i class="bi bi-chevron-left"></i>' : '<i class="bi bi-chevron-right"></i>';
   toggleBtn.title       = _open ? "Collapse sidebar" : "Expand sidebar";
 });

@@ -290,13 +290,12 @@ function _jsEdgesForNew(np, existing, thr, max) {
 // Embeddings are always pre-computed and stored on disk BEFORE similarity is
 // calculated.  The Python sidecar is NEVER called during edge computation.
 //
-// Three triggers write embeddings to disk:
-//   • Adding a new paper      → hf_compute_paper_embedding (graph.js)
-//   • Saving paper info edits → hf_compute_paper_embedding (paper-page.js)
-//   • Manual "Cache All"      → hf_compute_all_embeddings  (graph.js, Rust+Python)
+// Embeddings are written lazily: hf_compute_all_embeddings (with skip_fresh=true)
+// re-encodes only stale papers (updated_at > embedding written_at) before each
+// edge computation.  Papers without a fresh cached embedding are skipped.
 //
-// Similarity computation reads only from cached field_vectors — no sidecar fallback.
-// Papers without a cached embedding are silently skipped.
+// The only remaining eager trigger is after PDF upload (paper-page.js),
+// which pre-warms the cache while the directory already exists.
 //
 // Recompute flow (triggered by the "Recompute Graph" button):
 //   Step 1 — graph.js calls hf_compute_all_embeddings (Rust+Python):

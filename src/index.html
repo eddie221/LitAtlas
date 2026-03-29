@@ -64,6 +64,7 @@
        JS module executes — including in Tauri's asset: protocol. -->
   <link rel="preload" href="styles.css" as="style" />
   <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" />
 </head>
 <body>
 
@@ -91,16 +92,16 @@
     <div id="project-new-row" style="display:none">
       <input id="project-new-input" class="proj-input" placeholder="Project name…" />
       <div class="proj-new-actions">
-        <button id="project-new-confirm" class="proj-action-btn proj-confirm">✓</button>
-        <button id="project-new-cancel"  class="proj-action-btn proj-cancel">✕</button>
+        <button id="project-new-confirm" class="proj-action-btn proj-confirm"><i class="bi bi-check"></i></button>
+        <button id="project-new-cancel"  class="proj-action-btn proj-cancel"><i class="bi bi-x"></i></button>
       </div>
     </div>
 
-    <button id="project-new-btn">+ New Project</button>
+    <button id="project-new-btn"><i class="bi bi-plus"></i> New Project</button>
   </aside>
 
   <!-- ── SIDEBAR EDGE TOGGLE ── -->
-  <button id="sidebar-edge-toggle" title="Collapse sidebar">‹</button>
+  <button id="sidebar-edge-toggle" title="Collapse sidebar"><i class="bi bi-chevron-left"></i></button>
   <header id="header">
     <h1>Lit<span>Atlas</span></h1>
 
@@ -127,31 +128,27 @@
       <div class="ctrl-divider"></div>
 
       <!-- Graph actions -->
-      <button class="btn ctrl-action" id="btn-reset" title="Reset view">↺ Reset</button>
-      <button class="btn ctrl-primary" id="btn-new-paper" title="Add a new paper">+ Paper</button>
+      <button class="btn ctrl-action" id="btn-reset" title="Reset view"><i class="bi bi-arrow-counterclockwise"></i> Reset</button>
+      <button class="btn ctrl-primary" id="btn-new-paper" title="Add a new paper"><i class="bi bi-plus"></i> Paper</button>
 
       <div class="ctrl-divider"></div>
 
       <!-- Zoom inline -->
       <div class="ctrl-group ctrl-zoom">
-        <button class="zoom-btn" id="zoom-out"  title="Zoom out">−</button>
+        <button class="zoom-btn" id="zoom-out"  title="Zoom out"><i class="bi bi-dash"></i></button>
         <button class="zoom-btn" id="zoom-fit"  title="Fit graph">fit</button>
-        <button class="zoom-btn" id="zoom-in"   title="Zoom in">+</button>
+        <button class="zoom-btn" id="zoom-in"   title="Zoom in"><i class="bi bi-plus"></i></button>
       </div>
 
       <div class="ctrl-divider"></div>
 
       <!-- Settings icon buttons -->
       <button class="ctrl-icon-btn" id="btn-sim-settings" title="Similarity Settings">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
-        </svg>
+        <i class="bi bi-sliders" style="font-size:14px"></i>
         <span class="ctrl-icon-label">Similarity</span>
       </button>
       <button class="ctrl-icon-btn" id="btn-app-settings" title="App Settings">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M12 2H2v10l9.29 9.29c.94.94 2.48.94 3.42 0l6.58-6.58c.94-.94.94-2.48 0-3.42L12 2z"/><line x1="7" y1="7" x2="7.01" y2="7"/>
-        </svg>
+        <i class="bi bi-tag" style="font-size:14px"></i>
         <span class="ctrl-icon-label">App</span>
       </button>
 
@@ -174,7 +171,7 @@
     <div style="display:flex;align-items:center;justify-content:space-between;flex-shrink:0">
       <button id="pp-delete-btn-overview" class="pp-btn pp-btn-danger"
               style="font-size:.6rem;padding:4px 10px">Delete Paper</button>
-      <button class="dp-close" id="close-panel">✕</button>
+      <button class="dp-close" id="close-panel"><i class="bi bi-x"></i></button>
     </div>
 
     <div id="detail-tag">— Research Paper</div>
@@ -184,7 +181,7 @@
       <span class="node-color-label">Node color</span>
       <div id="node-color-swatches"></div>
       <input type="color" id="node-color-custom" title="Custom color" />
-      <button id="node-color-reset" title="Reset to default">↺</button>
+      <button id="node-color-reset" title="Reset to default"><i class="bi bi-arrow-counterclockwise"></i></button>
     </div>
     <div id="detail-title">—</div>
     <div id="detail-authors">—</div>
@@ -205,10 +202,10 @@
         <span id="sidebar-pdf-status"></span>
       </div>
       <div id="sidebar-pdf-dropzone">
-        <div class="pp-drop-icon">📄</div>
+        <div class="pp-drop-icon"><i class="bi bi-file-earmark"></i></div>
         <div style="font-size:.68rem;text-align:center;color:var(--text-secondary);line-height:1.6">
           No PDF attached.<br>
-          <span style="color:var(--accent2);cursor:pointer" id="sidebar-pdf-open-page">Open Paper Page ↗</span>
+          <span style="color:var(--accent2);cursor:pointer" id="sidebar-pdf-open-page">Open Paper Page <i class="bi bi-box-arrow-up-right"></i></span>
           to upload one.
         </div>
       </div>
@@ -222,7 +219,7 @@
       <div id="attributes-meta"></div>
     </div>
 
-    <button id="dp-open-page">Open Paper Page ↗</button>
+    <button id="dp-open-page">Open Paper Page <i class="bi bi-box-arrow-up-right"></i></button>
 
     <div id="detail-connections-similar" class="detail-section">
       <div class="connections-label">Similar Papers</div>
@@ -245,7 +242,7 @@
     </div>
     <div id="et-papers">
       <div class="et-paper" id="et-paper-a"></div>
-      <div class="et-divider">↔</div>
+      <div class="et-divider"><i class="bi bi-arrows-left-right"></i></div>
       <div class="et-paper" id="et-paper-b"></div>
     </div>
     <div id="et-overlap">
@@ -280,7 +277,7 @@
 
   <!-- ── SIMILARITY METHOD BADGE ── -->
   <div id="sim-method-badge">
-    <span id="sim-method-icon">⬡</span>
+    <span id="sim-method-icon"><i class="bi bi-hexagon"></i></span>
     <span id="sim-method-label">cosine similarity</span>
   </div>
 
@@ -315,7 +312,7 @@
           <div id="pp-main-authors">—</div>
         </div>
         <div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px;flex-shrink:0">
-          <button id="pp-close-btn">✕</button>
+          <button id="pp-close-btn"><i class="bi bi-x"></i></button>
           <button id="pp-delete-btn-detail" class="pp-btn pp-btn-danger"
                   style="font-size:.6rem;padding:4px 10px">Delete Paper</button>
         </div>
@@ -323,16 +320,16 @@
 
       <div id="pp-tabs">
         <button class="pp-tab-btn active" data-tab="info">
-          <span class="pp-tab-icon">📄</span> Info
+          <span class="pp-tab-icon"><i class="bi bi-file-text"></i></span> Info
         </button>
         <button class="pp-tab-btn" data-tab="notes">
-          <span class="pp-tab-icon">✏️</span> Notes
+          <span class="pp-tab-icon"><i class="bi bi-pencil"></i></span> Notes
         </button>
         <button class="pp-tab-btn" data-tab="pdf">
-          <span class="pp-tab-icon">📎</span> PDF
+          <span class="pp-tab-icon"><i class="bi bi-paperclip"></i></span> PDF
         </button>
         <button class="pp-tab-btn" data-tab="connections">
-          <span class="pp-tab-icon">🔗</span> Connections
+          <span class="pp-tab-icon"><i class="bi bi-link-45deg"></i></span> Connections
         </button>
       </div>
 
@@ -370,7 +367,7 @@
         <div class="pp-tab-pane" id="pp-tab-pdf">
           <input type="file" id="pp-pdf-file-input" accept="application/pdf" />
           <div id="pp-pdf-dropzone">
-            <div class="pp-drop-icon">📂</div>
+            <div class="pp-drop-icon"><i class="bi bi-folder2-open"></i></div>
             <div class="pp-drop-title">Click or drag a PDF here</div>
             <div class="pp-drop-hint">PDF will be copied to project storage folder</div>
           </div>
@@ -403,10 +400,10 @@
   <div id="app-settings-panel">
     <div id="app-settings-header">
       <div id="app-settings-title">
-        <span class="app-settings-icon">⚙</span>
+        <span class="app-settings-icon"><i class="bi bi-gear"></i></span>
         App Settings
       </div>
-      <button id="app-settings-close">✕</button>
+      <button id="app-settings-close"><i class="bi bi-x"></i></button>
     </div>
     <div id="app-settings-body">
       <!-- rendered by app_settings.js -->
@@ -420,7 +417,7 @@
         <span style="font-family:'DM Serif Display',serif;font-size:1.1rem">Similarity Settings</span>
         <span style="font-size:.65rem;color:var(--text-secondary);margin-left:8px">How paper edges are computed</span>
       </div>
-      <button id="sim-settings-close">✕</button>
+      <button id="sim-settings-close"><i class="bi bi-x"></i></button>
     </div>
     <div id="sim-settings-body">
       <!-- rendered by similarity-settings.js -->
@@ -441,13 +438,19 @@
     <div id="npm-panel">
       <div id="npm-title-bar">
         <div id="npm-heading">Add New Paper</div>
-        <button id="npm-close">✕</button>
+        <button id="npm-close"><i class="bi bi-x"></i></button>
       </div>
 
       <div class="npm-grid">
         <div class="npm-field npm-field-full">
           <label class="npm-label">Title</label>
           <input class="npm-input" id="npm-title" placeholder="Paper title">
+        </div>
+        <div class="npm-field npm-field-full">
+          <label class="npm-label">Alias
+            <span style="color:var(--text-dim)"> — short label shown on graph node (optional)</span>
+          </label>
+          <input class="npm-input" id="npm-alias" placeholder="Short label for the graph node…">
         </div>
         <div class="npm-field npm-field-full">
           <label class="npm-label">Authors
@@ -473,6 +476,29 @@
           <label class="npm-label">Abstract</label>
           <textarea class="npm-input npm-textarea" id="npm-abstract"
                     placeholder="Brief paper abstract…"></textarea>
+        </div>
+
+        <div class="npm-divider">Notes</div>
+        <div class="npm-field npm-field-full">
+          <textarea class="npm-input npm-textarea" id="npm-notes" style="min-height:90px"
+                    placeholder="Research notes, thoughts, annotations… Supports **bold**, _italic_, ## headings, `code`."></textarea>
+        </div>
+
+        <div class="npm-divider">Custom Attributes</div>
+        <div class="npm-field npm-field-full">
+          <table style="width:100%;border-collapse:collapse" id="npm-attr-table">
+            <thead>
+              <tr style="font-size:.58rem;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.1em">
+                <th style="text-align:left;padding:0 0 6px;width:35%">Key</th>
+                <th style="text-align:left;padding:0 0 6px">Value</th>
+                <th style="width:36px"></th>
+              </tr>
+            </thead>
+            <tbody id="npm-attr-tbody"></tbody>
+          </table>
+          <button class="btn" id="npm-attr-add" style="margin-top:8px;font-size:.62rem">
+            <i class="bi bi-plus"></i> Add attribute
+          </button>
         </div>
       </div>
 
@@ -508,7 +534,7 @@
   ══════════════════════════════════════════════════ -->
   <div id="llm-consent-dialog">
     <div id="llm-consent-panel">
-      <div id="llm-consent-icon">🤖</div>
+      <div id="llm-consent-icon"><i class="bi bi-robot"></i></div>
       <div id="llm-consent-title">Enable AI Similarity Features?</div>
       <div id="llm-consent-body">
         <p>LitAtlas can use a local <strong>HuggingFace</strong>
@@ -534,7 +560,7 @@
   <!-- LLM setup error dialog -->
   <div id="llm-error-dialog">
     <div id="llm-error-panel">
-      <div id="llm-error-title">⚠ AI Setup Failed</div>
+      <div id="llm-error-title"><i class="bi bi-exclamation-triangle"></i> AI Setup Failed</div>
       <div id="llm-error-msg"></div>
       <p style="font-size:.68rem;color:var(--text-secondary);margin:8px 0 0">
         AI features have been disabled. You can retry from ⚙ Similarity Settings.

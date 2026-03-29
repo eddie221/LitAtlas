@@ -105,10 +105,10 @@ function _updateMethodBadge(strategy) {
   const label = document.getElementById("sim-method-label");
   if (!icon || !label) return;
   if (strategy === "hf-embeddings") {
-    icon.textContent  = "😎";
+    icon.innerHTML    = '<i class="bi bi-stars"></i>';
     label.textContent = "AI similarity";
   } else {
-    icon.textContent  = "⬡";
+    icon.innerHTML    = '<i class="bi bi-hexagon"></i>';
     label.textContent = "cosine similarity";
   }
 }
@@ -259,7 +259,7 @@ function _renderVenvOverlay() {
   const stepRows = _VENV_STEPS.map(s => {
     const done    = _venvStepsDone.has(s.key) && s.key !== _venvCurrentStep;
     const current = s.key === _venvCurrentStep;
-    const icon    = done    ? "✓"
+    const icon    = done    ? '<i class="bi bi-check"></i>'
                   : current ? `<span class="pg-venv-spin"></span>`
                   : "·";
     const state   = done ? "done" : current ? "current" : "pending";
@@ -569,26 +569,32 @@ export async function triggerEdgeRecompute() {
       weights: _simConfig.weights ?? {},
     };
 
-    // Step 1: Re-encode all papers → write field_vectors to embedding.json.
-    // Show the embedding progress overlay BEFORE invoking — the command now
-    // returns immediately and streams per-paper progress via events.
-    _embedIndex = 0;
-    _embedTotal = getPapersCache().length;
-    _embedTitle = "";
-    _showEmbeddingOverlay();
+    // papers array is used by both steps — includes updated_at for staleness check.
+    const papers = getPapersCache().map(p => ({
+      id: p.id, title: p.title, venue: p.venue, year: p.year,
+      hashtags: p.hashtags, notes: p.notes, attributes: p.attributes,
+      updated_at: p.updated_at ?? "",
+    }));
 
-    // const embDone = _waitForEmbeddingDone();
-    // await invoke("hf_compute_all_embeddings", { config: embCfg });
-    // // Wait for embedding://progress { done } — overlay hides itself.
-    // await embDone;
+    // Step 1: Re-encode only stale papers (skip_fresh: true).
+    // The command returns immediately and emits per-paper progress events;
+    // total reflects only the stale count so the overlay is skipped when
+    // every paper is already up-to-date.
+    const embDone = _waitForEmbeddingDone();
+    const embStart = await invoke("hf_compute_all_embeddings", {
+      config: { ...embCfg, skip_fresh: true },
+    });
+    if ((embStart.total ?? 0) > 0) {
+      _embedIndex = 0;
+      _embedTotal = embStart.total;
+      _embedTitle = "";
+      _showEmbeddingOverlay();
+    }
+    await embDone;
 
     // Step 2: Load field_vectors from JSON, apply current weights in Rust,
     //         compute cosine similarity — zero Python in this step.
     showOverlay("Computing similarity edges…");
-    const papers = getPapersCache().map(p => ({
-      id: p.id, title: p.title, venue: p.venue, year: p.year,
-      hashtags: p.hashtags, notes: p.notes, attributes: p.attributes,
-    }));
     const edgeRes = await invoke("hf_compute_edges_from_cache", {
       papers,
       config: {
@@ -1576,11 +1582,13 @@ function openNewPaperModal() {
 function closeNewPaperModal() {
   document.getElementById("new-paper-modal").classList.remove("open");
   document.getElementById("npm-status").textContent = "";
-  ["npm-title","npm-authors","npm-venue","npm-hashtags","npm-abstract"].forEach(id => {
+  ["npm-title","npm-alias","npm-authors","npm-venue","npm-hashtags","npm-abstract","npm-notes"].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.value = "";
   });
   document.getElementById("npm-year").value = String(new Date().getFullYear());
+  const tbody = document.getElementById("npm-attr-tbody");
+  if (tbody) tbody.innerHTML = "";
 }
 
 document.getElementById("btn-new-paper").addEventListener("click", openNewPaperModal);
@@ -1593,6 +1601,24 @@ document.getElementById("new-paper-modal").addEventListener("click", e => {
 // Attach hashtag autocomplete to the new-paper modal input (once, at boot).
 attachTagAutocomplete(document.getElementById("npm-hashtags"), getTagVocab);
 
+// Wire dynamic attribute rows for the new-paper modal.
+function _npmAddAttrRow() {
+  const tbody = document.getElementById("npm-attr-tbody");
+  const row = document.createElement("tr");
+  row.innerHTML = `
+    <td><input class="npm-input npm-attr-key" placeholder="key" style="width:100%"></td>
+    <td><input class="npm-input npm-attr-val" placeholder="value" style="width:100%"></td>
+    <td style="text-align:center">
+      <button class="btn npm-attr-del" style="padding:2px 7px;font-size:.62rem;border-color:var(--accent3);color:var(--accent3)">
+        <i class="bi bi-x"></i>
+      </button>
+    </td>`;
+  row.querySelector(".npm-attr-del").addEventListener("click", () => row.remove());
+  tbody.appendChild(row);
+  row.querySelector(".npm-attr-key").focus();
+}
+document.getElementById("npm-attr-add").addEventListener("click", _npmAddAttrRow);
+
 document.getElementById("npm-submit-btn").addEventListener("click", async () => {
   const title   = document.getElementById("npm-title").value.trim();
   const authors = document.getElementById("npm-authors").value.trim();
@@ -1604,18 +1630,29 @@ document.getElementById("npm-submit-btn").addEventListener("click", async () => 
     return;
   }
 
-  const rawTags    = document.getElementById("npm-hashtags").value.trim();
+  const rawTags     = document.getElementById("npm-hashtags").value.trim();
   const rawAbstract = document.getElementById("npm-abstract")?.value.trim() ?? "";
   const year        = Number(document.getElementById("npm-year").value) || new Date().getFullYear();
   const venue       = document.getElementById("npm-venue").value.trim();
+  const alias       = document.getElementById("npm-alias")?.value.trim() || null;
+  const notes       = document.getElementById("npm-notes")?.value.trim() || null;
 
-  const hashtags   = rawTags
+  const hashtags = rawTags
     ? rawTags.split(/[,\s]+/).map(t => t.trim()).filter(Boolean).map(t => t.startsWith("#") ? t : "#" + t)
     : [];
 
-  const attributes = rawAbstract
-    ? [{ key: "abstract", value: rawAbstract, order: 0 }]
-    : [];
+  const customAttrs = [...(document.querySelectorAll("#npm-attr-tbody tr") ?? [])]
+    .map((tr, i) => ({
+      key:   tr.querySelector(".npm-attr-key")?.value.trim() ?? "",
+      value: tr.querySelector(".npm-attr-val")?.value.trim() ?? "",
+      order: i + 1,
+    }))
+    .filter(a => a.key);
+
+  const attributes = [
+    ...(rawAbstract ? [{ key: "abstract", value: rawAbstract, order: 0 }] : []),
+    ...customAttrs,
+  ];
 
   const newPaper = {
     title,
@@ -1632,20 +1669,8 @@ document.getElementById("npm-submit-btn").addEventListener("click", async () => 
   try {
     // 1. Persist to SQLite — returns the new integer id
     const newId = await invoke("add_paper", { paper: newPaper });
-
-    // 1b. Auto-compute embedding if HF module is enabled
-    if (_hfEnabled && _simConfig.strategy === "hf-embeddings") {
-      statusEl.textContent = "Computing embedding…";
-      try {
-        await invoke("hf_compute_paper_embedding", {
-          paperId: newId,
-          config:  _simConfig,
-        });
-      } catch (embErr) {
-        // Non-fatal: log the error but continue adding the paper
-        console.warn("[LitAtlas] Auto-embed failed:", embErr);
-      }
-    }
+    if (alias) await invoke("save_alias", { id: newId, alias });
+    if (notes) await invoke("save_notes", { id: newId, notes });
 
     // 2. Compute similarity edges for this new paper
     statusEl.textContent = "Computing edges…";

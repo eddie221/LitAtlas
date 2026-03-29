@@ -15,7 +15,6 @@
 import { colorForPaper, groupForPaper } from "./constant.js";
 import { getPapersCache, getEdgesCache, setCurrentPaperCache, setCurrentConnectedCache, getCurrentPaperCache, state } from "./cache.js";
 import { triggerEdgeRecompute, deselectNode, selectNode, refreshPaper, recomputeEdgesForPaper, getConnected, attr, loadPdfIntoIframe } from "./graph.js";
-import { getEmbeddingConfig } from "./similarity.js";
 import { getTagVocab } from "./similarity.js";
 import { attachTagAutocomplete } from "./tag-autocomplete.js";
 
@@ -384,6 +383,15 @@ function renderInfoTab(paper) {
         attributes.unshift({ key: "abstract", value: abstractVal, order: 0 });
       }
 
+      // Detect whether any embedding-relevant field changed.
+      const contentChanged =
+        year !== paper.year ||
+        venue !== (paper.venue ?? "") ||
+        JSON.stringify(hashtags.map(t => t.replace(/^#/,"")).sort()) !==
+          JSON.stringify((paper.hashtags ?? []).map(t => t.replace(/^#/,"")).sort()) ||
+        JSON.stringify(attributes.map(a => ({ k: a.key, v: a.value })).sort((a,b) => a.k < b.k ? -1 : 1)) !==
+          JSON.stringify((paper.attributes ?? []).map(a => ({ k: a.key, v: a.value })).sort((a,b) => a.k < b.k ? -1 : 1));
+
       await invoke("update_paper_core", { id: paper.id, venue, year });
       await invoke("save_alias",        { id: paper.id, alias });
       await invoke("set_tags",          { id: paper.id, tags: hashtags });
@@ -396,20 +404,6 @@ function renderInfoTab(paper) {
       const cachedPaper = getPapersCache().find(p => p.id === paper.id);
       if (cachedPaper) cachedPaper.alias = alias;
 
-      // compute new embedding for modification 
-      if (window.LitAtlas?.isHfEnabled?.()){
-        try {
-          console.log("hf_compute_paper_embedding");
-          await invoke("hf_compute_paper_embedding", {
-            paperId: paper.id,
-            config:  getEmbeddingConfig(),
-          });
-        } catch (embErr) {
-          // Non-fatal: log the error but continue adding the paper
-          console.warn("[LitAtlas] Auto-embed failed:", embErr);
-        }
-      }
-
       // Update in-memory paper
       await refreshPaper(paper.id);
       const cached = getPapersCache().find(p => p.id === paper.id);
@@ -420,12 +414,14 @@ function renderInfoTab(paper) {
         document.getElementById("pp-topic-badge").style.color = colorForPaper(paper);
       }
 
-      // Recompute edges between this paper and all others
-      setStatus("pp-info-status", "Updating edges…", "var(--text-secondary)");
-      try {
-        await recomputeEdgesForPaper(paper.id);
-      } catch (edgeErr) {
-        console.warn("[PaperPage] Edge recompute failed:", edgeErr);
+      // Recompute edges between this paper and all others (skip if only alias changed)
+      if (contentChanged) {
+        setStatus("pp-info-status", "Updating edges…", "var(--text-secondary)");
+        try {
+          await recomputeEdgesForPaper(paper.id);
+        } catch (edgeErr) {
+          console.warn("[PaperPage] Edge recompute failed:", edgeErr);
+        }
       }
 
       setStatus("pp-info-status", "✓ Saved");

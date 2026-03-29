@@ -48,6 +48,7 @@ struct PaperRow {
     year:            i64,
     notes:           Option<String>,
     pdf_path:        Option<String>,
+    updated_at:      String,
     authors:         Option<String>,   // "Last F., Last F."
     hashtags:        Option<String>,   // "#tag1,#tag2"
     attributes_json: Option<String>,   // JSON array [{key,value,order}]
@@ -73,6 +74,7 @@ pub struct PaperFull {
     pub year:       i64,
     pub notes:      Option<String>,
     pub pdf_path:   Option<String>,
+    pub updated_at: String,
     pub authors:    Vec<String>,
     pub hashtags:   Vec<String>,
     pub attributes: Vec<PaperAttribute>,
@@ -111,6 +113,7 @@ impl TryFrom<PaperRow> for PaperFull {
             year:       r.year,
             notes:      r.notes,
             pdf_path:   r.pdf_path,
+            updated_at: r.updated_at,
             authors:    split_csv(r.authors),
             hashtags:   split_csv(r.hashtags),
             attributes: parse_attributes(r.attributes_json)?,
