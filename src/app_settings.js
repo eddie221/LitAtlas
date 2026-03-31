@@ -114,7 +114,34 @@ function _buildHTML(cfg, scriptInfo, customModels, currentFontPx = 18) {
       </div>
     </div>
 
-    <!-- ── Section 1: Sidecar Script ── -->
+    <!-- ── Section 1: HuggingFace Token ── -->
+    <div class="app-cfg-section">
+      <div class="app-cfg-section-title">HuggingFace API Token</div>
+      <div class="app-cfg-hint">
+        Required to download gated models such as
+        <code>google/gemma-3-1b-it</code>.
+        Generate a token at <code>huggingface.co/settings/tokens</code>,
+        accept the model license on the model page, then paste the token here.
+        The token is stored locally and never sent anywhere except HuggingFace.
+      </div>
+      <div class="app-cfg-script-row">
+        <input id="app-cfg-hf-token" class="app-cfg-input"
+               type="password" placeholder="hf_…"
+               value="${_esc(cfg.hf_token ?? "")}" autocomplete="off" spellcheck="false">
+        <button id="app-cfg-hf-token-show" class="btn" title="Show / hide token"
+                style="flex-shrink:0">
+          <i class="bi bi-eye"></i>
+        </button>
+      </div>
+      <div class="app-cfg-script-actions">
+        <button id="app-cfg-hf-token-save" class="btn btn-new-paper">Save Token</button>
+        <button id="app-cfg-hf-token-clear" class="btn app-cfg-reset-btn"
+                ${!(cfg.hf_token) ? "disabled" : ""}>Clear</button>
+      </div>
+      <div id="app-cfg-hf-token-status" class="app-cfg-status"></div>
+    </div>
+
+    <!-- ── Section 2: Sidecar Script ── -->
     <div class="app-cfg-section">
       <div class="app-cfg-section-title">Similarity Engine Script</div>
       <div class="app-cfg-hint">
@@ -154,7 +181,7 @@ function _buildHTML(cfg, scriptInfo, customModels, currentFontPx = 18) {
       <div id="app-cfg-script-status" class="app-cfg-status"></div>
     </div>
 
-    <!-- ── Section 2: Custom Models ── -->
+    <!-- ── Section 3: Custom Models ── -->
     <div class="app-cfg-section">
       <div class="app-cfg-section-title">Custom HuggingFace Models</div>
       <div class="app-cfg-hint">
@@ -176,7 +203,7 @@ function _buildHTML(cfg, scriptInfo, customModels, currentFontPx = 18) {
       </div>
     </div>
 
-    <!-- ── Section 3: Plugin Contract Reference ── -->
+    <!-- ── Section 4: Plugin Contract Reference ── -->
     <div class="app-cfg-section">
       <button class="app-cfg-toggle" id="app-cfg-contract-toggle">
         Plugin Contract Reference <span class="app-cfg-toggle-icon"><i class="bi bi-caret-right-fill"></i></span>
@@ -234,6 +261,41 @@ function _wireEvents(body, cfg, scriptInfo, customModels) {
     if (fontSlider) fontSlider.value = "18";
     if (fontValEl)  fontValEl.textContent = "100%";
     window.LitAtlas?.setUiFontSize?.(18);
+  });
+
+  // ── HuggingFace Token ──────────────────────────────────────────────────────
+  const hfTokenInput  = body.querySelector("#app-cfg-hf-token");
+  const hfTokenShow   = body.querySelector("#app-cfg-hf-token-show");
+  const hfTokenSave   = body.querySelector("#app-cfg-hf-token-save");
+  const hfTokenClear  = body.querySelector("#app-cfg-hf-token-clear");
+  const hfTokenStatus = body.querySelector("#app-cfg-hf-token-status");
+
+  hfTokenShow?.addEventListener("click", () => {
+    const isHidden = hfTokenInput?.type === "password";
+    if (hfTokenInput) hfTokenInput.type = isHidden ? "text" : "password";
+    if (hfTokenShow)  hfTokenShow.innerHTML = isHidden
+      ? '<i class="bi bi-eye-slash"></i>'
+      : '<i class="bi bi-eye"></i>';
+  });
+
+  hfTokenSave?.addEventListener("click", async () => {
+    const token = hfTokenInput?.value.trim() ?? "";
+    cfg.hf_token = token || null;
+    try {
+      await _saveConfig(cfg);
+      _showStatus(hfTokenStatus, "✓ Token saved — takes effect on next engine start", "ok");
+      if (hfTokenClear) hfTokenClear.disabled = !token;
+    } catch (e) { _showStatus(hfTokenStatus, `✗ ${e}`, "err"); }
+  });
+
+  hfTokenClear?.addEventListener("click", async () => {
+    if (hfTokenInput) hfTokenInput.value = "";
+    cfg.hf_token = null;
+    try {
+      await _saveConfig(cfg);
+      _showStatus(hfTokenStatus, "✓ Token cleared", "ok");
+      if (hfTokenClear) hfTokenClear.disabled = true;
+    } catch (e) { _showStatus(hfTokenStatus, `✗ ${e}`, "err"); }
   });
 
   const scriptInput  = body.querySelector("#app-cfg-script-input");

@@ -30,8 +30,6 @@ import traceback
 from typing import Any
 import torch
 import numpy as np
-from qwen_vl_utils import process_vision_info
-
 if torch.cuda.is_available():
     device = "cuda"
 elif torch.backends.mps.is_available():
@@ -122,27 +120,14 @@ def _load_plugin() -> None:
         traceback.print_exc(file=sys.stderr)
 
 
-# ── Lazy-loaded sentence-transformer model ────────────────────────────────────
+# ── Lazy-loaded text model ─────────────────────────────────────────────────────
 _model      = None
 _model_name = None
 _model_lock = threading.Lock()
 
-# ── Lazy-loaded vision-language model (default and PDF field) ─────────────────
-#
-# Qwen3-VL-8B-Instruct is the default built-in model.  It handles all text
-# fields via its language encoder and the "pdf" field by rendering pages as
-# images.  Loaded lazily on the first embedding request and kept in memory
-# for the lifetime of the process.
-_vl_model      = None   # (processor, model) tuple
-_vl_model_name = None
-_vl_model_lock = threading.Lock()
-
-VL_DEFAULT_MODEL = "Qwen/Qwen3-VL-2B-Instruct"
-# Maximum pages rendered per PDF.  Qwen3-VL handles multi-image input well
-# but memory grows with page count.  Adjust if needed.
+DEFAULT_MODEL = "google/gemma-3-1b-it"
+# Maximum pages of a PDF to extract text from.
 PDF_MAX_PAGES = 8
-# Resolution multiplier for fitz page rendering (1.5 → ~108 DPI, good balance)
-PDF_RENDER_SCALE = 1.5
 
 # if torch.cuda.is_available():
 #     device = "cuda"
@@ -181,15 +166,26 @@ def _get_model(model_name: str, allow_download: bool = True):
                     f"model first via the Similarity Settings panel."
                 )
 
-            kwargs = {"local_files_only": True} if offline else {}
+            hf_token = os.environ.get("HUGGING_FACE_HUB_TOKEN") or None
+            kwargs   = {"local_files_only": True} if offline else {}
+            if hf_token:
+                kwargs["token"] = hf_token
             try:
                 tokenizer = AutoTokenizer.from_pretrained(model_name, **kwargs)
                 model     = AutoModel.from_pretrained(model_name, trust_remote_code=True, **kwargs)
                 model.eval()
             except Exception as dl_err:
-                # Distinguish a network failure from other errors so the user
-                # gets a meaningful message when offline.
                 err_str = str(dl_err).lower()
+                # Auth / gated-model errors
+                if any(kw in err_str for kw in ("401", "403", "gated", "access",
+                                                 "authenticate", "restricted",
+                                                 "token", "unauthorized")):
+                    raise RuntimeError(
+                        f"Cannot download model '{model_name}': authentication failed.\n"
+                        f"This model may be gated. Set your HuggingFace API token in "
+                        f"App Settings → HuggingFace Token, then try again."
+                    ) from dl_err
+                # Network / connectivity errors
                 if any(kw in err_str for kw in ("connection", "network", "timeout",
                                                  "offline", "unreachable", "resolve")):
                     raise RuntimeError(
@@ -210,171 +206,27 @@ def _get_model(model_name: str, allow_download: bool = True):
 
 
 
-def _get_vl_model(model_name: str = VL_DEFAULT_MODEL, allow_download: bool = True):
+def _pdf_extract_text(pdf_path: str, max_pages: int = PDF_MAX_PAGES) -> str:
     """
-    Load a Qwen3-VL (or compatible) vision-language model as a
-    (processor, model) tuple.
-
-    Uses the same offline-safe strategy as _get_model():
-      1. If a snapshot exists locally -> load with local_files_only=True.
-      2. Otherwise attempt a network download (if allow_download=True).
-    """
-    global _vl_model, _vl_model_name
-    with _vl_model_lock:
-        if _vl_model is not None and _vl_model_name == model_name:
-            
-            return _vl_model
-        try:
-            from transformers import AutoProcessor, AutoModelForImageTextToText
-
-            offline = _model_snapshot_path(model_name) is not None
-            if not offline and not allow_download:
-                raise RuntimeError(
-                    f"VL model '{model_name}' is not cached locally and the app is "
-                    f"in offline mode.  Download the model first via Similarity Settings."
-                )
-
-            kwargs = {"local_files_only": True} if offline else {}
-            try:
-                processor = AutoProcessor.from_pretrained(model_name, **kwargs)
-                vl_model  = AutoModelForImageTextToText.from_pretrained(
-                    model_name,
-                    torch_dtype=torch.float16 if device != "cpu" else torch.float32,
-                    trust_remote_code=True,
-                    **kwargs,
-                )
-                vl_model.eval()
-                vl_model.to(device)
-            except Exception as dl_err:
-                print(f"[LitAtlas] {dl_err}: checked", file=sys.stderr)
-                err_str = str(dl_err).lower()
-                if any(kw in err_str for kw in ("connection", "network", "timeout",
-                                                  "offline", "unreachable", "resolve")):
-                    raise RuntimeError(
-                        f"Cannot download VL model '{model_name}': no internet connection."
-                    ) from dl_err
-                raise RuntimeError(f"Failed to load VL model '{model_name}': {dl_err}") from dl_err
-
-            _vl_model      = (processor, vl_model)
-            _vl_model_name = model_name
-            return _vl_model
-
-        # except RuntimeError:
-        #     raise
-        except Exception as e:
-            print(f"[LitAtlas] {e}: checked", file=sys.stderr)
-            raise RuntimeError(f"Failed to load VL model '{model_name}': {e}") from e
-
-
-def _pdf_to_images(pdf_path: str, max_pages: int = PDF_MAX_PAGES, scale: float = PDF_RENDER_SCALE):
-    """
-    Render PDF pages to PIL Images using PyMuPDF (fitz).
-
-    Returns a list of PIL.Image objects (RGB), capped at max_pages.
-    Raises RuntimeError if fitz or the PDF cannot be opened.
+    Extract plain text from a PDF using PyMuPDF (fitz), up to max_pages.
+    Returns a single string (page texts joined by spaces).
+    Returns empty string if fitz is unavailable or the file cannot be opened.
     """
     try:
         import fitz  # PyMuPDF
     except ImportError:
-        raise RuntimeError(
-            "PyMuPDF is not installed.  Add pymupdf to the venv requirements."
-        )
-    try:
-        from PIL import Image as PILImage
-        import io
-    except ImportError:
-        raise RuntimeError("Pillow is not installed in the similarity venv.")
-
+        print("[LitAtlas] WARNING: PyMuPDF not installed — pdf field skipped.", file=sys.stderr)
+        return ""
     if not pdf_path or not os.path.isfile(pdf_path):
-        raise RuntimeError(f"PDF not found at path: {pdf_path!r}")
-
-    doc    = fitz.open(pdf_path)
-    mat    = fitz.Matrix(scale, scale)
-    images = []
-    for page_idx in range(min(len(doc), max_pages)):
-        page   = doc[page_idx]
-        pix    = page.get_pixmap(matrix=mat, alpha=False)
-        img    = PILImage.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
-        images.append(img)
-    doc.close()
-    return images
-
-
-def _pdf_field_vector(pdf_path: str, model_name: str = VL_DEFAULT_MODEL) -> list:
-    """
-    Produce a single embedding vector for a PDF by:
-      1. Rendering each page to an image with fitz.
-      2. Passing all page images + a fixed extraction prompt to Qwen3-VL.
-      3. Mean-pooling the last hidden state across the sequence dimension.
-      4. L2-normalising the result.
-
-    Returns a plain Python list of floats.
-    """
-    images = _pdf_to_images(pdf_path)
-    
-    if not images:
-        raise RuntimeError("No pages could be rendered from the PDF.")
-
-    # print(f"[LitAtlas] {model_name}: checked", file=sys.stderr)
-    processor, vl_model = _get_vl_model(model_name)
-    # print(f"[LitAtlas] after get model: checked", file=sys.stderr)
-
-    # Build a multi-image chat message.
-    question = "These are pages from an academic paper.  " \
-                "Summarise the paper's topic, methodology, and key findings " \
-                "in a single dense paragraph suitable for semantic similarity search."
-    image_content = [{"type": "image", "image": img} for img in images]
-    messages = [
-        {
-            "role": "user",
-            "content": image_content + [
-                {
-                    "type": "text",
-                    "text": (
-                        question
-                    ),
-                }
-            ],
-        }
-    ]
-    # Apply chat template and prepare tensors.
-
+        return ""
     try:
-        inputs = processor.apply_chat_template(
-            messages,
-            tokenize=True,
-            add_generation_prompt=True,
-            return_dict=True,
-            return_tensors="pt"
-        ).to(device)
+        doc   = fitz.open(pdf_path)
+        texts = [doc[i].get_text() for i in range(min(len(doc), max_pages))]
+        doc.close()
+        return " ".join(texts).strip()
     except Exception as e:
-        # print(f"[LitAtlas] {e}: checked", file=sys.stderr)
-        raise RuntimeError(f"Processor error for VL model '{model_name}': {e}") from e
-
-    # print(f"[LitAtlas] before model: checked", file=sys.stderr)
-    try:
-        with torch.no_grad():
-            outputs = vl_model(**inputs, output_hidden_states=True)
-    except Exception as e:
-        print(f"[LitAtlas] {e}: checked", file=sys.stderr)
-        raise RuntimeError(f"Processor error for VL model '{model_name}': {e}") from e
-    # print(f"[LitAtlas] {outputs.hidden_states[-1].shape}: checked", file=sys.stderr)
-    # Mean-pool the last hidden layer (shape: 1 x seq_len x hidden_dim).
-    last_hidden = outputs.hidden_states[-1]          # (1, T, D)
-    attn_mask   = inputs.get("attention_mask")
-    if attn_mask is not None:
-        mask   = attn_mask.unsqueeze(-1).expand(last_hidden.size()).float()
-        summed = torch.sum(last_hidden * mask, dim=1)
-        counts = torch.clamp(mask.sum(dim=1), min=1e-9)
-        pooled = (summed / counts).squeeze(0)        # (D,)
-    else:
-        pooled = last_hidden.mean(dim=1).squeeze(0)  # (D,)
-
-    # L2-normalise.
-    norm   = pooled.norm().clamp(min=1e-9)
-    vector = (pooled / norm).detach().cpu().float().tolist()
-    print(f"[LitAtlas] before return {len(vector)}: checked", file=sys.stderr)
-    return vector
+        print(f"[LitAtlas] WARNING: pdf text extraction failed: {e}", file=sys.stderr)
+        return ""
 
 
 def _mean_pool(model_output, attention_mask):
@@ -436,32 +288,67 @@ def handle_check_model(req_id: Any, model_id: str) -> None:
 
 # ── download_model ────────────────────────────────────────────────────────────
 
+_DOWNLOAD_MAX_RETRIES = 3
+_DOWNLOAD_RETRY_DELAY = 5   # seconds between retries (network errors only)
+
 def handle_download_model(req_id: Any, model_id: str) -> None:
     """
     Download model_id using AutoTokenizer.from_pretrained /
     AutoModel.from_pretrained (via _get_model), which is HuggingFace's
     native download-and-cache mechanism.
 
+    Protection mechanism:
+    • Auth / gated-model errors (401 / 403 / "gated") are reported immediately
+      with a helpful message — no retries since a bad token won't fix itself.
+    • Transient network errors are retried up to _DOWNLOAD_MAX_RETRIES times
+      with a _DOWNLOAD_RETRY_DELAY-second pause between attempts.
+
     The model stays loaded in memory after this call so the first
     compute_embedding request is instant.  Elapsed wall-clock time is
     written to stderr.
     """
-    try:
-        t0 = time.monotonic()
-        print(f"[LitAtlas] download_model: starting '{model_id}'", file=sys.stderr, flush=True)
-        _get_model(model_id, allow_download=True)
-        elapsed = time.monotonic() - t0
-        print(
-            f"[LitAtlas] download_model: '{model_id}' completed in {elapsed:.1f}s",
-            file=sys.stderr, flush=True,
-        )
-        ok(req_id, {"done": True})
-    except Exception:
-        print(
-            f"[LitAtlas] download_model: '{model_id}' failed\n{traceback.format_exc()}",
-            file=sys.stderr, flush=True,
-        )
-        err(req_id, f"Model download failed:\n{traceback.format_exc()}")
+    t0       = time.monotonic()
+    last_err: Exception | None = None
+
+    for attempt in range(1, _DOWNLOAD_MAX_RETRIES + 1):
+        try:
+            print(
+                f"[LitAtlas] download_model: attempt {attempt}/{_DOWNLOAD_MAX_RETRIES} '{model_id}'",
+                file=sys.stderr, flush=True,
+            )
+            _get_model(model_id, allow_download=True)
+            elapsed = time.monotonic() - t0
+            print(
+                f"[LitAtlas] download_model: '{model_id}' completed in {elapsed:.1f}s",
+                file=sys.stderr, flush=True,
+            )
+            ok(req_id, {"done": True})
+            return
+        except RuntimeError as exc:
+            last_err = exc
+            msg = str(exc)
+            print(f"[LitAtlas] download_model error (attempt {attempt}): {msg}",
+                  file=sys.stderr, flush=True)
+            # Auth errors — never retry, user must fix the token
+            if any(kw in msg.lower() for kw in
+                   ("authentication failed", "gated", "401", "403", "unauthorized")):
+                err(req_id, msg)
+                return
+            # Network errors — wait and retry
+            if attempt < _DOWNLOAD_MAX_RETRIES:
+                print(f"[LitAtlas] download_model: retrying in {_DOWNLOAD_RETRY_DELAY}s…",
+                      file=sys.stderr, flush=True)
+                time.sleep(_DOWNLOAD_RETRY_DELAY)
+        except Exception:
+            last_err = None
+            print(
+                f"[LitAtlas] download_model: '{model_id}' failed\n{traceback.format_exc()}",
+                file=sys.stderr, flush=True,
+            )
+            err(req_id, f"Model download failed:\n{traceback.format_exc()}")
+            return
+
+    err(req_id, f"Model download failed after {_DOWNLOAD_MAX_RETRIES} attempts:\n{last_err}")
 
 
 # ── Paper → text ──────────────────────────────────────────────────────────────
@@ -474,11 +361,11 @@ def _attr(paper: dict, key: str, fallback: str = "") -> str:
 
 
 def _field_text(paper: dict, field: str) -> str:
-    """Extract the raw text for one field from a paper dict.
+    """Extract the text for one field from a paper dict.
 
-    For the special "pdf" field this returns the file-system path stored in
-    paper["pdf_path"] rather than text.  Callers that need actual text must
-    check for the pdf field explicitly and route to _pdf_field_vector instead.
+    For the "pdf" field, text is extracted from the PDF file at pdf_path using
+    PyMuPDF so it can be embedded by the same text model as all other fields.
+    Papers without a pdf_path silently return an empty string and are skipped.
     """
     if field == "title":    return paper.get("title", "")
     if field == "abstract": return _attr(paper, "abstract")
@@ -486,7 +373,7 @@ def _field_text(paper: dict, field: str) -> str:
     if field == "hashtags": return " ".join(t.lstrip("#") for t in paper.get("hashtags", []))
     if field == "notes":    return paper.get("notes", "") or ""
     if field == "year":     return str(paper.get("year", ""))
-    if field == "pdf":      return paper.get("pdf_path") or ""  # path, not text
+    if field == "pdf":      return _pdf_extract_text(paper.get("pdf_path") or "")
     return _attr(paper, field)   # custom attribute key
 
 
@@ -569,14 +456,14 @@ def edge_type(a: dict, b: dict) -> str:
 # ── Available models / fields ─────────────────────────────────────────────────
 
 AVAILABLE_MODELS = [
-    # ── Default built-in model ────────────────────────────────────────────────
-    # Qwen3-VL-8B is the sole default model.  It handles both text fields
-    # (via its language encoder) and the "pdf" field (page images via vision
-    # encoder).  Requires the transformers ≥ 4.51 and a reasonably modern GPU
-    # for comfortable throughput; CPU inference is slow but functional.
-    { "id": VL_DEFAULT_MODEL,
-      "label": "Qwen3-VL-2B (default)",
-      "description": "Default vision-language model.  Handles all text fields and PDF page images.  Works best with a GPU.", "size_mb": 16000 },
+    # Gemma-3-1B-IT is the sole built-in model.
+    # It is a gated model — users must accept the license on HuggingFace and
+    # set their API token in App Settings → HuggingFace Token before downloading.
+    { "id": DEFAULT_MODEL,
+      "label": "Gemma 3 1B IT (default)",
+      "description": "Default text embedding model. Lightweight and fast. Supports all text fields and PDF text extraction. Requires a HuggingFace API token (gated model).",
+      "size_mb": 2000,
+      "gated": True },
 ]
 
 AVAILABLE_FIELDS = [
@@ -586,76 +473,13 @@ AVAILABLE_FIELDS = [
     { "key": "hashtags", "label": "Hashtags", "default_weight": 1.0 },
     { "key": "notes",    "label": "Notes",    "default_weight": 0.5 },
     { "key": "year",     "label": "Year",     "default_weight": 0.2 },
-    # ── Visual field ──────────────────────────────────────────────────────────
-    # Requires Qwen3-VL-8B and a PDF uploaded for the paper.
-    # Papers without a PDF silently skip this field during encoding.
-    { "key": "pdf",      "label": "PDF (visual)", "default_weight": 2.0 },
+    # PDF text is extracted with PyMuPDF and embedded like any other text field.
+    # Papers without an uploaded PDF silently skip this field during encoding.
+    { "key": "pdf",      "label": "PDF (text)", "default_weight": 2.0 },
 ]
 
 
 # ── Compute ───────────────────────────────────────────────────────────────────
-
-def _is_vl_model(model_name: str) -> bool:
-    """
-    Return True when model_name is a vision-language model that should be
-    loaded via _get_vl_model() rather than _get_model().
-
-    Currently identifies any model whose ID contains "-VL-" (case-insensitive),
-    which covers Qwen2.5-VL-*, Qwen3-VL-*, and compatible models.
-    """
-    return "-vl-" in model_name.lower()
-
-
-def _vl_text_embedding(texts: list, model_name: str) -> "np.ndarray":
-    """
-    Produce mean-pooled, L2-normalised embeddings for a batch of text strings
-    using the VL model's language encoder (no images involved).
-
-    The VL model receives each text as a plain user message.  The last hidden
-    state is mean-pooled across the sequence dimension and L2-normalised, matching
-    the strategy used for PDF page image embeddings.
-
-    Returns a numpy array of shape (len(texts), hidden_dim).
-    """
-    import numpy as np
-    processor, vl_model = _get_vl_model(model_name)
-
-    # Build a minimal single-turn chat message for each text.
-    vectors = []
-    for text in texts:
-        messages = [{"role": "user", "content": [{"type": "text", "text": text}]}]
-        try:
-            text_input = processor.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=False
-            )
-        except Exception:
-            # Fallback: use raw text if chat template is unavailable.
-            text_input = text
-
-        inputs = processor(
-            text=[text_input],
-            return_tensors="pt",
-            padding=True,
-        ).to(device)
-
-        with torch.no_grad():
-            outputs = vl_model(**inputs, output_hidden_states=True)
-
-        last_hidden = outputs.hidden_states[-1]          # (1, T, D)
-        attn_mask   = inputs.get("attention_mask")
-        if attn_mask is not None:
-            mask   = attn_mask.unsqueeze(-1).expand(last_hidden.size()).float()
-            summed = torch.sum(last_hidden * mask, dim=1)
-            counts = torch.clamp(mask.sum(dim=1), min=1e-9)
-            pooled = (summed / counts).squeeze(0)        # (D,)
-        else:
-            pooled = last_hidden.mean(dim=1).squeeze(0)  # (D,)
-
-        norm   = pooled.norm().clamp(min=1e-9)
-        vector = (pooled / norm).detach().cpu().float().numpy()
-        vectors.append(vector)
-
-    return np.stack(vectors, axis=0)
 
 
 def compute_embedding(paper: dict, config: dict) -> dict:
@@ -673,112 +497,49 @@ def compute_embedding(paper: dict, config: dict) -> dict:
     weights the user currently has set.  This means embedding.json stays valid
     across weight changes — only a model or field-set change triggers re-encoding.
 
-    When the selected model is a VL model (e.g. Qwen3-VL-8B), ALL fields —
-    including text fields — are encoded via the VL model's language encoder so
-    that text and PDF embeddings live in the same vector space.  The "pdf"
-    field uses page images; all other fields use text-only prompts.
+    The "pdf" field is handled by extracting text from the PDF with PyMuPDF and
+    embedding it with the same text model as all other fields.  Papers without an
+    uploaded PDF silently skip the "pdf" field.
     """
-    print("[LitAtlas] compute_embedding: called",
-                  file=sys.stderr)
+    print("[LitAtlas] compute_embedding: called", file=sys.stderr)
     # Delegate to user plugin if one was loaded at startup.
     if _plugin_compute_embedding_fn is not None:
         try:
             return _plugin_compute_embedding_fn(paper, config)
         except Exception:
-            import traceback
             print("[LitAtlas] plugin compute_embedding_fn raised — falling back to built-in:",
                   file=sys.stderr)
             traceback.print_exc(file=sys.stderr)
 
-    model_name = config.get("model", VL_DEFAULT_MODEL)
-    fields     = config.get("fields", ["title", "abstract", "hashtags"])
-
-    # vl_model may be passed as JSON null from Rust; treat that as "use default".
-    vl_model_name = config.get("vl_model") or VL_DEFAULT_MODEL
-
+    model_name    = config.get("model", DEFAULT_MODEL)
+    fields        = config.get("fields", ["title", "abstract", "hashtags"])
     field_vectors = {}
     dim           = 0
 
-    pdf_fields  = [f for f in fields if f == "pdf"]
-    text_fields = [f for f in fields if f != "pdf"]
+    items = []
+    for field in fields:
+        text = _field_text(paper, field).strip()
+        if text:
+            items.append((field, text))
 
-    # ── PDF field (visual embedding via VL model) ─────────────────────────────
-    # Always routed through the VL model regardless of model_name selection.
-    # Papers without a pdf_path silently skip this field.
-    print(f"[LitAtlas] {pdf_fields}: checked", file=sys.stderr)
-    if pdf_fields:
-        print(f"[LitAtlas] {paper.get("pdf_path")}: checked", file=sys.stderr)
-        pdf_path = (paper.get("pdf_path") or "").strip()
-        if pdf_path:
-            try:
-                print(f"[LitAtlas] before _pdf_field_vector: checked", file=sys.stderr)
-                pdf_vec = _pdf_field_vector(pdf_path, vl_model_name)
-                # print(f"[LitAtlas] {pdf_vec}: checked", file=sys.stderr)
-                field_vectors["pdf"] = pdf_vec
-                if dim == 0:
-                    dim = len(pdf_vec)
-                print(
-                    f"[LitAtlas] pdf field encoded for paper {paper.get('id')!r} "
-                    f"({len(pdf_vec)}-dim)",
-                    file=sys.stderr,
-                )
-            except Exception as e:
-                print(f"[LitAtlas] {e}: checked", file=sys.stderr)
-                print(
-                    f"[LitAtlas] WARNING: pdf field encoding failed for paper "
-                    f"{paper.get('id')!r} — skipping:\n" + traceback.format_exc(),
-                    file=sys.stderr,
-                )
-        else:
-            print(
-                f"[LitAtlas] pdf field requested but no pdf_path for paper "
-                f"{paper.get('id')!r} — skipping.",
-                file=sys.stderr,
-            )
+    if not items:
+        # Absolute fallback: encode title so the paper always has something.
+        items = [("title", paper.get("title", "").strip() or "unknown")]
 
-    # ── Text fields ───────────────────────────────────────────────────────────
-    # Route through VL model when model_name is a VL model so that text and PDF
-    # embeddings share the same vector space.  Otherwise use the lightweight
-    # sentence-transformer path (_get_model).
-    if text_fields:
-        items = []
-        for field in text_fields:
-            text = _field_text(paper, field).strip()
-            if text:
-                items.append((field, text))
-
-        if not items and not field_vectors:
-            # Absolute fallback: encode title so the paper always has something.
-            title = paper.get("title", "").strip()
-            items = [("title", title or "unknown")]
-
-        if items:
-            texts = [text for _, text in items]
-
-            if _is_vl_model(model_name):
-                # Use VL language encoder so text and PDF vectors are in the same space.
-                vecs = _vl_text_embedding(texts, vl_model_name)   # (N, D) numpy
-                text_dim = vecs.shape[1]
-                if dim == 0:
-                    dim = text_dim
-                for (field, _), vec in zip(items, vecs):
-                    field_vectors[field] = vec.tolist()
-            else:
-                # Legacy sentence-transformer path for non-VL models.
-                model = _get_model(model_name)
-                tokenizer, hf_model = model
-                hf_model.to(device)
-                inputs = tokenizer(
-                    texts, padding=True, truncation=True, max_length=512, return_tensors="pt"
-                ).to(device)
-                with torch.no_grad():
-                    outputs = hf_model(**inputs)
-                vecs = _mean_pool(outputs, inputs["attention_mask"])
-                text_dim = vecs.shape[1]
-                if dim == 0:
-                    dim = text_dim
-                for (field, _), vec in zip(items, vecs):
-                    field_vectors[field] = vec.tolist()
+    tokenizer, hf_model = _get_model(model_name)
+    hf_model.to(device)
+    texts  = [text for _, text in items]
+    inputs = tokenizer(
+        texts, padding=True, truncation=True, max_length=512, return_tensors="pt"
+    ).to(device)
+    print("texts : ", texts, file=sys.stderr)
+    print("inputs : ", inputs, file=sys.stderr)
+    with torch.no_grad():
+        outputs = hf_model(**inputs)
+    vecs = _mean_pool(outputs, inputs["attention_mask"])
+    dim  = vecs.shape[1]
+    for (field, _), vec in zip(items, vecs):
+        field_vectors[field] = vec.tolist()
 
     return {"field_vectors": field_vectors, "dim": dim}
 
@@ -795,7 +556,7 @@ def compute(papers: list, config: dict) -> list:
             traceback.print_exc(file=sys.stderr)
             # Fall through to built-in implementation below.
 
-    model_name = config.get("model", VL_DEFAULT_MODEL)
+    model_name = config.get("model", DEFAULT_MODEL)
     fields     = config.get("fields",    ["title", "abstract", "hashtags"])
     weights    = config.get("weights",   {})
     threshold  = float(config.get("threshold", 0.38))
@@ -922,10 +683,9 @@ def handle(line: str) -> None:
                 for m in AVAILABLE_MODELS
             ]
             ok(req_id, {
-                "models":         models_annotated,
-                "fields":         AVAILABLE_FIELDS,
-                "vl_model":       VL_DEFAULT_MODEL,
-                "loaded_vl_model": _vl_model_name,
+                "models":        models_annotated,
+                "fields":        AVAILABLE_FIELDS,
+                "default_model": DEFAULT_MODEL,
             })
         elif method == "check_model":    handle_check_model(req_id, params.get("model", ""))
         elif method == "download_model": handle_download_model(req_id, params.get("model", ""))

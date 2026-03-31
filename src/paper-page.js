@@ -39,7 +39,7 @@ async function _triggerPaperEmbedding(paperId) {
   // Only bother if HF strategy is in use — no-op for js-cosine
   if (cfg.strategy !== "hf-embeddings") return;
   const config = {
-    model:   cfg.model   ?? "Qwen/Qwen3-VL-2B-Instruct",
+    model:   cfg.model   ?? "google/gemma-3-1b-it",
     fields:  cfg.fields  ?? ["title", "abstract", "hashtags"],
     weights: cfg.weights ?? {},
   };

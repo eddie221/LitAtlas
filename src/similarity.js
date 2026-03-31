@@ -59,7 +59,7 @@ export const MAX_EDGES_PER_NODE   = 7;
 export function getDefaultConfig() {
   return {
     strategy:  "js-cosine",
-    model:     "Qwen/Qwen3-VL-2B-Instruct",
+    model:     "google/gemma-3-1b-it",
     fields:    ["title", "abstract", "hashtags", "venue", "notes", "year"],
     weights:   { hashtags: 1.0},
     threshold: SIMILARITY_THRESHOLD,
@@ -70,7 +70,7 @@ export function getDefaultConfig() {
 export function getEmbeddingConfig() {
   return {
     strategy:  "js-cosine",
-    model:     "Qwen/Qwen3-VL-2B-Instruct",
+    model:     "google/gemma-3-1b-it",
     fields:    ["title", "abstract", "hashtags", "venue", "notes", "year"],
     weights:   { hashtags: 1.0},
     threshold: SIMILARITY_THRESHOLD,
@@ -408,7 +408,7 @@ function _cosineEdgesFromVectors(papers, vectors, thr, max) {
  */
 function _embConfig(cfg) {
   return {
-    model:   cfg.model   ?? "Qwen/Qwen3-VL-2B-Instruct",
+    model:   cfg.model   ?? "google/gemma-3-1b-it",
     fields:  cfg.fields  ?? ["title", "abstract", "hashtags"],
     weights: cfg.weights ?? {},
   };

@@ -97,7 +97,7 @@ export async function loadSimConfig() {
     console.warn("[LitAtlas] Could not load similarity config:", e);
   }
   console.log(_simConfig.strategy);
-  _updateMethodBadge(_simConfig.strategy);
+  _updateMethodBadge("js-cosine");
 }
 
 function _updateMethodBadge(strategy) {
@@ -564,7 +564,7 @@ export async function triggerEdgeRecompute() {
   if (_hfEnabled && _simConfig.strategy === "hf-embeddings") {
     // ── HF two-step recompute ──────────────────────────────────────────────
     const embCfg = {
-      model:   _simConfig.model   ?? "Qwen/Qwen3-VL-2B-Instruct",
+      model:   _simConfig.model   ?? "google/gemma-3-1b-it",
       fields:  _simConfig.fields  ?? ["title", "abstract", "hashtags"],
       weights: _simConfig.weights ?? {},
     };

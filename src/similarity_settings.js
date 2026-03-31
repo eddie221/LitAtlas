@@ -37,10 +37,10 @@ const FIELDS = [
   { key: "venue",    label: "Venue",        defaultWeight: 1.0 },
   { key: "notes",    label: "Notes",        defaultWeight: 1.0 },
   { key: "year",     label: "Year",         defaultWeight: 1.0 },
-  // PDF visual field — requires Qwen2.5-VL-32B and a PDF uploaded for each paper.
-  // Papers without a PDF silently skip this field during encoding.
-  { key: "pdf",      label: "PDF (visual)", defaultWeight: 1.0,
-    hint: "Requires Qwen2.5-VL-32B and an uploaded PDF. Papers without a PDF are encoded from text fields only." },
+  // PDF text field — text is extracted from the uploaded PDF with PyMuPDF and
+  // embedded by Gemma. Papers without a PDF silently skip this field.
+  { key: "pdf",      label: "PDF (text)", defaultWeight: 1.0,
+    hint: "Requires an uploaded PDF. Text is extracted with PyMuPDF and embedded by Gemma. Papers without a PDF are encoded from text fields only." },
 ];
 
 // ── Open / close ──────────────────────────────────────────────────────────────
@@ -59,13 +59,10 @@ export function closeSimilaritySettings() {
 
 // ── Built-in model list (fallback when sidecar is not yet running) ─────────────
 const _BUILTIN_MODELS = [
-  { id: "Qwen/Qwen3-VL-2B-Instruct",
-    label: "MiniLM-L6-v2 (fast, 384-dim)",
-    description: "Lightweight and fast. Good for most cases.", size_mb: 80 },
-  // { id: "Qwen/Qwen2.5-VL-32B-Instruct",
-  //   label: "Qwen2.5-VL-32B-Instruct (MLLM, 5120-dim)",
-  //   description: "Large, more precise and powerful."
-  // }
+  { id: "google/gemma-3-1b-it",
+    label: "Gemma 3 1B IT (default)",
+    description: "Default text embedding model. Lightweight and fast. Supports all text fields and PDF text extraction. Requires a HuggingFace API token (gated model).",
+    size_mb: 2000, gated: true },
 ];
 
 // ── Per-model cache status memo: modelId → true | false | null (unknown) ──────
@@ -171,16 +168,18 @@ function buildHTML(cfg, models, isHF, hfOk) {
       ? `<div class="sim-field-hint">${f.hint}</div>`
       : "";
     return `
-      <div class="sim-field-row" data-field="${f.key}">
-        <label class="sim-field-label">
-          <input type="checkbox" class="sim-field-check" data-field="${f.key}" ${check}>
-          <span>${f.label}</span>
-        </label>
-        <div class="sim-weight-wrap ${!selFields.has(f.key) ? "disabled" : ""}">
-          <input type="range" class="sim-weight-range" data-field="${f.key}"
-                 min="0.0" max="1" step="0.01" value="${w}"
-                 ${!selFields.has(f.key) ? "disabled" : ""}>
-          <span class="sim-weight-val" data-field="${f.key}">${w.toFixed(1)}</span>
+      <div class="sim-field-wrap">
+        <div class="sim-field-row" data-field="${f.key}">
+          <label class="sim-field-label">
+            <input type="checkbox" class="sim-field-check" data-field="${f.key}" ${check}>
+            <span>${f.label}</span>
+          </label>
+          <div class="sim-weight-wrap ${!selFields.has(f.key) ? "disabled" : ""}">
+            <input type="range" class="sim-weight-range" data-field="${f.key}"
+                   min="0.0" max="1" step="0.01" value="${w}"
+                   ${!selFields.has(f.key) ? "disabled" : ""}>
+            <span class="sim-weight-val" data-field="${f.key}">${w.toFixed(1)}</span>
+          </div>
         </div>
         ${hintHtml}
       </div>`;
@@ -335,15 +334,24 @@ async function _refreshDownloadUI(body, modelId, models) {
     return;
   }
 
-  // Not downloaded — show download button
-  const model = models.find(m => m.id === modelId) ?? { size_mb: "?" };
+  // Not downloaded — show download button + gated model notice if applicable
+  const model   = models.find(m => m.id === modelId) ?? { size_mb: "?" };
+  const gatedNote = model.gated
+    ? `<div class="sim-dl-gated-note">
+         <i class="bi bi-lock"></i>
+         Gated model — requires a HuggingFace API token.
+         Set your token in <strong>App Settings → HuggingFace Token</strong>
+         and accept the model license on huggingface.co before downloading.
+       </div>`
+    : "";
   area.innerHTML = `
     <div class="sim-dl-row">
       <span class="sim-dl-badge sim-dl-needed">↓ Not downloaded</span>
       <span class="sim-dl-hint">~${model.size_mb} MB required</span>
     </div>
+    ${gatedNote}
     <button id="sim-dl-btn" class="btn sim-dl-btn">
-      ↓ Download Model (${model.size_mb} MB)
+      <i class="bi bi-cloud-download"></i> Download Model (${model.size_mb} MB)
     </button>`;
   if (recomputeBtn) recomputeBtn.disabled = true;
 
@@ -489,7 +497,7 @@ async function _startEmbeddingCache(body, cfg) {
 
   try {
     const config = {
-      model:   cfg.model   ?? "Qwen/Qwen3-VL-2B-Instruct",
+      model:   cfg.model   ?? "google/gemma-3-1b-it",
       fields:  getDefaultConfig().fields,
       weights: cfg.weights ?? {},
     };

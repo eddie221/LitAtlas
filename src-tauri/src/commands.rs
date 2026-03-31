@@ -826,11 +826,7 @@ fn step_install_deps(
         ("transformers==4.57.0",    "transformers",    "transformers.__version__"),
         ("torch",           "torch",           "torch.__version__"),
         ("huggingface_hub", "huggingface_hub", "huggingface_hub.__version__"),
-        ("einops",          "einops",          "einops.__version__"),
-        ("timm",            "timm",            "timm.__version__"),
         ("PyMuPDF",         "PyMuPDF",         "PyMuPDF.__version__"),
-        ("qwen-vl-utils",   "
-        ",   "qwen-vl-utils.__version__")
     ];
 
     // Probe each package; build two lists: already-installed (for the log) and
@@ -912,8 +908,6 @@ fn step_install_deps(
         ("transformers",    "transformers",    "transformers.__version__"),
         ("torch",           "torch",           "torch.__version__"),
         ("huggingface_hub", "huggingface_hub", "huggingface_hub.__version__"),
-        ("einops",          "einops",          "einops.__version__"),
-        ("timm",            "timm",            "timm.__version__"),
     ];
     for (pip_name, import_name, version_expr) in required_confirm {
         if !missing.contains(pip_name) { continue; }
@@ -968,17 +962,25 @@ fn launch_sidecar(
     // Read the custom plugin script path from app_config.json (if set).
     // Pass it to the sidecar via the LitAtlas_PLUGIN_SCRIPT env var so
     // Python can load the user's similarity_fn / compute_embedding_fn hooks.
-    let plugin_script: String = {
+    // Read app_config.json once to extract both the plugin script path and the
+    // HuggingFace API token (needed for gated models like google/gemma-3-1b-it).
+    let (plugin_script, hf_token): (String, String) = {
         // NOTE: we don't have &AppState here, only venv_dir.  Infer data_dir
         // as venv_dir's parent (similarity_venv is created directly inside data_dir).
         let data_dir = venv_dir.parent().unwrap_or(venv_dir);
         let cfg_path = data_dir.join("app_config.json");
-        std::fs::read_to_string(&cfg_path)
+        let cfg: Option<serde_json::Value> = std::fs::read_to_string(&cfg_path)
             .ok()
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-            .and_then(|cfg| cfg["sidecar_script"].as_str().map(String::from))
+            .and_then(|raw| serde_json::from_str(&raw).ok());
+        let script = cfg.as_ref()
+            .and_then(|c| c["sidecar_script"].as_str().map(String::from))
             .filter(|p| !p.is_empty() && std::path::Path::new(p).exists())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        let token = cfg.as_ref()
+            .and_then(|c| c["hf_token"].as_str().map(String::from))
+            .filter(|t| !t.is_empty())
+            .unwrap_or_default();
+        (script, token)
     };
 
     let mut child = Command::new(&python)
@@ -989,6 +991,7 @@ fn launch_sidecar(
         .env_remove("VIRTUAL_ENV")
         .env_remove("VIRTUAL_ENV_PROMPT")
         .env("LitAtlas_PLUGIN_SCRIPT", &plugin_script)
+        .env("HUGGING_FACE_HUB_TOKEN", &hf_token)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -1056,7 +1059,7 @@ pub fn hf_setup_status(s: State<'_, AppState>) -> CmdResult<serde_json::Value> {
     // Check every required package is importable — a partial install (e.g.
     // torch present but einops missing) should also report not-ready.
     let pkg_ok = std::process::Command::new(&py)
-        .args(["-c", "import transformers, torch, huggingface_hub, einops, timm"])
+        .args(["-c", "import transformers, torch, huggingface_hub"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
@@ -1066,7 +1069,7 @@ pub fn hf_setup_status(s: State<'_, AppState>) -> CmdResult<serde_json::Value> {
     if !pkg_ok {
         return Ok(serde_json::json!({
             "ready":         false,
-            "reason":        "one or more required packages (transformers, torch, huggingface_hub, einops, timm) not installed",
+            "reason":        "one or more required packages (transformers, torch, huggingface_hub) not installed",
             "cached_models": serde_json::Value::Array(vec![]),
         }));
     }
@@ -1077,7 +1080,7 @@ pub fn hf_setup_status(s: State<'_, AppState>) -> CmdResult<serde_json::Value> {
     // contains config.json.  We do this in Rust so JS gets the list without
     // needing to start the sidecar first.
     let mut known_models: Vec<String> = vec![
-        "Qwen/Qwen3-VL-2B-Instruct".into(),
+        "google/gemma-3-1b-it".into(),
     ];
 
     // Merge custom models from app_config.json so user-defined models are
@@ -1225,7 +1228,7 @@ pub fn hf_compute_similarity(
     logger::log_call("hf_compute_similarity");
     // Inject any cached embeddings to avoid redundant encoding in Python
     let model = config["model"].as_str()
-        .unwrap_or("Qwen/Qwen3-VL-2B-Instruct");
+        .unwrap_or("google/gemma-3-1b-it");
     let fields: Vec<String> = config["fields"]
         .as_array()
         .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
@@ -1626,9 +1629,9 @@ pub fn hf_compute_paper_embedding(
         serde_json::to_value(p).map_err(|e| e.to_string())?
     };
 
-    let model  = config["model"].as_str().unwrap_or("Qwen/Qwen3-VL-2B-Instruct");
+    let model  = config["model"].as_str().unwrap_or("google/gemma-3-1b-it");
 
-    // Always include "pdf" so papers with a PDF get a visual embedding.
+    // Always include "pdf" so papers with a PDF get a text-extracted embedding.
     let mut fields: Vec<String> = config["fields"]
         .as_array()
         .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
@@ -1695,7 +1698,7 @@ pub fn hf_get_paper_embedding(
 ) -> CmdResult<serde_json::Value> {
     logger::log_call("hf_get_paper_embedding");
     let path  = embedding_path_for_paper(&s, paper_id);
-    let model = config["model"].as_str().unwrap_or("Qwen/Qwen3-VL-2B-Instruct");
+    let model = config["model"].as_str().unwrap_or("google/gemma-3-1b-it");
     let fields: Vec<String> = config["fields"]
         .as_array()
         .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
@@ -1739,10 +1742,10 @@ pub fn hf_compute_all_embeddings(
     logger::log_call("hf_compute_all_embeddings");
 
     let model = config["model"].as_str()
-        .unwrap_or("Qwen/Qwen3-VL-2B-Instruct")
+        .unwrap_or("google/gemma-3-1b-it")
         .to_string();
 
-    // Always include "pdf" so papers with a PDF get a visual embedding.
+    // Always include "pdf" so papers with a PDF get a text-extracted embedding.
     // Deduplicate in case the caller already included it.
     let mut fields: Vec<String> = config["fields"]
         .as_array()
@@ -1920,7 +1923,7 @@ pub fn hf_compute_edges_from_cache(
 ) -> CmdResult<serde_json::Value> {
     logger::log_call("hf_compute_edges_from_cache");
     let model = config["model"].as_str()
-        .unwrap_or("Qwen/Qwen3-VL-2B-Instruct");
+        .unwrap_or("google/gemma-3-1b-it");
     let fields: Vec<String> = config["fields"]
         .as_array()
         .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())

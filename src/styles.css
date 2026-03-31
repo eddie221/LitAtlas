@@ -1470,6 +1470,9 @@
 .sim-fields-hint {
   font-size: .62rem; color: var(--text-secondary); margin-bottom: 10px; line-height: 1.6;
 }
+.sim-field-wrap {
+  display: flex; flex-direction: column;
+}
 .sim-field-row {
   display: flex; align-items: center; justify-content: space-between;
   padding: 5px 0; gap: 12px;
@@ -1562,6 +1565,17 @@
 .sim-dl-hint {
   font-size: .6rem;
   color: var(--text-secondary);
+}
+
+.sim-dl-gated-note {
+  font-size: .6rem;
+  color: #c89000;
+  background: rgba(200,140,0,.08);
+  border: 1px solid rgba(200,140,0,.22);
+  border-radius: 5px;
+  padding: 6px 10px;
+  margin: 6px 0 4px;
+  line-height: 1.5;
 }
 
 /* Checking animation */
