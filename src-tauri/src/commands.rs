@@ -823,7 +823,7 @@ fn step_install_deps(
     // The version expression is embedded in the import probe so we can report
     // the installed version in the progress message.
     let required: &[(&str, &str, &str)] = &[
-        ("transformers==4.57.0",    "transformers",    "transformers.__version__"),
+        ("transformers",    "transformers",    "transformers.__version__"),
         ("torch",           "torch",           "torch.__version__"),
         ("huggingface_hub", "huggingface_hub", "huggingface_hub.__version__"),
         ("PyMuPDF",         "PyMuPDF",         "PyMuPDF.__version__"),
@@ -1285,7 +1285,6 @@ pub fn hf_check_model(
     model: String,
 ) -> CmdResult<serde_json::Value> {
     logger::log_call("hf_check_model");
-    println!("hf_check_model");
     let mut guard = ensure_running(&s, &app)?;
     guard.as_mut().unwrap()
         .call("check_model", serde_json::json!({ "model": model }))
@@ -1543,8 +1542,6 @@ fn embedding_cache_in_matches(
         .as_array()
         .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
         .unwrap_or_default();
-    println!("cached_field : {:?}", cached_fields);
-    println!("fields : {:?}", fields);
     for field in fields{
         if !cached_fields.contains(field){
             return false;
@@ -1947,7 +1944,6 @@ pub fn hf_compute_edges_from_cache(
             .and_then(|cache| recompose_embedding(&cache["field_vectors"], &fields, &weights));
         vecs.push(composite);
     }
-    println!("{:?}", vecs);
     // Pairwise cosine — identical edge-selection logic to the Python sidecar.
     let n = papers.len();
     let mut candidates: Vec<(usize, usize, f64)> = Vec::new();

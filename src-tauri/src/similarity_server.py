@@ -532,8 +532,6 @@ def compute_embedding(paper: dict, config: dict) -> dict:
     inputs = tokenizer(
         texts, padding=True, truncation=True, max_length=512, return_tensors="pt"
     ).to(device)
-    print("texts : ", texts, file=sys.stderr)
-    print("inputs : ", inputs, file=sys.stderr)
     with torch.no_grad():
         outputs = hf_model(**inputs)
     vecs = _mean_pool(outputs, inputs["attention_mask"])
