@@ -490,7 +490,7 @@ pub fn switch_project(s: State<'_, AppState>, slug: String) -> CmdResult<()> {
 //   Failure  ← { "id": u64, "ok": false, "error":  str  }
 //
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 /// Owns the live Python child process.
@@ -1004,18 +1004,34 @@ fn launch_sidecar(
         .env("HUGGING_FACE_HUB_TOKEN", &hf_token)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("Failed to spawn sidecar at '{script}': {e}"))?;
 
     let stdin  = child.stdin.take().ok_or("no sidecar stdin")?;
     let stdout = BufReader::new(child.stdout.take().ok_or("no sidecar stdout")?);
+    let mut stderr_reader = BufReader::new(child.stderr.take().ok_or("no sidecar stderr")?);
 
     let mut sc = PySidecar { child, stdin, stdout, next_id: 1 };
 
     let mut handshake = String::new();
     sc.stdout.read_line(&mut handshake)
         .map_err(|e| format!("sidecar handshake read: {e}"))?;
+
+    if handshake.trim().is_empty() {
+        // Python exited before writing the handshake — read stderr for the real error.
+        let mut stderr_out = String::new();
+        let _ = stderr_reader.read_to_string(&mut stderr_out);
+        let hint = if stderr_out.trim().is_empty() {
+            format!("Python exited immediately with no output.\nScript: {script}")
+        } else {
+            format!("Python exited immediately.\nScript: {script}\nPython error:\n{}", stderr_out.trim())
+        };
+        return Err(hint);
+    }
+
+    // Drain remaining stderr in the background so the pipe doesn't block.
+    std::thread::spawn(move || { let mut s = String::new(); let _ = stderr_reader.read_to_string(&mut s); if !s.trim().is_empty() { eprintln!("[LitAtlas sidecar stderr] {}", s.trim()); } });
 
     let v: serde_json::Value = serde_json::from_str(handshake.trim())
         .map_err(|e| format!("sidecar handshake parse: {e}\ngot: {handshake}"))?;

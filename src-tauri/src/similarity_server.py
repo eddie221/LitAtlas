@@ -43,12 +43,22 @@ except ImportError as _import_err:
     }) + "\n")
     sys.stdout.flush()
     sys.exit(1)
+except Exception as _import_err:
+    sys.stdout.write(json.dumps({
+        "id": 0, "ok": False,
+        "error": f"Failed to load torch/numpy: {_import_err}"
+    }) + "\n")
+    sys.stdout.flush()
+    sys.exit(1)
 
-if torch.cuda.is_available():
-    device = "cuda"
-elif torch.backends.mps.is_available():
-    device = "mps"
-else:
+try:
+    if torch.cuda.is_available():
+        device = "cuda"
+    elif torch.backends.mps.is_available():
+        device = "mps"
+    else:
+        device = "cpu"
+except Exception:
     device = "cpu"
 
 # ── User plugin ──────────────────────────────────────────────────────────────
