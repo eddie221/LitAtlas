@@ -46,7 +46,7 @@ Due to the tremendous growth of research, it is hard for us to keep track of eve
 
 ### Requirements
 
-- **Python 3.9–3.13** — PyTorch does not yet support Python 3.14+. If your system Python is 3.14 or newer, install a compatible version first.
+- **[Python 3.9–3.13](https://www.python.org/downloads/)** — PyTorch does not yet support Python 3.14+. If your system Python is 3.14 or newer, install a compatible version first.
 
 ## Install Issues:
 
