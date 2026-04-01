@@ -23,10 +23,10 @@
     "withGlobalTauri": true,
     "security": {
       "csp": {
-        "default-src": "'self' customprotocol: asset:",
-        "style-src": "'self' customprotocol: asset: https://cdn.jsdelivr.net",
-        "font-src": "'self' customprotocol: asset: https://cdn.jsdelivr.net",
-        "script-src": "'self' customprotocol: asset: https://cdnjs.cloudflare.com"
+        "default-src": "'self' customprotocol: asset: blob:",
+        "style-src": "'self' customprotocol: asset:",
+        "font-src": "'self' customprotocol: asset:",
+        "script-src": "'self' customprotocol: asset:"
       }
     }
   },

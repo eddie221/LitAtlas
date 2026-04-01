@@ -229,9 +229,9 @@ pub fn run() {
             list_projects, create_project, rename_project,
             delete_project, switch_project, get_current_project,
             // HuggingFace similarity (Rust owns Python sidecar)
-            hf_compute_similarity, hf_list_models, hf_sidecar_status,
+            hf_list_models, hf_sidecar_status,
             hf_check_model, hf_download_model,
-            hf_compute_paper_embedding, hf_get_paper_embedding, hf_compute_all_embeddings,
+            hf_get_paper_embedding, hf_compute_all_embeddings,
             hf_compute_edges_from_cache,
             hf_setup_status, hf_setup_venv,
             // Similarity config persistence

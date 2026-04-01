@@ -28,8 +28,22 @@ import threading
 import time
 import traceback
 from typing import Any
-import torch
-import numpy as np
+
+try:
+    import torch
+    import numpy as np
+except ImportError as _import_err:
+    sys.stdout.write(json.dumps({
+        "id": 0, "ok": False,
+        "error": (
+            f"Missing dependency: {_import_err}. "
+            "Please re-run 'Setup AI Similarity' from the Similarity Settings panel "
+            "to install the required packages."
+        )
+    }) + "\n")
+    sys.stdout.flush()
+    sys.exit(1)
+
 if torch.cuda.is_available():
     device = "cuda"
 elif torch.backends.mps.is_available():
@@ -154,7 +168,7 @@ def _get_model(model_name: str, allow_download: bool = True):
         if _model is not None and _model_name == model_name:
             return _model
         try:
-            from transformers import AutoTokenizer, AutoModel
+            from transformers import AutoTokenizer, Gemma3ForCausalLM
 
             offline = _model_snapshot_path(model_name) is not None
 
@@ -171,8 +185,8 @@ def _get_model(model_name: str, allow_download: bool = True):
             if hf_token:
                 kwargs["token"] = hf_token
             try:
-                tokenizer = AutoTokenizer.from_pretrained(model_name, **kwargs)
-                model     = AutoModel.from_pretrained(model_name, trust_remote_code=True, **kwargs)
+                tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side = "left", **kwargs)
+                model     = Gemma3ForCausalLM.from_pretrained(model_name, trust_remote_code=True, **kwargs)
                 model.eval()
             except Exception as dl_err:
                 err_str = str(dl_err).lower()
@@ -235,13 +249,21 @@ def _mean_pool(model_output, attention_mask):
     masking out padding tokens, then L2-normalise each row.
     Returns a numpy array of shape (batch, dim).
     """
-    token_embeddings = model_output.last_hidden_state            # (B, T, D)
-    mask = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
-    summed = torch.sum(token_embeddings * mask, dim=1)
-    counts = torch.clamp(mask.sum(dim=1), min=1e-9)
-    pooled = summed / counts                                      # (B, D)
-    norms  = pooled.norm(dim=1, keepdim=True).clamp(min=1e-9)
-    return (pooled / norms).detach().cpu().numpy()                # (B, D)
+    token_embeddings = model_output.hidden_states[-1]            # (B, T, D)
+    # # Sanitise model output — some models (e.g. Gemma on MPS) can emit NaN/Inf
+    # # in hidden states due to numerical overflow; replace them with 0 so pooling
+    # # and normalisation stay well-defined and JSON serialisation never produces
+    # # bare NaN/Infinity tokens that serde_json rejects.
+    # token_embeddings = torch.nan_to_num(token_embeddings, nan=0.0, posinf=0.0, neginf=0.0)
+    # mask = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
+    # summed = torch.sum(token_embeddings * mask, dim=1)
+    # counts = torch.clamp(mask.sum(dim=1), min=1e-9)
+    # pooled = summed / counts                                      # (B, D)
+    # norms  = pooled.norm(dim=1, keepdim=True).clamp(min=1e-9)
+    # result = (pooled / norms).detach().cpu()
+    # # Final safety: nan_to_num again in case any residual NaN survived
+    # return torch.nan_to_num(result, nan=0.0, posinf=0.0, neginf=0.0).numpy()  # (B, D)
+    return token_embeddings[:, -1]
 
 
 # ── HuggingFace cache helpers ─────────────────────────────────────────────────
@@ -416,15 +438,21 @@ def paper_embedding(paper: dict, fields: list, weights: dict, model) -> list:
     hf_model.to(device)
     inputs = tokenizer(texts, padding=True, truncation=True, max_length=512, return_tensors="pt").to(device)
     with torch.no_grad():
-        outputs = hf_model(**inputs)
+        outputs = hf_model(**inputs, output_hidden_states = True)
     vecs = _mean_pool(outputs, inputs["attention_mask"])
 
-    # Weighted sum
+    # Weighted sum — skip any field whose encoded vector is effectively zero
+    # (all-zero vectors arise when text was empty or NaN sanitisation zeroed out
+    # a degenerate model output; including them would dilute the composite).
     dim       = vecs.shape[1]
     composite = [0.0] * dim
     for (_, _, w), vec in zip(items, vecs):
-        for k in range(dim):
-            composite[k] += w * float(vec[k])
+        sanitized = [0.0 if (math.isnan(float(vec[k])) or math.isinf(float(vec[k]))) else float(vec[k])
+                     for k in range(dim)]
+        if not any(v != 0.0 for v in sanitized):
+            continue  # skip degenerate / empty-field vector
+        for k, v in enumerate(sanitized):
+            composite[k] += w * v
 
     # L2-normalise so downstream cosine() works correctly on these vectors
     norm = math.sqrt(sum(x * x for x in composite))
@@ -516,29 +544,21 @@ def compute_embedding(paper: dict, config: dict) -> dict:
     field_vectors = {}
     dim           = 0
 
+    tokenizer, hf_model = _get_model(model_name)
+    hf_model.to(device)
+
     items = []
     for field in fields:
         text = _field_text(paper, field).strip()
-        if text:
-            items.append((field, text))
+        inputs = tokenizer(text, max_length=512, return_tensors="pt").to(device)
+        with torch.no_grad():
+            outputs = hf_model(**inputs, output_hidden_states = True)
+        vecs = _mean_pool(outputs, inputs["attention_mask"])
+        dim  = vecs.shape[1]
 
-    if not items:
-        # Absolute fallback: encode title so the paper always has something.
-        items = [("title", paper.get("title", "").strip() or "unknown")]
-
-    tokenizer, hf_model = _get_model(model_name)
-    hf_model.to(device)
-    texts  = [text for _, text in items]
-    inputs = tokenizer(
-        texts, padding=True, truncation=True, max_length=512, return_tensors="pt"
-    ).to(device)
-    with torch.no_grad():
-        outputs = hf_model(**inputs)
-    vecs = _mean_pool(outputs, inputs["attention_mask"])
-    dim  = vecs.shape[1]
-    for (field, _), vec in zip(items, vecs):
-        field_vectors[field] = vec.tolist()
-
+        raw = vecs[0].tolist()
+        field_vectors[field] = raw
+        
     return {"field_vectors": field_vectors, "dim": dim}
 
 
@@ -562,6 +582,8 @@ def compute(papers: list, config: dict) -> list:
     if not papers: return []
     model      = _get_model(model_name)
 
+    print(fields, file=sys.stderr)
+
     # Build composite embedding vectors for all papers.
     #
     # Rust's inject_cached_embeddings pre-processes the papers list before this
@@ -574,7 +596,6 @@ def compute(papers: list, config: dict) -> list:
     # via paper_embedding(), which applies weights during encoding.
     vecs             = []
     papers_to_encode = []   # (original_index, paper_dict) needing fresh encoding
-
     for i, p in enumerate(papers):
         cached_vec = p.get("_embedding")
         if isinstance(cached_vec, list) and len(cached_vec) > 0:
@@ -693,6 +714,7 @@ def handle(line: str) -> None:
             result = compute_embedding(params.get("paper", {}), params.get("config", {}))
             ok(req_id, result)
         elif method == "compute":
+            print(params, file=sys.stderr)
             edges = compute(params.get("papers", []), params.get("config", {}))
             ok(req_id, {"edges": edges, "count": len(edges)})
         elif method == "validate_plugin":

@@ -38,9 +38,12 @@ async function _triggerPaperEmbedding(paperId) {
   const cfg = window.LitAtlas?.getSimConfig?.() ?? {};
   // Only bother if HF strategy is in use — no-op for js-cosine
   if (cfg.strategy !== "hf-embeddings") return;
+  // Always embed ALL available fields so the cache is complete regardless of
+  // which fields the user currently has selected.  This prevents the pre-warm
+  // from finding only a subset missing and appearing to "only compute abstract."
   const config = {
     model:   cfg.model   ?? "google/gemma-3-1b-it",
-    fields:  cfg.fields  ?? ["title", "abstract", "hashtags"],
+    fields:  ["title", "abstract", "hashtags", "venue", "notes", "year", "pdf"],
     weights: cfg.weights ?? {},
   };
   await invoke("hf_compute_paper_embedding", { paperId, config });

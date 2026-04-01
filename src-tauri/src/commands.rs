@@ -489,7 +489,6 @@ pub fn switch_project(s: State<'_, AppState>, slug: String) -> CmdResult<()> {
 //   Success  ← { "id": u64, "ok": true,  "result": any  }
 //   Failure  ← { "id": u64, "ok": false, "error":  str  }
 //
-// JS is completely unaware of Python; it calls invoke("hf_compute_similarity").
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -823,7 +822,16 @@ fn step_install_deps(
     // The version expression is embedded in the import probe so we can report
     // the installed version in the progress message.
     let required: &[(&str, &str, &str)] = &[
-        ("transformers",    "transformers",    "transformers.__version__"),
+        // Probe exits 1 if the installed version is 4.57.0 (yanked), forcing
+        // a reinstall with the !=4.57.0 constraint so pip picks a stable release.
+        (
+            "transformers!=4.57.0",
+            "transformers",
+            // "import transformers" is prepended by the probe format string, so
+            // `transformers` is already in scope here.
+            "(__import__('sys').exit(1) if transformers.__version__ == '4.57.0' \
+             else transformers.__version__)",
+        ),
         ("torch",           "torch",           "torch.__version__"),
         ("huggingface_hub", "huggingface_hub", "huggingface_hub.__version__"),
         ("PyMuPDF",         "PyMuPDF",         "PyMuPDF.__version__"),
@@ -905,10 +913,12 @@ fn step_install_deps(
 
     // Confirm by re-probing every package that was just installed.
     let required_confirm: &[(&str, &str, &str)] = &[
-        ("transformers",    "transformers",    "transformers.__version__"),
-        ("torch",           "torch",           "torch.__version__"),
-        ("huggingface_hub", "huggingface_hub", "huggingface_hub.__version__"),
+        ("transformers!=4.57.0", "transformers",    "transformers.__version__"),
+        ("torch",                "torch",           "torch.__version__"),
+        ("huggingface_hub",      "huggingface_hub", "huggingface_hub.__version__"),
     ];
+    // The confirm loop uses pip_name for the missing-contains check; the probe
+    // expression for transformers uses __import__ style to avoid side-effects.
     for (pip_name, import_name, version_expr) in required_confirm {
         if !missing.contains(pip_name) { continue; }
         let probe = format!("import {import_name}; print({version_expr})");
@@ -1207,40 +1217,6 @@ pub fn hf_setup_venv(
     Ok(serde_json::json!({ "ok": true, "background": true }))
 }
 
-/// Compute similarity edges using a HuggingFace sentence-transformer model.
-///
-/// Called from JS as: invoke("hf_compute_similarity", { papers, config })
-///
-/// config shape:
-///   { model, fields, weights, threshold, max_edges }
-///
-/// Returns: { edges: EdgeInput[], count: number }
-///
-/// Before sending to Python, cached embedding vectors are injected as
-/// "_embedding" fields so the sidecar can skip re-encoding those papers.
-#[tauri::command]
-pub fn hf_compute_similarity(
-    app:    tauri::AppHandle,
-    s:      State<'_, AppState>,
-    mut papers: Vec<serde_json::Value>,
-    config: serde_json::Value,
-) -> CmdResult<serde_json::Value> {
-    logger::log_call("hf_compute_similarity");
-    // Inject any cached embeddings to avoid redundant encoding in Python
-    let model = config["model"].as_str()
-        .unwrap_or("google/gemma-3-1b-it");
-    let fields: Vec<String> = config["fields"]
-        .as_array()
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-        .unwrap_or_else(|| vec!["title".into(), "abstract".into(), "hashtags".into()]);
-    let weights = config.get("weights").cloned().unwrap_or(serde_json::Value::Object(Default::default()));
-    inject_cached_embeddings(&s, &mut papers, model, &fields, &weights);
-
-    let mut guard = ensure_running(&s, &app)?;
-    guard.as_mut().unwrap()
-        .call("compute", serde_json::json!({ "papers": papers, "config": config }))
-}
-
 /// Retrieve the list of supported models and fields from the sidecar.
 ///
 /// Called from JS as: invoke("hf_list_models")
@@ -1507,47 +1483,63 @@ fn read_embedding_cache(path: &std::path::Path) -> Option<serde_json::Value> {
     serde_json::from_str(&raw).ok()
 }
 
-/// Check whether a cached embedding is reusable for the given model+fields.
+/// Returns true when the cache covers every requested field with a stored vector.
 ///
-/// Weights are intentionally NOT compared here — the cache stores raw per-field
-/// vectors so that reweighting can be done locally in Rust without re-encoding.
-/// Only a model or field-set change requires re-encoding from Python.
+/// This is a superset check: the cache may contain MORE fields than requested —
+/// that is fine.  recompose_embedding selects only the relevant subset.
+/// Weights are not compared — the cache stores raw per-field vectors so the
+/// composite can be recomposed locally without re-encoding when weights change.
 fn embedding_cache_matches(
     cache:  &serde_json::Value,
     model:  &str,
     fields: &[String],
 ) -> bool {
     if cache["model"].as_str() != Some(model) { return false; }
-    let cached_fields: Vec<String> = cache["fields"]
-        .as_array()
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-        .unwrap_or_default();
-    // println!("cached_field : {:?}", cached_fields);
-    // println!("fields : {:?}", fields);
-    cached_fields == fields
+    let fv = match cache["field_vectors"].as_object() {
+        Some(m) => m,
+        None    => return false,
+    };
+    fields.iter().all(|f| fv.contains_key(f.as_str()))
 }
 
-/// Check whether a cached embedding is reusable for the given model+fields.
+/// Merge `new_fv` into an existing embedding cache file and write it back.
 ///
-/// Weights are intentionally NOT compared here — the cache stores raw per-field
-/// vectors so that reweighting can be done locally in Rust without re-encoding.
-/// Only a model or field-set change requires re-encoding from Python.
-fn embedding_cache_in_matches(
-    cache:  &serde_json::Value,
-    model:  &str,
-    fields: &[String],
-) -> bool {
-    if cache["model"].as_str() != Some(model) { return false; }
-    let cached_fields: Vec<String> = cache["fields"]
-        .as_array()
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-        .unwrap_or_default();
-    for field in fields{
-        if !cached_fields.contains(field){
-            return false;
+/// If the file already exists and was written for the same model, its
+/// field_vectors are preserved and the new ones are overlaid on top (new
+/// vectors win, allowing stale individual fields to be refreshed while
+/// keeping unrelated fields intact).  If the model differs, the old data
+/// is discarded — field vectors from a different model are not comparable.
+fn write_merged_embedding(
+    path:       &std::path::Path,
+    model:      &str,
+    new_fv:     &serde_json::Value,
+    written_at: &str,
+) -> Result<(), String> {
+    // Seed merged map with existing vectors for the same model.
+    let mut merged: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+    if let Some(existing) = read_embedding_cache(path) {
+        if existing["model"].as_str() == Some(model) {
+            if let Some(obj) = existing["field_vectors"].as_object() {
+                merged.extend(obj.clone());
+            }
         }
     }
-    return true;
+    // Overlay with newly computed vectors (they are fresher and take precedence).
+    if let Some(obj) = new_fv.as_object() {
+        merged.extend(obj.clone());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("Cannot create embedding dir: {e}"))?;
+    }
+    let payload = serde_json::json!({
+        "model":         model,
+        "field_vectors": serde_json::Value::Object(merged),
+        "written_at":    written_at,
+    });
+    serde_json::to_string(&payload)
+        .map_err(|e| e.to_string())
+        .and_then(|s| std::fs::write(path, s).map_err(|e| e.to_string()))
+        .map_err(|e| format!("Cannot write embedding: {e}"))
 }
 
 /// Recompose a weighted composite vector from raw per-field vectors and
@@ -1565,8 +1557,9 @@ fn recompose_embedding(
     let fv_map = field_vectors.as_object()?;
     let mut composite: Vec<f64> = Vec::new();
     let mut any = false;
-    // println!("fv_map {:?}", fv_map);
     for field in fields {
+        println!("field {:?}", field);
+        
         let vec_val = match fv_map.get(field) { Some(v) => v, None => continue };
         let arr = match vec_val.as_array() { Some(a) => a, None => continue };
         let w = weights.get(field)
@@ -1582,6 +1575,7 @@ fn recompose_embedding(
         }
         any = true;
     }
+    // println!("composite : {:?}", composite);
 
     if !any || composite.is_empty() { return None; }
 
@@ -1591,93 +1585,6 @@ fn recompose_embedding(
         for x in &mut composite { *x /= norm; }
     }
     Some(composite)
-}
-
-/// Compute and persist the raw per-field embedding vectors for a single paper.
-///
-/// The JSON cache stores only model, fields, and field_vectors — no weights
-/// and no composite vector.  This means the cache stays valid whenever only
-/// the weights change; the composite is recomposed from field_vectors at query
-/// time using the current weights (see inject_cached_embeddings).
-///
-/// The "pdf" field is always included so that a paper with a PDF gets a visual
-/// embedding alongside its text fields.  Papers without a pdf_path silently
-/// skip the pdf field in Python.
-///
-/// Called from JS as: invoke("hf_compute_paper_embedding", { paperId, config })
-///
-/// config shape: { model, fields, weights, vl_model? }
-///
-/// Returns: { paper_id, path, dim, cached: false }
-#[tauri::command]
-pub fn hf_compute_paper_embedding(
-    app:      tauri::AppHandle,
-    s:        State<'_, AppState>,
-    paper_id: i64,
-    config:   serde_json::Value,
-) -> CmdResult<serde_json::Value> {
-    logger::log_call("hf_compute_paper_embedding");
-    // Load the paper from DB so Python has all fields (title, abstract, hashtags, pdf_path…)
-    let paper: serde_json::Value = {
-        let pool   = s.pool();
-        let p = tauri::async_runtime::block_on(
-            crate::db::get_paper(&pool, paper_id)
-        ).map_err(|e| e.to_string())?;
-        serde_json::to_value(p).map_err(|e| e.to_string())?
-    };
-
-    let model  = config["model"].as_str().unwrap_or("google/gemma-3-1b-it");
-
-    // Always include "pdf" so papers with a PDF get a text-extracted embedding.
-    let mut fields: Vec<String> = config["fields"]
-        .as_array()
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-        .unwrap_or_else(|| vec!["title".into(), "abstract".into(), "hashtags".into()]);
-    if !fields.iter().any(|f| f == "pdf") {
-        fields.push("pdf".into());
-    }
-
-    // Forward vl_model override if provided; Python falls back to its own default otherwise.
-    let py_config = serde_json::json!({
-        "model":    model,
-        "fields":   &fields,
-        "weights":  config.get("weights").cloned().unwrap_or(serde_json::Value::Object(Default::default())),
-        "vl_model": config.get("vl_model").cloned().unwrap_or(serde_json::Value::Null),
-    });
-
-    let mut guard = ensure_running(&s, &app)?;
-    let result = guard.as_mut().unwrap()
-        .call("compute_embedding", serde_json::json!({ "paper": paper, "config": py_config }))?;
-    drop(guard);
-
-    // Python returns { field_vectors: { "<field>": [f32, ...], ... }, dim: int }
-    let field_vectors = result.get("field_vectors").cloned()
-        .unwrap_or(serde_json::Value::Object(Default::default()));
-    let dim = result["dim"].as_u64().unwrap_or(0);
-
-    // Persist — weights intentionally excluded so cache survives weight changes.
-    let path = embedding_path_for_paper(&s, paper_id);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("Cannot create embedding dir: {e}"))?;
-    }
-    let written_at = chrono_now_iso();
-    let payload = serde_json::json!({
-        "model":         model,
-        "fields":        fields,
-        "field_vectors": field_vectors,
-        "written_at":    written_at,
-        // NOTE: no "weights" key, no "vector" key — composite recomposed at query time.
-    });
-    std::fs::write(&path, serde_json::to_string(&payload).map_err(|e| e.to_string())?)
-        .map_err(|e| format!("Cannot write embedding: {e}"))?;
-
-    Ok(serde_json::json!({
-        "paper_id": paper_id,
-        "path":     path.to_string_lossy(),
-        "dim":      dim,
-        "cached":   false,
-    }))
 }
 
 /// Read cached raw per-field embedding vectors for a paper.
@@ -1741,16 +1648,13 @@ pub fn hf_compute_all_embeddings(
     let model = config["model"].as_str()
         .unwrap_or("google/gemma-3-1b-it")
         .to_string();
-
+    
     // Always include "pdf" so papers with a PDF get a text-extracted embedding.
     // Deduplicate in case the caller already included it.
     let mut fields: Vec<String> = config["fields"]
         .as_array()
         .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
         .unwrap_or_else(|| vec!["title".into(), "abstract".into(), "hashtags".into()]);
-    if !fields.iter().any(|f| f == "pdf") {
-        fields.push("pdf".into());
-    }
 
     // Load papers and pre-compute embedding paths synchronously before spawning
     // the background thread — avoids passing the non-Send State<'_> reference
@@ -1785,19 +1689,47 @@ pub fn hf_compute_all_embeddings(
     // skipped — only stale or missing embeddings are re-encoded.
     let skip_fresh = config["skip_fresh"].as_bool().unwrap_or(false);
 
-    // Pre-filter when skip_fresh is requested: pair each paper with its path,
-    // keeping only those that are actually stale. This lets us report the true
-    // work count to JS before spawning the thread.
-    let work: Vec<(crate::db::PaperFull, std::path::PathBuf)> = papers
+    // Pre-filter when skip_fresh is requested.  Each paper carries its own
+    // fields-to-encode list so we avoid redundant re-encoding:
+    //   • stale or wrong model  → encode all selected fields
+    //   • fresh, fields missing → encode only the missing fields
+    //   • fully fresh           → skip this paper entirely
+    let work: Vec<(crate::db::PaperFull, std::path::PathBuf, Vec<String>)> = papers
         .into_iter()
         .zip(embedding_paths.into_iter())
-        .filter(|(paper, emb_path)| {
-            if !skip_fresh { return true; }
-            // Fresh = embedding exists, model+fields match, AND written after last edit.
-            match read_embedding_cache(emb_path) {
-                Some(ref cache) if embedding_cache_matches(cache, &model, &fields)
-                    && !is_embedding_stale(&paper.updated_at, cache) => false,
-                _ => true,
+        .filter_map(|(paper, emb_path)| {
+            // Exclude "pdf" for papers that have no uploaded PDF file.  Python
+            // cannot produce a pdf vector without content, so keeping "pdf" in
+            // the list causes those papers to appear perpetually stale (the key
+            // is always "missing" from the cache), wasting a Python call every
+            // recompute with only one pseudo-embedding (title fallback).
+            let has_pdf = paper.pdf_path.as_deref().map(|p| !p.is_empty()).unwrap_or(false);
+            let effective_fields: Vec<String> = fields.iter()
+                .filter(|f| *f != "pdf" || has_pdf)
+                .cloned()
+                .collect();
+
+            if !skip_fresh {
+                return Some((paper, emb_path, effective_fields));
+            }
+            match read_embedding_cache(&emb_path) {
+                Some(ref cache)
+                    if cache["model"].as_str() == Some(&model)
+                        && !is_embedding_stale(&paper.updated_at, cache) =>
+                {
+                    // Model matches and paper content is fresh — encode only missing fields.
+                    let fv = cache["field_vectors"].as_object();
+                    let missing: Vec<String> = effective_fields.iter()
+                        .filter(|f| fv.map(|m| !m.contains_key(f.as_str())).unwrap_or(true))
+                        .cloned()
+                        .collect();
+                    if missing.is_empty() {
+                        None  // All fields cached and fresh — skip entirely.
+                    } else {
+                        Some((paper, emb_path, missing))
+                    }
+                }
+                _ => Some((paper, emb_path, effective_fields)),
             }
         })
         .collect();
@@ -1810,21 +1742,18 @@ pub fn hf_compute_all_embeddings(
         "total":   total,
     }));
 
-    // Build the config value that Python will receive — use the augmented fields
-    // list (with "pdf" guaranteed) so Python encodes all relevant fields.
-    let py_config = serde_json::json!({
-        "model":     &model,
-        "fields":    &fields,
-        "weights":   config.get("weights").cloned().unwrap_or(serde_json::Value::Object(Default::default())),
-        "vl_model":  config.get("vl_model").cloned().unwrap_or(serde_json::Value::Null),
-    });
+    // Shared config values passed into the background thread.
+    // Per-paper `fields` lists are stored in `work` and used to build each
+    // paper's Python config inside the loop.
+    let weights  = config.get("weights").cloned().unwrap_or(serde_json::Value::Object(Default::default()));
+    let vl_model = config.get("vl_model").cloned().unwrap_or(serde_json::Value::Null);
 
     // Spawn encoding loop on a background thread — command returns immediately
     // so Tauri can deliver per-paper progress events to the JS event loop.
     std::thread::spawn(move || {
         let mut computed = 0usize;
 
-        for (index, (paper, emb_path)) in work.iter().enumerate() {
+        for (index, (paper, emb_path, paper_fields)) in work.iter().enumerate() {
             let _ = app.emit("embedding://progress", serde_json::json!({
                 "paper_id": paper.id,
                 "title":    &paper.title,
@@ -1840,12 +1769,20 @@ pub fn hf_compute_all_embeddings(
                 }
             };
 
+            // Build a per-paper config with only the fields this paper needs.
+            let paper_config = serde_json::json!({
+                "model":    &model,
+                "fields":   paper_fields,
+                "weights":  &weights,
+                "vl_model": &vl_model,
+            });
+
             let state = app.state::<AppState>();
             let result = match ensure_running(&state, &app) {
                 Ok(mut guard) => {
-                    let r = guard.as_mut().unwrap().call(
+                    let r: Result<serde_json::Value, String> = guard.as_mut().unwrap().call(
                         "compute_embedding",
-                        serde_json::json!({ "paper": paper_val, "config": &py_config }),
+                        serde_json::json!({ "paper": paper_val, "config": &paper_config }),
                     );
                     drop(guard);
                     match r {
@@ -1861,24 +1798,13 @@ pub fn hf_compute_all_embeddings(
                     return;
                 }
             };
-
+            
             let field_vectors = result.get("field_vectors").cloned()
                 .unwrap_or(serde_json::Value::Object(Default::default()));
-
-            if let Some(parent) = emb_path.parent() {
-                std::fs::create_dir_all(parent).ok();
-            }
+            
+            // Merge new vectors into the existing cache (preserve unrelated fields).
             let written_at = chrono_now_iso();
-            let payload = serde_json::json!({
-                "model":         &model,
-                "fields":        &fields,
-                "field_vectors": field_vectors,
-                "written_at":    written_at,
-            });
-            if let Err(e) = serde_json::to_string(&payload)
-                .map_err(|e| e.to_string())
-                .and_then(|s| std::fs::write(emb_path, s).map_err(|e| e.to_string()))
-            {
+            if let Err(e) = write_merged_embedding(emb_path, &model, &field_vectors, &written_at) {
                 let _ = app.emit("embedding://error", serde_json::json!({ "error": e }));
                 return;
             }
@@ -1919,8 +1845,8 @@ pub fn hf_compute_edges_from_cache(
     config: serde_json::Value,
 ) -> CmdResult<serde_json::Value> {
     logger::log_call("hf_compute_edges_from_cache");
-    let model = config["model"].as_str()
-        .unwrap_or("google/gemma-3-1b-it");
+    // let model = config["model"].as_str()
+    //     .unwrap_or("google/gemma-3-1b-it");
     let fields: Vec<String> = config["fields"]
         .as_array()
         .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
@@ -1930,6 +1856,7 @@ pub fn hf_compute_edges_from_cache(
     let threshold = config["threshold"].as_f64().unwrap_or(0.38);
     let max_edges = config["max_edges"].as_u64().unwrap_or(7) as usize;
 
+    // println!("fields : {:?}", fields);
     // Build (paper_json, composite_vector) pairs.
     // Papers without a cache file, with a stale cache, or with a mismatched
     // model/fields are given None and produce no edges.
@@ -1939,7 +1866,6 @@ pub fn hf_compute_edges_from_cache(
         let updated_at = paper["updated_at"].as_str().unwrap_or("");
         let path = embedding_path_for_paper(&s, id);
         let composite = read_embedding_cache(&path)
-            .filter(|cache| embedding_cache_in_matches(cache, model, &fields))
             .filter(|cache| !is_embedding_stale(updated_at, cache))
             .and_then(|cache| recompose_embedding(&cache["field_vectors"], &fields, &weights));
         vecs.push(composite);
@@ -1951,6 +1877,7 @@ pub fn hf_compute_edges_from_cache(
         for j in (i + 1)..n {
             let (Some(vi), Some(vj)) = (&vecs[i], &vecs[j]) else { continue };
             let sim = cosine_f64(vi, vj);
+            println!("{:?} {:?} {:?}", i, j, sim);
             if sim >= threshold {
                 candidates.push((i, j, sim));
             }
@@ -2010,41 +1937,6 @@ fn edge_type_for(a: &serde_json::Value, b: &serde_json::Value) -> &'static str {
         return "same_venue";
     }
     "related"
-}
-
-/// Inject composite embedding vectors into a papers list before sending to sidecar.
-///
-/// For each paper whose embedding.json exists and matches model+fields, this
-/// function recomposes the weighted composite from the stored raw field_vectors
-/// using the *current* weights, then injects it as "_embedding".  Python will
-/// use it directly via the cached-vector fast path and skip re-encoding.
-///
-/// Papers without a valid cache miss fall through to Python fresh-encoding.
-///
-/// Called internally by hf_compute_similarity.
-fn inject_cached_embeddings(
-    s:       &AppState,
-    papers:  &mut Vec<serde_json::Value>,
-    model:   &str,
-    fields:  &[String],
-    weights: &serde_json::Value,
-) {
-    for paper in papers.iter_mut() {
-        let id = match paper["id"].as_i64() { Some(v) => v, None => continue };
-        let path = embedding_path_for_paper(s, id);
-        if let Some(cache) = read_embedding_cache(&path) {
-            // Cache is valid when model+fields match; weights are applied fresh below.
-            if embedding_cache_matches(&cache, model, fields) {
-                if let Some(composite) = recompose_embedding(&cache["field_vectors"], fields, weights) {
-                    let json_vec: Vec<serde_json::Value> = composite
-                        .iter()
-                        .map(|x| serde_json::json!(x))
-                        .collect();
-                    paper["_embedding"] = serde_json::Value::Array(json_vec);
-                }
-            }
-        }
-    }
 }
 
 // ── Similarity config persistence ─────────────────────────────────────────────

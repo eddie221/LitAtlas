@@ -34,6 +34,9 @@ Due to the tremendous growth of research, it is hard for us to keep track of eve
     - [ ] Customized function.
     - [ ] Self-defined models.
 
+ - Provide explanations for the edges
+    - [ ] LLM caption 
+
  - Search
     - [X] Paper Title
     - [X] Venue

@@ -39,6 +39,11 @@ const tauriListen = (
 // ── Similarity config (loaded from Rust on boot, persisted on change) ─────────
 let _simConfig = getDefaultConfig();
 
+// All fields that can be embedded.  Pre-warm always encodes every field so
+// that changing the field selection in settings never requires re-encoding.
+// "pdf" is included; Rust skips it per-paper when pdf_path is absent.
+const _ALL_EMBED_FIELDS = ["title", "abstract", "hashtags", "venue", "notes", "year", "pdf"];
+
 // ── LLM module enable state ───────────────────────────────────────────────────
 // null = not yet checked, true = user opted in, false = user opted out
 let _hfEnabled = null;
@@ -568,10 +573,11 @@ export async function triggerEdgeRecompute() {
       fields:  _simConfig.fields  ?? ["title", "abstract", "hashtags"],
       weights: _simConfig.weights ?? {},
     };
+    console.log("embCfg : ", embCfg);
 
     // papers array is used by both steps — includes updated_at for staleness check.
     const papers = getPapersCache().map(p => ({
-      id: p.id, title: p.title, venue: p.venue, year: p.year,
+      id: p.id, title: p.title, abstract: p.abstract, venue: p.venue, year: p.year,
       hashtags: p.hashtags, notes: p.notes, attributes: p.attributes,
       updated_at: p.updated_at ?? "",
     }));
@@ -626,7 +632,30 @@ export async function triggerEdgeRecompute() {
 // immediately.  If not, a full recompute is triggered automatically.
 export async function switchEdgeStrategy(newStrategy) {
   const srcType = newStrategy === "hf-embeddings" ? "hf-embeddings" : "js-cosine";
-  const cached  = await invoke("get_edges_by_source", { sourceType: srcType });
+
+  // When switching to AI mode, pre-warm embeddings for all papers that are
+  // stale or missing before checking/computing edges.  skip_fresh: true keeps
+  // this cheap when papers are already up-to-date (total = 0, no overlay).
+  if (newStrategy === "hf-embeddings" && _hfEnabled) {
+    const embDone = _waitForEmbeddingDone();
+    const embStart = await invoke("hf_compute_all_embeddings", {
+      config: {
+        model:      _simConfig.model   ?? "google/gemma-3-1b-it",
+        fields:     _ALL_EMBED_FIELDS,
+        weights:    _simConfig.weights ?? {},
+        skip_fresh: true,
+      },
+    });
+    if ((embStart.total ?? 0) > 0) {
+      _embedIndex = 0;
+      _embedTotal = embStart.total;
+      _embedTitle = "";
+      _showEmbeddingOverlay();
+    }
+    await embDone;
+  }
+
+  const cached = await invoke("get_edges_by_source", { sourceType: srcType });
 
   if (cached.length > 0) {
     // Cached edges exist — swap instantly, no computation needed.
@@ -636,6 +665,8 @@ export async function switchEdgeStrategy(newStrategy) {
     document.getElementById("stat-connections").textContent = getEdgesCache().length;
   } else {
     // No cached edges for this strategy yet — trigger a full recompute.
+    // Embeddings are already fresh from the pre-warm above, so the embedding
+    // step inside triggerEdgeRecompute will be a no-op (total = 0).
     await triggerEdgeRecompute();
   }
 }

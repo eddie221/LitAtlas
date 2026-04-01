@@ -4,67 +4,12 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>LitAtlas — Research Relationship Viewer</title>
-  <!-- ── LOCAL FONTS ─────────────────────────────────────────────────────────
-       Font files live in the same directory as index.html (or adjust the
-       paths below to match your Tauri asset setup).
-
-       To obtain the woff2 files:
-         Space Mono      → https://fontsource.org/fonts/space-mono
-         DM Serif Display → https://fontsource.org/fonts/dm-serif-display
-       Download the "Variable" or individual weight packages, then copy:
-         Space Mono 400  → fonts/space-mono-latin-400-normal.woff2
-         Space Mono 700  → fonts/space-mono-latin-700-normal.woff2
-         DM Serif Display 400        → fonts/dm-serif-display-latin-400-normal.woff2
-         DM Serif Display 400 italic → fonts/dm-serif-display-latin-400-italic.woff2
-  ── -->
-  <style>
-    @font-face {
-      font-family: 'Space Mono';
-      font-style:  normal;
-      font-weight: 400;
-      font-display: swap;
-      src: url('fonts/space-mono-latin-400-normal.woff2') format('woff2');
-      unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6,
-                     U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F,
-                     U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
-    }
-    @font-face {
-      font-family: 'Space Mono';
-      font-style:  normal;
-      font-weight: 700;
-      font-display: swap;
-      src: url('fonts/space-mono-latin-700-normal.woff2') format('woff2');
-      unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6,
-                     U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F,
-                     U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
-    }
-    @font-face {
-      font-family: 'DM Serif Display';
-      font-style:  normal;
-      font-weight: 400;
-      font-display: swap;
-      src: url('fonts/dm-serif-display-latin-400-normal.woff2') format('woff2');
-      unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6,
-                     U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F,
-                     U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
-    }
-    @font-face {
-      font-family: 'DM Serif Display';
-      font-style:  italic;
-      font-weight: 400;
-      font-display: swap;
-      src: url('fonts/dm-serif-display-latin-400-italic.woff2') format('woff2');
-      unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6,
-                     U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F,
-                     U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
-    }
-  </style>
   <!-- Preload ensures styles.css is fetched at highest priority so its
        @keyframes and #pg-loading rules are parsed before any deferred
        JS module executes — including in Tauri's asset: protocol. -->
   <link rel="preload" href="styles.css" as="style" />
   <link rel="stylesheet" href="styles.css" />
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" />
+  <link rel="stylesheet" href="libs/bootstrap-icons/bootstrap-icons.min.css" />
 </head>
 <body>
 
@@ -89,7 +34,7 @@
     <div id="project-list"><!-- rendered by projects.js --></div>
 
     <!-- New project input row -->
-    <div id="project-new-row" style="display:none">
+    <div id="project-new-row">
       <input id="project-new-input" class="proj-input" placeholder="Project name…" />
       <div class="proj-new-actions">
         <button id="project-new-confirm" class="proj-action-btn proj-confirm"><i class="bi bi-check"></i></button>
@@ -144,11 +89,11 @@
 
       <!-- Settings icon buttons -->
       <button class="ctrl-icon-btn" id="btn-sim-settings" title="Similarity Settings">
-        <i class="bi bi-sliders" style="font-size:14px"></i>
+        <i class="bi bi-sliders"></i>
         <span class="ctrl-icon-label">Similarity</span>
       </button>
       <button class="ctrl-icon-btn" id="btn-app-settings" title="App Settings">
-        <i class="bi bi-tag" style="font-size:14px"></i>
+        <i class="bi bi-tag"></i>
         <span class="ctrl-icon-label">App</span>
       </button>
 
@@ -168,9 +113,8 @@
        QUICK DETAIL SIDEBAR (right)
   ══════════════════════════════════════════════════ -->
   <div id="detail-panel">
-    <div style="display:flex;align-items:center;justify-content:space-between;flex-shrink:0">
-      <button id="pp-delete-btn-overview" class="pp-btn pp-btn-danger"
-              style="font-size:.6rem;padding:4px 10px">Delete Paper</button>
+    <div id="detail-panel-top">
+      <button id="pp-delete-btn-overview" class="pp-btn pp-btn-danger">Delete Paper</button>
       <button class="dp-close" id="close-panel"><i class="bi bi-x"></i></button>
     </div>
 
@@ -197,15 +141,15 @@
     <div id="detail-container"></div>
 
     <!-- Inline PDF viewer (preview only — upload via Open Paper Page) -->
-    <div id="sidebar-pdf-wrap" style="display:none">
+    <div id="sidebar-pdf-wrap">
       <div id="sidebar-pdf-bar">
         <span id="sidebar-pdf-status"></span>
       </div>
       <div id="sidebar-pdf-dropzone">
         <div class="pp-drop-icon"><i class="bi bi-file-earmark"></i></div>
-        <div style="font-size:.68rem;text-align:center;color:var(--text-secondary);line-height:1.6">
+        <div class="sidebar-pdf-nopdf-text">
           No PDF attached.<br>
-          <span style="color:var(--accent2);cursor:pointer" id="sidebar-pdf-open-page">Open Paper Page <i class="bi bi-box-arrow-up-right"></i></span>
+          <span id="sidebar-pdf-open-page">Open Paper Page <i class="bi bi-box-arrow-up-right"></i></span>
           to upload one.
         </div>
       </div>
@@ -246,23 +190,23 @@
       <div class="et-paper" id="et-paper-b"></div>
     </div>
     <div id="et-overlap">
-      <div class="et-section" id="et-tags-row" style="display:none">
+      <div class="et-section" id="et-tags-row">
         <span class="et-label">Shared tags</span>
         <div class="et-chips" id="et-tags"></div>
       </div>
-      <div class="et-section" id="et-venue-row" style="display:none">
+      <div class="et-section" id="et-venue-row">
         <span class="et-label">Venue</span>
         <span class="et-value" id="et-venue"></span>
       </div>
-      <div class="et-section" id="et-year-row" style="display:none">
+      <div class="et-section" id="et-year-row">
         <span class="et-label">Year</span>
         <span class="et-value" id="et-year"></span>
       </div>
-      <div class="et-section" id="et-authors-row" style="display:none">
+      <div class="et-section" id="et-authors-row">
         <span class="et-label">Authors</span>
         <div class="et-chips" id="et-authors"></div>
       </div>
-      <div id="et-no-overlap" style="display:none">No shared concepts found</div>
+      <div id="et-no-overlap">No shared concepts found</div>
     </div>
   </div>
 
@@ -311,10 +255,9 @@
           <div id="pp-main-title">—</div>
           <div id="pp-main-authors">—</div>
         </div>
-        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px;flex-shrink:0">
+        <div id="pp-header-right">
           <button id="pp-close-btn"><i class="bi bi-x"></i></button>
-          <button id="pp-delete-btn-detail" class="pp-btn pp-btn-danger"
-                  style="font-size:.6rem;padding:4px 10px">Delete Paper</button>
+          <button id="pp-delete-btn-detail" class="pp-btn pp-btn-danger">Delete Paper</button>
         </div>
       </div>
 
@@ -374,8 +317,7 @@
           <div id="pp-pdf-viewer">
             <div class="pp-pdf-bar">
               <span id="pp-pdf-name">document.pdf</span>
-              <span id="pp-pdf-db-status"
-                    style="font-size:.62rem;color:var(--text-secondary);margin-left:auto;margin-right:12px"></span>
+              <span id="pp-pdf-db-status"></span>
               <button class="pp-btn pp-btn-danger" id="pp-pdf-remove">Remove PDF</button>
             </div>
             <iframe id="pp-pdf-iframe" title="PDF Viewer"></iframe>
@@ -390,7 +332,7 @@
     </div>
   </div>
 
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/9.1.6/marked.min.js"></script>
+  <script src="libs/marked.min.js"></script>
 
   <!-- ══════════════════════════════════════════════════
        SIMILARITY SETTINGS PANEL
@@ -414,8 +356,8 @@
   <div id="sim-settings-panel">
     <div id="sim-settings-header">
       <div id="sim-settings-title">
-        <span style="font-family:'DM Serif Display',serif;font-size:1.1rem">Similarity Settings</span>
-        <span style="font-size:.65rem;color:var(--text-secondary);margin-left:8px">How paper edges are computed</span>
+        <span>Similarity Settings</span>
+        <span>How paper edges are computed</span>
       </div>
       <button id="sim-settings-close"><i class="bi bi-x"></i></button>
     </div>
@@ -448,13 +390,13 @@
         </div>
         <div class="npm-field npm-field-full">
           <label class="npm-label">Alias
-            <span style="color:var(--text-dim)"> — short label shown on graph node (optional)</span>
+            <span class="npm-label-hint"> — short label shown on graph node (optional)</span>
           </label>
           <input class="npm-input" id="npm-alias" placeholder="Short label for the graph node…">
         </div>
         <div class="npm-field npm-field-full">
           <label class="npm-label">Authors
-            <span style="color:var(--text-dim)"> — comma separated (optional)</span>
+            <span class="npm-label-hint"> — comma separated (optional)</span>
           </label>
           <input class="npm-input" id="npm-authors" placeholder="He, K., Zhang, X., Ren, S.">
         </div>
@@ -468,7 +410,7 @@
         </div>
         <div class="npm-field npm-field-full">
           <label class="npm-label">Hashtags
-            <span style="color:var(--text-dim)"> — space or comma separated</span>
+            <span class="npm-label-hint"> — space or comma separated</span>
           </label>
           <input class="npm-input" id="npm-hashtags" placeholder="classification transformer">
         </div>
@@ -480,23 +422,23 @@
 
         <div class="npm-divider">Notes</div>
         <div class="npm-field npm-field-full">
-          <textarea class="npm-input npm-textarea" id="npm-notes" style="min-height:90px"
+          <textarea class="npm-input npm-textarea" id="npm-notes"
                     placeholder="Research notes, thoughts, annotations… Supports **bold**, _italic_, ## headings, `code`."></textarea>
         </div>
 
         <div class="npm-divider">Custom Attributes</div>
         <div class="npm-field npm-field-full">
-          <table style="width:100%;border-collapse:collapse" id="npm-attr-table">
+          <table id="npm-attr-table">
             <thead>
-              <tr style="font-size:.58rem;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.1em">
-                <th style="text-align:left;padding:0 0 6px;width:35%">Key</th>
-                <th style="text-align:left;padding:0 0 6px">Value</th>
-                <th style="width:36px"></th>
+              <tr>
+                <th>Key</th>
+                <th>Value</th>
+                <th></th>
               </tr>
             </thead>
             <tbody id="npm-attr-tbody"></tbody>
           </table>
-          <button class="btn" id="npm-attr-add" style="margin-top:8px;font-size:.62rem">
+          <button class="btn" id="npm-attr-add">
             <i class="bi bi-plus"></i> Add attribute
           </button>
         </div>
@@ -562,10 +504,10 @@
     <div id="llm-error-panel">
       <div id="llm-error-title"><i class="bi bi-exclamation-triangle"></i> AI Setup Failed</div>
       <div id="llm-error-msg"></div>
-      <p style="font-size:.68rem;color:var(--text-secondary);margin:8px 0 0">
+      <p class="llm-error-note">
         AI features have been disabled. You can retry from ⚙ Similarity Settings.
       </p>
-      <div style="margin-top:16px">
+      <div id="llm-error-ok-wrap">
         <button id="llm-error-ok" class="btn btn-new-paper">OK</button>
       </div>
     </div>

@@ -9,5 +9,11 @@
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0"
+  },
+  "dependencies": {
+    "@fontsource/dm-serif-display": "^5.2.8",
+    "@fontsource/space-mono": "^5.2.9",
+    "bootstrap-icons": "^1.13.1",
+    "marked": "^17.0.5"
   }
 }

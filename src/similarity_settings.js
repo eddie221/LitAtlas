@@ -1,6 +1,5 @@
 "use strict";
 
-import { getDefaultConfig } from "./similarity.js";
 import { getCustomModels } from "./app_settings.js";
 
 /**
@@ -107,10 +106,15 @@ export async function refreshModelSelect(bodyOrPanel) {
     : bodyOrPanel?.querySelector("#sim-settings-body");
   if (!body) return;
 
-  const cfg = _getSimConfig();
+  const cfg    = _getSimConfig();
+  const isHF   = cfg.strategy === "hf-embeddings";
+  const hfLive = window.LitAtlas?.isHfEnabled?.() === true;
   let models = _BUILTIN_MODELS;
 
-  if (invoke) {
+  // Only contact the sidecar when HF mode is active — avoid triggering
+  // Python environment setup (ensure_running → launch_sidecar → ensure_venv)
+  // when the user is running JS-cosine and has not enabled AI features.
+  if (invoke && hfLive) {
     try {
       const [sidecarRes, customModels] = await Promise.all([
         invoke("hf_list_models").catch(() => null),
@@ -146,9 +150,14 @@ export async function refreshModelSelect(bodyOrPanel) {
     } catch (_) { /* use builtin list */ }
   }
 
-  const modelId = body.querySelector("#sim-model-select")?.value
-               ?? cfg.model ?? _BUILTIN_MODELS[0].id;
-  await _refreshDownloadUI(body, modelId, models);
+  // Only check model download status when HF is the active strategy —
+  // hf_check_model also goes through ensure_running and must be skipped
+  // in JS-cosine mode.
+  if (isHF && hfLive) {
+    const modelId = body.querySelector("#sim-model-select")?.value
+                 ?? cfg.model ?? _BUILTIN_MODELS[0].id;
+    await _refreshDownloadUI(body, modelId, models);
+  }
 }
 
 // ── HTML builder ──────────────────────────────────────────────────────────────
@@ -265,22 +274,6 @@ function buildHTML(cfg, models, isHF, hfOk) {
       </div>
     </div>
 
-    <!-- Embedding cache (HF only) -->
-    <div class="sim-section sim-hf-only ${!isHF?"hidden":""}">
-      <div class="sim-section-title">Embedding Cache</div>
-      <div class="sim-emb-hint">
-        Pre-compute and store embedding vectors next to each paper's PDF.
-        Cached embeddings are reused automatically during Recompute — papers
-        with unchanged content are skipped, making repeated recomputes fast.
-      </div>
-      <div id="sim-emb-area">
-        <!-- populated by _renderEmbeddingSection() -->
-        <button id="sim-emb-btn" class="btn sim-emb-btn">
-          ⚡ Cache All Embeddings
-        </button>
-      </div>
-    </div>
-
     <!-- Status / actions -->
     <div class="sim-section">
       <div id="sim-status" class="sim-status-msg"></div>
@@ -363,7 +356,7 @@ async function _refreshDownloadUI(body, modelId, models) {
 // Selectors for every interactive control inside the settings panel.
 const _LOCKABLE = [
   ".sim-strat-btn", "#sim-model-select",
-  "#sim-save-btn", "#sim-recompute-btn", "#sim-emb-btn",
+  "#sim-save-btn", "#sim-recompute-btn",
   ".sim-field-check", ".sim-weight-range",
   "#sim-thr-range", "#sim-max-range",
 ];
@@ -453,86 +446,6 @@ async function _startDownload(body, modelId, models) {
   }
 }
 
-// ── Embedding cache ───────────────────────────────────────────────────────────
-
-async function _startEmbeddingCache(body, cfg) {
-  const area   = body.querySelector("#sim-emb-area");
-  const btn    = body.querySelector("#sim-emb-btn");
-  if (!area || !invoke) return;
-
-  // Disable button while running
-  if (btn) btn.disabled = true;
-
-  // Build progress UI
-  area.innerHTML = `
-    <div class="sim-emb-progress">
-      <div class="sim-emb-progress-top">
-        <span class="sim-dl-badge sim-dl-active">⚡ Caching embeddings…</span>
-        <span id="sim-emb-count" class="sim-emb-count">0 / ?</span>
-      </div>
-      <div class="sim-dl-track">
-        <div id="sim-emb-bar" class="sim-dl-bar" style="width:0%"></div>
-      </div>
-      <div id="sim-emb-paper" class="sim-emb-paper">Starting…</div>
-    </div>`;
-
-  let _unlisten = null;
-  if (tauriListen) {
-    _unlisten = await tauriListen("embedding://progress", ({ payload }) => {
-      if (payload?.done) return; // handled after invoke resolves
-      const bar    = document.getElementById("sim-emb-bar");
-      const count  = document.getElementById("sim-emb-count");
-      const paper  = document.getElementById("sim-emb-paper");
-      const pct    = payload.total > 0
-        ? Math.round((payload.index + 1) / payload.total * 100) : 0;
-      if (bar)   bar.style.width    = `${pct}%`;
-      if (count) count.textContent  = `${payload.index + 1} / ${payload.total}`;
-      if (paper) {
-        const icon = payload.skipped ? '<i class="bi bi-arrow-return-left"></i>' : '<i class="bi bi-check"></i>';
-        const dim  = payload.skipped ? "color:var(--text-dim)" : "color:var(--accent)";
-        paper.innerHTML = `<span style="${dim}">${icon}</span> ${payload.title ?? ""}`;
-      }
-    });
-  }
-
-  try {
-    const config = {
-      model:   cfg.model   ?? "google/gemma-3-1b-it",
-      fields:  getDefaultConfig().fields,
-      weights: cfg.weights ?? {},
-    };
-    const result = await invoke("hf_compute_all_embeddings", { config });
-    const { total = 0, computed = 0, skipped = 0 } = result ?? {};
-    area.innerHTML = `
-      <div class="sim-emb-done">
-        <span class="sim-dl-badge sim-dl-ok">✓ Done</span>
-        <span class="sim-dl-hint">${computed} computed, ${skipped} skipped (${total} total)</span>
-      </div>
-      <button id="sim-emb-btn" class="btn sim-emb-btn" style="margin-top:6px">
-        ⚡ Cache All Embeddings
-      </button>`;
-    // Re-wire the fresh button
-    area.querySelector("#sim-emb-btn")?.addEventListener("click", () => 
-      _startEmbeddingCache(body, cfg)
-    );
-  } catch (e) {
-    area.innerHTML = `
-      <div class="sim-dl-row">
-        <span class="sim-dl-badge sim-dl-err">✗ Failed</span>
-        <span class="sim-dl-hint">${String(e).slice(0, 120)}</span>
-      </div>
-      <button id="sim-emb-btn" class="btn sim-emb-btn" style="margin-top:6px">
-        ⚡ Retry
-      </button>`;
-    area.querySelector("#sim-emb-btn")?.addEventListener("click", () =>
-      _startEmbeddingCache(body, cfg)
-    );
-  } finally {
-    _unlisten?.();
-  }
-}
-
-
 function wireEvents(panel, initialCfg, models, hfOk) {
   const body = panel.querySelector("#sim-settings-body");
   if (!body) return;
@@ -612,11 +525,6 @@ function wireEvents(panel, initialCfg, models, hfOk) {
     cfg.max_edges = parseInt(maxRange.value);
     if (maxVal) maxVal.textContent = cfg.max_edges;
   });
-
-  // Cache embeddings
-  body.querySelector("#sim-emb-btn")?.addEventListener("click", () => 
-    _startEmbeddingCache(body, cfg)
-  );
 
   // Save
   const statusEl = body.querySelector("#sim-status");
