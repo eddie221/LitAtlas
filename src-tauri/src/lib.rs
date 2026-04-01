@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::Manager;
 use sqlx::SqlitePool;
+use std::fs;
 
 // ── AppState ──────────────────────────────────────────────────────────────────
 
@@ -63,18 +64,19 @@ impl AppState {
         }
         // 1. Bundled location (production)
         let bundled = self.data_dir.join("similarity_server.py");
+        println!("{:?}", bundled);
         if bundled.exists() {
             return bundled.to_string_lossy().into_owned();
         }
         // 2. Dev location: two directories up from src-tauri/src/ == workspace root
         let dev = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("src/similarity_server.py");
+        println!("{:?}", dev);
         dev.to_string_lossy().into_owned()
     }
 }
 
 // ── DB helpers ────────────────────────────────────────────────────────────────
-
 fn seed_db(pool: &SqlitePool) {
     let needs_seed = tauri::async_runtime::block_on(async {
         let row: Option<(String,)> = sqlx::query_as(
@@ -198,6 +200,11 @@ pub fn run() {
                 .to_string();
 
             let pool = open_project(&projects_dir, &first_slug);
+            const SIMILARITY_PY: &str = include_str!("./similarity_server.py");
+            let script = data_dir.join("similarity_server.py");
+            // Always write the embedded script so it exists on a fresh install and
+            // stays up to date after app upgrades.
+            fs::write(&script, SIMILARITY_PY).map_err(|e| format!("Failed to write eval script: {e}"))?;
 
             app.manage(AppState {
                 pool:         Mutex::new(pool),
