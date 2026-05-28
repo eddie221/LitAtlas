@@ -200,7 +200,6 @@ pub async fn create_pool(db_path: &str) -> Result<SqlitePool, DbError> {
         .pragma("foreign_keys", "ON")
         // Disable log spam for every query
         .disable_statement_logging();
-    // println!("{}", &format!("sqlite:{db_path}?mode=rwc"));
     let pool = sqlx::pool::PoolOptions::<sqlx::Sqlite>::new()
         .max_connections(4)           // SQLite writer limit
         .connect_with(opts)

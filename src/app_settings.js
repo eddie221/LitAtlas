@@ -3,30 +3,18 @@
 import { refreshModelSelect } from "./similarity_settings.js";
 
 /**
- * app_settings.js
+ * app_settings.js — App Settings panel (tabbed).
  *
- * Renders the App Settings panel.
- *
- * Features
- * ────────
- * 1. Custom Sidecar Script
- *    • Shows the currently active similarity_server.py path.
- *    • "Browse…" opens a native file picker (invoke pick_sidecar_script).
- *    • "Validate" asks the running sidecar to inspect the chosen file for
- *      the required hooks (similarity_fn / compute_embedding_fn).
- *    • "Reset to Default" clears the override.
- *    • Changes take effect on next sidecar launch.
- *
- * 2. Custom Models
- *    • Lists user-defined HuggingFace model IDs alongside the built-ins.
- *    • "Add Model" row: model ID + label + size_mb.
- *    • Each entry can be removed individually.
- *    • Saved to app_config.json via save_app_config.
- *    • Picked up in Similarity Settings via hf_list_models.
+ * Tabs
+ * ────
+ * Models   — model selection (updates similarity_config) + models-dir picker
+ * Display  — font-size slider
+ * API      — HuggingFace token + custom sidecar script
+ * Advanced — custom HF models list + plugin contract reference
  */
 
-function _getFontMaxSize()           { return window.LitAtlas?.getUiFontSize_MAX?.()    ?? 28; }
-function _getFontMinSize()           { return window.LitAtlas?.getUiFontSize_MIN?.()    ?? 10; }
+function _getFontMaxSize() { return window.LitAtlas?.getUiFontSize_MAX?.() ?? 28; }
+function _getFontMinSize() { return window.LitAtlas?.getUiFontSize_MIN?.() ?? 10; }
 
 const invoke = (
   window.__TAURI__?.core?.invoke ??
@@ -48,6 +36,21 @@ async function _loadConfig() {
 async function _saveConfig(cfg) {
   if (!invoke) return;
   await invoke("save_app_config", { config: cfg });
+}
+
+async function _loadSimConfig() {
+  if (!invoke) return {};
+  try { return await invoke("get_similarity_config") ?? {}; } catch (_) { return {}; }
+}
+
+async function _saveSimConfig(simCfg) {
+  if (!invoke) return;
+  await invoke("save_similarity_config", { config: simCfg });
+}
+
+async function _loadDirs() {
+  if (!invoke) return { data_dir: "", models_dir: "" };
+  try { return await invoke("get_dirs") ?? { data_dir: "", models_dir: "" }; } catch (_) { return { data_dir: "", models_dir: "" }; }
 }
 
 // ── Open / close ──────────────────────────────────────────────────────────────
@@ -72,31 +75,149 @@ async function _renderAppSettings(panel) {
   if (!body) return;
   body.innerHTML = `<div class="app-cfg-loading">Loading…</div>`;
 
-  const [cfg, scriptInfo] = await Promise.all([
+  const [cfg, scriptInfo, simCfg, dirs] = await Promise.all([
     _loadConfig(),
     invoke
       ? invoke("get_sidecar_script_info").catch(() => ({ path: "(unknown)", is_custom: false }))
       : Promise.resolve({ path: "(unavailable)", is_custom: false }),
+    _loadSimConfig(),
+    _loadDirs(),
   ]);
 
   const customModels  = cfg.custom_models ?? [];
-  const currentFontPx = window.LitAtlas?.getUiFontSize?.() ?? 18;
-  body.innerHTML = _buildHTML(cfg, scriptInfo, customModels, currentFontPx);
-  _wireEvents(body, cfg, scriptInfo, customModels);
+  const currentFontPx = window.LitAtlas?.getUiFontSize?.() ?? 20;
+  body.innerHTML = _buildHTML(cfg, scriptInfo, customModels, currentFontPx, simCfg, dirs);
+  _wireTabNav(body);
+  _wireEvents(body, cfg, scriptInfo, customModels, simCfg, dirs);
 }
+
+// ── Built-in models (must match similarity_server.py AVAILABLE_MODELS) ────────
+
+const _BUILTIN_MODELS = [
+  {
+    id:          "gemma-4-E2B-it-Q4_K_M.gguf",
+    repo_id:     "unsloth/gemma-4-E2B-it-GGUF",
+    label:       "Gemma 4 E2B Instruct (Q4_K_M)",
+    description: "Multimodal: text embeddings + visual understanding of PDF pages.",
+    size_mb:     1200,
+    type:        "multimodal",
+  },
+  {
+    id:          "nomic-embed-text-v1.5.Q4_K_M.gguf",
+    repo_id:     "nomic-ai/nomic-embed-text-v1.5-GGUF",
+    label:       "Nomic Embed Text v1.5 (Q4_K_M)",
+    description: "Fast, high-quality text-only embeddings (~274 MB).",
+    size_mb:     274,
+    type:        "embedding",
+  },
+];
 
 // ── HTML builder ──────────────────────────────────────────────────────────────
 
-function _buildHTML(cfg, scriptInfo, customModels, currentFontPx = 18) {
-  const scriptPath = cfg.sidecar_script ?? "";
-  const activePath = scriptInfo?.path ?? "(unknown)";
-  const isCustom   = scriptInfo?.is_custom === true;
+function _buildHTML(cfg, scriptInfo, customModels, currentFontPx, simCfg, dirs) {
+  return `
+    <div class="app-cfg-tab-bar">
+      <button class="app-cfg-tab-btn active" data-tab="models">Models</button>
+      <button class="app-cfg-tab-btn" data-tab="display">Display</button>
+      <button class="app-cfg-tab-btn" data-tab="api">API</button>
+      <button class="app-cfg-tab-btn" data-tab="advanced">Advanced</button>
+    </div>
 
-  const modelRows = _buildModelListHTML(customModels);
-  const pct = Math.round((currentFontPx / 18) * 100);
+    <div class="app-cfg-tab-pane active" data-tab-pane="models">
+      ${_buildModelsTab(cfg, simCfg, customModels, dirs)}
+    </div>
+    <div class="app-cfg-tab-pane" data-tab-pane="display">
+      ${_buildDisplayTab(currentFontPx)}
+    </div>
+    <div class="app-cfg-tab-pane" data-tab-pane="api">
+      ${_buildApiTab(cfg, scriptInfo)}
+    </div>
+    <div class="app-cfg-tab-pane" data-tab-pane="advanced">
+      ${_buildAdvancedTab(customModels)}
+    </div>`;
+}
+
+// ── Models tab ────────────────────────────────────────────────────────────────
+
+function _buildModelsTab(cfg, simCfg, customModels, dirs) {
+  const activeModel  = simCfg?.model ?? "gemma-4-E2B-it-Q4_K_M.gguf";
+  const modelsDir    = cfg.models_dir || dirs.models_dir || "";
+  const dataDir      = dirs.data_dir  || "";
+
+  const allModels = [
+    ..._BUILTIN_MODELS,
+    ...customModels.map(m => ({ id: m.id, label: m.label || m.id, description: "", size_mb: m.size_mb ?? null, type: "custom" })),
+  ];
+
+  const modelCards = allModels.map(m => {
+    const isActive = m.id === activeModel;
+    return `
+      <div class="app-cfg-model-card ${isActive ? "active" : ""}" data-model-id="${_esc(m.id)}">
+        <div class="app-cfg-model-card-header">
+          <div class="app-cfg-model-card-name">${_esc(m.label)}</div>
+          ${m.size_mb ? `<div class="app-cfg-model-card-size">${m.size_mb} MB</div>` : ""}
+        </div>
+        ${m.description ? `<div class="app-cfg-model-card-desc">${_esc(m.description)}</div>` : ""}
+        <div class="app-cfg-model-card-footer">
+          <span class="app-cfg-model-card-type">${_esc(m.type)}</span>
+          ${isActive
+            ? `<span class="app-cfg-model-active-badge">Active</span>`
+            : `<button class="btn app-cfg-model-select-btn" data-model-id="${_esc(m.id)}">Use this model</button>`}
+        </div>
+      </div>`;
+  }).join("");
 
   return `
-    <!-- ── Section 0: Display ── -->
+    <div class="app-cfg-section">
+      <div class="app-cfg-section-title">Active Model</div>
+      <div class="app-cfg-hint">
+        Select which GGUF model is used for AI similarity. Download models from
+        <em>Similarity Settings</em>. Changes take effect on the next edge recompute.
+      </div>
+      <div id="app-cfg-model-cards">${modelCards}</div>
+      <div id="app-cfg-model-select-status" class="app-cfg-status"></div>
+    </div>
+
+    <div class="app-cfg-section">
+      <div class="app-cfg-section-title">Models Folder</div>
+      <div class="app-cfg-hint">
+        Where GGUF model files are stored. Leave blank to use the default location.
+        Takes effect on next engine start.
+      </div>
+      <div class="app-cfg-dir-row">
+        <input id="app-cfg-models-dir-input" class="app-cfg-input"
+               type="text" placeholder="Default: ${_esc(dirs.models_dir)}"
+               value="${_esc(cfg.models_dir ?? "")}" spellcheck="false">
+        <button id="app-cfg-models-dir-open" class="btn app-cfg-folder-btn"
+                title="Open models folder" data-path="${_esc(modelsDir)}">
+          <i class="bi bi-folder2-open"></i>
+        </button>
+      </div>
+      <div class="app-cfg-script-actions">
+        <button id="app-cfg-models-dir-save" class="btn btn-new-paper">Apply</button>
+        ${cfg.models_dir ? `<button id="app-cfg-models-dir-reset" class="btn app-cfg-reset-btn">↺ Reset to Default</button>` : ""}
+      </div>
+      <div id="app-cfg-models-dir-status" class="app-cfg-status"></div>
+    </div>
+
+    <div class="app-cfg-section">
+      <div class="app-cfg-section-title">App Data Folder</div>
+      <div class="app-cfg-hint">All LitAtlas data (projects, configs, embeddings) lives here.</div>
+      <div class="app-cfg-dir-display">
+        <span class="app-cfg-path-value" title="${_esc(dataDir)}">${_esc(_shortenPath(dataDir))}</span>
+        <button class="btn app-cfg-folder-btn" id="app-cfg-data-dir-open"
+                title="Open app data folder" data-path="${_esc(dataDir)}">
+          <i class="bi bi-folder2-open"></i>
+        </button>
+      </div>
+    </div>`;
+}
+
+// ── Display tab ───────────────────────────────────────────────────────────────
+
+function _buildDisplayTab(currentFontPx) {
+  const pct = Math.round((currentFontPx / 20) * 100);
+  return `
     <div class="app-cfg-section">
       <div class="app-cfg-section-title">Display</div>
       <div class="app-cfg-hint">
@@ -112,9 +233,17 @@ function _buildHTML(cfg, scriptInfo, customModels, currentFontPx = 18) {
         <button id="app-cfg-font-size-reset" class="btn app-cfg-reset-btn"
                 title="Reset to default (100%)">↺</button>
       </div>
-    </div>
+    </div>`;
+}
 
-    <!-- ── Section 1: HuggingFace Token ── -->
+// ── API tab ───────────────────────────────────────────────────────────────────
+
+function _buildApiTab(cfg, scriptInfo) {
+  const scriptPath = cfg.sidecar_script ?? "";
+  const activePath = scriptInfo?.path ?? "(unknown)";
+  const isCustom   = scriptInfo?.is_custom === true;
+
+  return `
     <div class="app-cfg-section">
       <div class="app-cfg-section-title">HuggingFace API Token</div>
       <div class="app-cfg-hint">
@@ -141,7 +270,6 @@ function _buildHTML(cfg, scriptInfo, customModels, currentFontPx = 18) {
       <div id="app-cfg-hf-token-status" class="app-cfg-status"></div>
     </div>
 
-    <!-- ── Section 2: Sidecar Script ── -->
     <div class="app-cfg-section">
       <div class="app-cfg-section-title">Similarity Engine Script</div>
       <div class="app-cfg-hint">
@@ -179,9 +307,14 @@ function _buildHTML(cfg, scriptInfo, customModels, currentFontPx = 18) {
         ${isCustom ? `<button id="app-cfg-reset-btn" class="btn app-cfg-reset-btn">↺ Reset to Default</button>` : ""}
       </div>
       <div id="app-cfg-script-status" class="app-cfg-status"></div>
-    </div>
+    </div>`;
+}
 
-    <!-- ── Section 3: Custom Models ── -->
+// ── Advanced tab ──────────────────────────────────────────────────────────────
+
+function _buildAdvancedTab(customModels) {
+  const modelRows = _buildModelListHTML(customModels);
+  return `
     <div class="app-cfg-section">
       <div class="app-cfg-section-title">Custom HuggingFace Models</div>
       <div class="app-cfg-hint">
@@ -203,7 +336,6 @@ function _buildHTML(cfg, scriptInfo, customModels, currentFontPx = 18) {
       </div>
     </div>
 
-    <!-- ── Section 4: Plugin Contract Reference ── -->
     <div class="app-cfg-section">
       <button class="app-cfg-toggle" id="app-cfg-contract-toggle">
         Plugin Contract Reference <span class="app-cfg-toggle-icon"><i class="bi bi-caret-right-fill"></i></span>
@@ -243,27 +375,130 @@ function _buildHTML(cfg, scriptInfo, customModels, currentFontPx = 18) {
     </div>`;
 }
 
+// ── Tab navigation ────────────────────────────────────────────────────────────
+
+function _wireTabNav(body) {
+  body.querySelectorAll(".app-cfg-tab-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      body.querySelectorAll(".app-cfg-tab-btn").forEach(b => b.classList.remove("active"));
+      body.querySelectorAll(".app-cfg-tab-pane").forEach(p => p.classList.remove("active"));
+      btn.classList.add("active");
+      body.querySelector(`.app-cfg-tab-pane[data-tab-pane="${btn.dataset.tab}"]`)?.classList.add("active");
+    });
+  });
+}
+
 // ── Event wiring ──────────────────────────────────────────────────────────────
 
-function _wireEvents(body, cfg, scriptInfo, customModels) {
-  // ── App-wide Font Size slider ──────────────────────────────────────────────
+function _wireEvents(body, cfg, scriptInfo, customModels, simCfg, dirs) {
+  _wireModelsTab(body, cfg, simCfg, customModels, dirs);
+  _wireDisplayTab(body);
+  _wireApiTab(body, cfg, scriptInfo);
+  _wireAdvancedTab(body, cfg, customModels);
+}
+
+// ── Models tab events ─────────────────────────────────────────────────────────
+
+function _wireModelsTab(body, cfg, simCfg, customModels, dirs) {
+  const selectStatus  = body.querySelector("#app-cfg-model-select-status");
+  const cardsContainer = body.querySelector("#app-cfg-model-cards");
+
+  // Single delegated listener handles initial and dynamically-inserted buttons.
+  cardsContainer?.addEventListener("click", async e => {
+    const btn = e.target.closest(".app-cfg-model-select-btn");
+    if (!btn) return;
+    const modelId = btn.dataset.modelId;
+    simCfg.model  = modelId;
+    try {
+      await _saveSimConfig(simCfg);
+      // Refresh card UI to show new active model
+      body.querySelectorAll(".app-cfg-model-card").forEach(card => {
+        const isNowActive = card.dataset.modelId === modelId;
+        card.classList.toggle("active", isNowActive);
+        const footer   = card.querySelector(".app-cfg-model-card-footer");
+        const existing = footer.querySelector(".app-cfg-model-active-badge, .app-cfg-model-select-btn");
+        if (isNowActive) {
+          existing?.remove();
+          footer.insertAdjacentHTML("beforeend", `<span class="app-cfg-model-active-badge">Active</span>`);
+        } else {
+          existing?.remove();
+          footer.insertAdjacentHTML("beforeend",
+            `<button class="btn app-cfg-model-select-btn" data-model-id="${_esc(card.dataset.modelId)}">Use this model</button>`);
+        }
+      });
+      _showStatus(selectStatus, `✓ Active model set to ${modelId}`, "ok");
+      const simPanel = document.getElementById("sim-settings-panel");
+      refreshModelSelect(simPanel).catch(() => {});
+    } catch (e) { _showStatus(selectStatus, `✗ ${e}`, "err"); }
+  });
+
+  // Models dir input + open folder button
+  const modelsDirInput  = body.querySelector("#app-cfg-models-dir-input");
+  const modelsDirOpen   = body.querySelector("#app-cfg-models-dir-open");
+  const modelsDirSave   = body.querySelector("#app-cfg-models-dir-save");
+  const modelsDirReset  = body.querySelector("#app-cfg-models-dir-reset");
+  const modelsDirStatus = body.querySelector("#app-cfg-models-dir-status");
+
+  modelsDirOpen?.addEventListener("click", async () => {
+    const path = modelsDirInput?.value.trim() || dirs.models_dir;
+    if (!path || !invoke) return;
+    try { await invoke("open_folder", { path }); } catch (e) { _showStatus(modelsDirStatus, `✗ ${e}`, "err"); }
+  });
+  // Keep the open-button path in sync as the user types
+  modelsDirInput?.addEventListener("input", () => {
+    if (modelsDirOpen) modelsDirOpen.dataset.path = modelsDirInput.value.trim() || dirs.models_dir;
+  });
+
+  modelsDirSave?.addEventListener("click", async () => {
+    const path = modelsDirInput?.value.trim() ?? "";
+    cfg.models_dir = path || null;
+    try {
+      await _saveConfig(cfg);
+      _showStatus(modelsDirStatus, "✓ Saved — takes effect on next engine start", "ok");
+    } catch (e) { _showStatus(modelsDirStatus, `✗ ${e}`, "err"); }
+  });
+
+  modelsDirReset?.addEventListener("click", async () => {
+    cfg.models_dir = null;
+    if (modelsDirInput) modelsDirInput.value = "";
+    try {
+      await _saveConfig(cfg);
+      _showStatus(modelsDirStatus, "✓ Reset to default", "ok");
+      setTimeout(() => _renderAppSettings(body.closest("#app-settings-panel")), 800);
+    } catch (e) { _showStatus(modelsDirStatus, `✗ ${e}`, "err"); }
+  });
+
+  // App data dir open button
+  body.querySelector("#app-cfg-data-dir-open")?.addEventListener("click", async () => {
+    const path = dirs.data_dir;
+    if (!path || !invoke) return;
+    try { await invoke("open_folder", { path }); } catch (_) {}
+  });
+}
+
+// ── Display tab events ────────────────────────────────────────────────────────
+
+function _wireDisplayTab(body) {
   const fontSlider   = body.querySelector("#app-cfg-font-size");
   const fontValEl    = body.querySelector("#app-cfg-font-size-val");
   const fontResetBtn = body.querySelector("#app-cfg-font-size-reset");
 
   fontSlider?.addEventListener("input", () => {
     const px = parseInt(fontSlider.value, 10);
-    // console.log("px : ", px);
-    if (fontValEl) fontValEl.textContent = Math.round((px / 18) * 100) + "%";
+    if (fontValEl) fontValEl.textContent = Math.round((px / 20) * 100) + "%";
     window.LitAtlas?.setUiFontSize?.(px);
   });
   fontResetBtn?.addEventListener("click", () => {
-    if (fontSlider) fontSlider.value = "18";
+    if (fontSlider) fontSlider.value = "20";
     if (fontValEl)  fontValEl.textContent = "100%";
-    window.LitAtlas?.setUiFontSize?.(18);
+    window.LitAtlas?.setUiFontSize?.(20);
   });
+}
 
-  // ── HuggingFace Token ──────────────────────────────────────────────────────
+// ── API tab events ────────────────────────────────────────────────────────────
+
+function _wireApiTab(body, cfg, scriptInfo) {
+  // HF Token
   const hfTokenInput  = body.querySelector("#app-cfg-hf-token");
   const hfTokenShow   = body.querySelector("#app-cfg-hf-token-show");
   const hfTokenSave   = body.querySelector("#app-cfg-hf-token-save");
@@ -277,7 +512,6 @@ function _wireEvents(body, cfg, scriptInfo, customModels) {
       ? '<i class="bi bi-eye-slash"></i>'
       : '<i class="bi bi-eye"></i>';
   });
-
   hfTokenSave?.addEventListener("click", async () => {
     const token = hfTokenInput?.value.trim() ?? "";
     cfg.hf_token = token || null;
@@ -287,7 +521,6 @@ function _wireEvents(body, cfg, scriptInfo, customModels) {
       if (hfTokenClear) hfTokenClear.disabled = !token;
     } catch (e) { _showStatus(hfTokenStatus, `✗ ${e}`, "err"); }
   });
-
   hfTokenClear?.addEventListener("click", async () => {
     if (hfTokenInput) hfTokenInput.value = "";
     cfg.hf_token = null;
@@ -298,14 +531,14 @@ function _wireEvents(body, cfg, scriptInfo, customModels) {
     } catch (e) { _showStatus(hfTokenStatus, `✗ ${e}`, "err"); }
   });
 
+  // Sidecar script
   const scriptInput  = body.querySelector("#app-cfg-script-input");
   const validateBtn  = body.querySelector("#app-cfg-validate-btn");
   const validateArea = body.querySelector("#app-cfg-validate-area");
   const saveBtn      = body.querySelector("#app-cfg-script-save-btn");
   const resetBtn     = body.querySelector("#app-cfg-reset-btn");
   const scriptStatus = body.querySelector("#app-cfg-script-status");
-
-  const checkBtn = body.querySelector("#app-cfg-check-btn");
+  const checkBtn     = body.querySelector("#app-cfg-check-btn");
 
   const _updateBtns = () => {
     const hasVal = !!scriptInput?.value.trim();
@@ -314,7 +547,6 @@ function _wireEvents(body, cfg, scriptInfo, customModels) {
   };
   scriptInput?.addEventListener("input", _updateBtns);
 
-  // Check path — validates that the file exists and is readable
   checkBtn?.addEventListener("click", async () => {
     const path = scriptInput?.value.trim();
     if (!path || !invoke) return;
@@ -331,7 +563,6 @@ function _wireEvents(body, cfg, scriptInfo, customModels) {
     } catch (e) { _showValidate(validateArea, `✗ ${e}`, "err"); }
   });
 
-  // Validate
   validateBtn?.addEventListener("click", async () => {
     const path = scriptInput?.value.trim();
     if (!path || !invoke) return;
@@ -351,7 +582,6 @@ function _wireEvents(body, cfg, scriptInfo, customModels) {
     } catch (e) { _showValidate(validateArea, `✗ ${e}`, "err"); }
   });
 
-  // Apply script path
   saveBtn?.addEventListener("click", async () => {
     const path = scriptInput?.value.trim() ?? "";
     cfg.sidecar_script = path || null;
@@ -362,7 +592,6 @@ function _wireEvents(body, cfg, scriptInfo, customModels) {
     } catch (e) { _showStatus(scriptStatus, `✗ ${e}`, "err"); }
   });
 
-  // Reset
   resetBtn?.addEventListener("click", async () => {
     cfg.sidecar_script = null;
     if (scriptInput) scriptInput.value = "";
@@ -372,14 +601,16 @@ function _wireEvents(body, cfg, scriptInfo, customModels) {
       setTimeout(() => _renderAppSettings(body.closest("#app-settings-panel")), 800);
     } catch (e) { _showStatus(scriptStatus, `✗ ${e}`, "err"); }
   });
+}
 
-  // Model list delete buttons
+// ── Advanced tab events ───────────────────────────────────────────────────────
+
+function _wireAdvancedTab(body, cfg, customModels) {
   const modelList   = body.querySelector("#app-cfg-model-list");
   const modelStatus = body.querySelector("#app-cfg-model-status");
   _wireModelDelButtons(modelList, customModels, cfg, modelStatus);
 
-  // Add model
-  const addBtn     = body.querySelector("#app-cfg-add-model-btn");
+  const addBtn  = body.querySelector("#app-cfg-add-model-btn");
   const idInput = body.querySelector("#app-cfg-new-id");
 
   const doAdd = async () => {
@@ -388,7 +619,6 @@ function _wireEvents(body, cfg, scriptInfo, customModels) {
     if (customModels.some(m => m.id === id)) {
       _showStatus(modelStatus, "Model already in list.", "warn"); return;
     }
-    // Auto-derive a readable label from the model ID (e.g. "BAAI/bge-base-en-v1.5" → "bge-base-en-v1.5")
     const label = id.includes("/") ? id.split("/").pop() : id;
     const entry = { id, label };
     customModels.push(entry);
@@ -400,8 +630,6 @@ function _wireEvents(body, cfg, scriptInfo, customModels) {
       _wireModelDelButtons(modelList, customModels, cfg, modelStatus);
       _showStatus(modelStatus, `✓ Added ${id}`, "ok");
       setTimeout(() => { if (modelStatus) modelStatus.textContent = ""; }, 2000);
-      // Immediately refresh the model <select> in the Similarity Settings panel
-      // if it is currently open, so the new model appears without a reopen.
       const simPanel = document.getElementById("sim-settings-panel");
       refreshModelSelect(simPanel).catch(() => {});
     } catch (e) {
@@ -413,12 +641,13 @@ function _wireEvents(body, cfg, scriptInfo, customModels) {
   addBtn?.addEventListener("click", doAdd);
   idInput?.addEventListener("keydown", e => { if (e.key === "Enter") doAdd(); });
 
-  // Contract collapsible
   body.querySelector("#app-cfg-contract-toggle")?.addEventListener("click", () => {
     const contractBody = body.querySelector("#app-cfg-contract-body");
     const icon         = body.querySelector(".app-cfg-toggle-icon");
     contractBody?.classList.toggle("hidden");
-    if (icon) icon.innerHTML = contractBody?.classList.contains("hidden") ? '<i class="bi bi-caret-right-fill"></i>' : '<i class="bi bi-caret-down-fill"></i>';
+    if (icon) icon.innerHTML = contractBody?.classList.contains("hidden")
+      ? '<i class="bi bi-caret-right-fill"></i>'
+      : '<i class="bi bi-caret-down-fill"></i>';
   });
 }
 

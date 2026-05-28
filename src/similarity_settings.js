@@ -39,7 +39,7 @@ const FIELDS = [
   // PDF text field — text is extracted from the uploaded PDF with PyMuPDF and
   // embedded by Gemma. Papers without a PDF silently skip this field.
   { key: "pdf",      label: "PDF (text)", defaultWeight: 1.0,
-    hint: "Requires an uploaded PDF. Text is extracted with PyMuPDF and embedded by Gemma. Papers without a PDF are encoded from text fields only." },
+    hint: "Requires an uploaded PDF. Text is extracted with PyMuPDF and embedded by the selected model. Papers without a PDF are encoded from text fields only." },
 ];
 
 // ── Open / close ──────────────────────────────────────────────────────────────
@@ -58,10 +58,24 @@ export function closeSimilaritySettings() {
 
 // ── Built-in model list (fallback when sidecar is not yet running) ─────────────
 const _BUILTIN_MODELS = [
-  { id: "google/gemma-3-1b-it",
-    label: "Gemma 3 1B IT (default)",
-    description: "Default text embedding model. Lightweight and fast. Supports all text fields and PDF text extraction. Requires a HuggingFace API token (gated model).",
-    size_mb: 2000, gated: true },
+  {
+    id:          "gemma-4-E2B-it-Q4_K_M.gguf",
+    repo_id:     "unsloth/gemma-4-E2B-it-GGUF",
+    label:       "Gemma 4 E2B Instruct (Q4_K_M)",
+    description: "Multimodal: text embeddings + visual understanding of PDF pages. Auto-downloads mmproj companion for vision support.",
+    size_mb:     1200,
+    gated:       false,
+    type:        "multimodal",
+  },
+  {
+    id:          "nomic-embed-text-v1.5.Q4_K_M.gguf",
+    repo_id:     "nomic-ai/nomic-embed-text-v1.5-GGUF",
+    label:       "Nomic Embed Text v1.5 (Q4_K_M)",
+    description: "Fast, high-quality text-only embeddings via llama.cpp.",
+    size_mb:     274,
+    gated:       false,
+    type:        "embedding",
+  },
 ];
 
 // ── Per-model cache status memo: modelId → true | false | null (unknown) ──────
@@ -283,7 +297,7 @@ function buildHTML(cfg, models, isHF, hfOk) {
       </div>
       <div class="sim-recompute-hint">
         Recomputing replaces all edges with the new similarity scores.
-        HuggingFace strategy requires the selected model to be downloaded first.
+        AI mode requires the embedding model to be downloaded first.
       </div>
     </div>`;
 }
@@ -440,7 +454,9 @@ async function _startDownload(body, modelId, models) {
   // Kick off the download — returns immediately ({ ok: true, background: true }).
   // Errors here mean the sidecar couldn't start at all.
   try {
-    await invoke("hf_download_model", { model: modelId });
+    const modelMeta = models.find(m => m.id === modelId) ?? {};
+    const repoId    = modelMeta.repo_id ?? "";
+    await invoke("hf_download_model", { model: modelId, repoId });
   } catch (e) {
     _showError(e);
   }

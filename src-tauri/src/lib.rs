@@ -43,6 +43,21 @@ impl AppState {
     pub fn venv_dir(&self) -> PathBuf {
         self.data_dir.join("similarity_venv")
     }
+    /// Directory where GGUF model files are stored.
+    /// Reads custom path from app_config.json["models_dir"]; falls back to data_dir/models.
+    pub fn models_dir(&self) -> PathBuf {
+        let cfg_path = self.data_dir.join("app_config.json");
+        if let Ok(raw) = std::fs::read_to_string(&cfg_path) {
+            if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&raw) {
+                if let Some(p) = cfg["models_dir"].as_str() {
+                    if !p.is_empty() {
+                        return PathBuf::from(p);
+                    }
+                }
+            }
+        }
+        self.data_dir.join("models")
+    }
     /// Absolute path to similarity_server.py.
     ///
     /// Resolution order:
@@ -64,14 +79,12 @@ impl AppState {
         }
         // 1. Bundled location (production)
         let bundled = self.data_dir.join("similarity_server.py");
-        println!("{:?}", bundled);
         if bundled.exists() {
             return bundled.to_string_lossy().into_owned();
         }
         // 2. Dev location: two directories up from src-tauri/src/ == workspace root
         let dev = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("src/similarity_server.py");
-        println!("{:?}", dev);
         dev.to_string_lossy().into_owned()
     }
 }
@@ -248,6 +261,8 @@ pub fn run() {
             pick_sidecar_script, get_sidecar_script_info,
             // Plugin validation
             hf_validate_plugin,
+            // Filesystem utilities
+            open_folder, get_dirs,
         ])
         .run(tauri::generate_context!())
         .expect("error while running LitAtlas");

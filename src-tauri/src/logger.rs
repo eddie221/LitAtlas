@@ -59,6 +59,16 @@ pub fn log_call(fn_name: &str) {
     write_entry("INFO", fn_name, "called");
 }
 
+/// Record a structured INFO message from inside a command.
+///
+/// Use this after `log_call` to add context (e.g. paper count, model name):
+/// ```rust
+/// logger::log_info("hf_compute_all_embeddings", &format!("papers={total} model={model}"));
+/// ```
+pub fn log_info(fn_name: &str, message: &str) {
+    write_entry("INFO", fn_name, message);
+}
+
 /// Record an error that occurred inside a command.
 ///
 /// Call before returning `Err(...)` or whenever a recoverable error is handled:

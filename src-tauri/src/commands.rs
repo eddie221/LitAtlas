@@ -57,20 +57,18 @@ pub async fn delete_paper(s: State<'_, AppState>, id: i64) -> CmdResult<()> {
 
     // ── Delete associated files ───────────────────────────────────────────
     // 1. PDF directory: projects/<slug>/pdfs/<id>/
-    //    Contains the PDF file and possibly embedding.json (primary location).
     let pdf_dir = s.pdfs_dir().join(id.to_string());
     if pdf_dir.exists() {
         let _ = std::fs::remove_dir_all(&pdf_dir);
     }
 
-    // 2. Fallback embedding: projects/<slug>/embeddings/<id>.json
-    //    Written when no PDF dir exists at embedding-compute time.
-    let fallback_embedding = s.projects_dir
+    // 2. Embedding: projects/<slug>/embeddings/<id>.json
+    let embedding = s.projects_dir
         .join(s.current_slug())
         .join("embeddings")
         .join(format!("{id}.json"));
-    if fallback_embedding.exists() {
-        let _ = std::fs::remove_file(&fallback_embedding);
+    if embedding.exists() {
+        let _ = std::fs::remove_file(&embedding);
     }
 
     Ok(())
@@ -107,24 +105,46 @@ pub async fn save_pdf_path(s: State<'_, AppState>, id: i64, path: Option<String>
 }
 
 /// Remove the PDF file from disk and clear its path in the DB.
-/// Deletes the entire per-paper PDF directory (projects/<slug>/pdfs/<id>/)
-/// which also removes any cached embedding.json stored alongside the PDF.
-/// Silently succeeds if no file exists — the DB path is always cleared.
+/// Removes the `pdf` field vector from embedding.json (other field vectors
+/// remain intact). Deletes the PDF file(s) but keeps the per-paper directory
+/// so that embedding.json persists. Silently succeeds if no file exists.
 #[tauri::command]
 pub async fn delete_pdf_file(s: State<'_, AppState>, id: i64) -> CmdResult<()> {
     logger::log_call("delete_pdf_file");
-    // 1. Clear the DB record first so the paper is never left pointing at a
-    //    deleted file even if the filesystem removal fails.
+    // 1. Clear the DB record first.
     db::save_pdf_path(&s.pool(), id, None).await.map_err(map_log_err!("delete_pdf_file"))?;
 
-    // 2. Remove the per-paper PDF directory.
     let pdf_dir = s.pdfs_dir().join(id.to_string());
+
+    // 2. Remove the `pdf` key from the embedding cache so stale vectors are
+    //    not used if a new PDF is uploaded later with a different model.
+    let emb_path = s.projects_dir
+        .join(s.current_slug())
+        .join("embeddings")
+        .join(format!("{id}.json"));
+    if let Some(mut cache) = read_embedding_cache(&emb_path) {
+        remove_pdf_field_from_cache(&mut cache);
+        if let Ok(serialized) = serde_json::to_string(&cache) {
+            let _ = std::fs::write(&emb_path, serialized);
+        }
+    }
+
+    // 3. Delete the PDF directory entirely.
     if pdf_dir.exists() {
-        std::fs::remove_dir_all(&pdf_dir)
-            .map_err(|e| format!("Failed to delete PDF directory: {e}"))?;
+        let _ = std::fs::remove_dir_all(&pdf_dir);
     }
 
     Ok(())
+}
+
+fn remove_pdf_field_from_cache(cache: &mut serde_json::Value) {
+    if let Some(models) = cache.get_mut("models").and_then(|m| m.as_object_mut()) {
+        for entry in models.values_mut() {
+            if let Some(fv) = entry.get_mut("field_vectors").and_then(|f| f.as_object_mut()) {
+                fv.remove("pdf");
+            }
+        }
+    }
 }
 
 // ── Authors ───────────────────────────────────────────────────────────────────
@@ -261,6 +281,7 @@ pub async fn replace_edges_by_source(
 
 #[tauri::command]
 pub async fn store_pdf_bytes(
+    app:         tauri::AppHandle,
     s:           State<'_, AppState>,
     paper_id:    i64,
     filename:    String,
@@ -284,6 +305,7 @@ pub async fn store_pdf_bytes(
         .map_err(|e| format!("Failed to write PDF: {e}"))?;
     db::save_pdf_path(&s.pool(), paper_id, Some(&dest.to_string_lossy()))
         .await.map_err(map_log_err!("store_pdf_bytes"))?;
+    embed_pdf_in_background(app, paper_id, s.pdfs_dir(), s.data_dir.clone());
     Ok(dest.to_string_lossy().to_string())
 }
 
@@ -330,6 +352,7 @@ fn base64_encode(input: &[u8]) -> String {
 
 #[tauri::command]
 pub async fn copy_pdf(
+    app: tauri::AppHandle,
     s: State<'_, AppState>, paper_id: i64, src_path: String,
 ) -> CmdResult<String> {
     logger::log_call("copy_pdf");
@@ -349,6 +372,7 @@ pub async fn copy_pdf(
     std::fs::copy(src, &dest).map_err(|e| format!("Failed to copy PDF: {e}"))?;
     db::save_pdf_path(&s.pool(), paper_id, Some(&dest.to_string_lossy()))
         .await.map_err(map_log_err!("store_pdf_bytes"))?;
+    embed_pdf_in_background(app, paper_id, s.pdfs_dir(), s.data_dir.clone());
     Ok(dest.to_string_lossy().to_string())
 }
 
@@ -654,8 +678,6 @@ fn step_create_venv(
     emit_progress(app, "create_venv",
         &format!("Creating venv at {}", venv_dir.display()), false);
 
-    // println!("system_py : {}", system_py);    
-    // println!("venv_dir : {}", venv_dir.display());
     let status = Command::new(system_py)
         .args(["-m", "venv", "--clear"])
         .arg(venv_dir)
@@ -822,19 +844,9 @@ fn step_install_deps(
     // The version expression is embedded in the import probe so we can report
     // the installed version in the progress message.
     let required: &[(&str, &str, &str)] = &[
-        // Probe exits 1 if the installed version is 4.57.0 (yanked), forcing
-        // a reinstall with the !=4.57.0 constraint so pip picks a stable release.
-        (
-            "transformers!=4.57.0",
-            "transformers",
-            // "import transformers" is prepended by the probe format string, so
-            // `transformers` is already in scope here.
-            "(__import__('sys').exit(1) if transformers.__version__ == '4.57.0' \
-             else transformers.__version__)",
-        ),
-        ("torch",           "torch",           "torch.__version__"),
-        ("huggingface_hub", "huggingface_hub", "huggingface_hub.__version__"),
-        ("PyMuPDF",         "PyMuPDF",         "PyMuPDF.__version__"),
+        ("llama-cpp-python", "llama_cpp", "llama_cpp.__version__"),
+        ("huggingface_hub",  "huggingface_hub", "huggingface_hub.__version__"),
+        ("PyMuPDF",          "PyMuPDF",         "PyMuPDF.__version__"),
     ];
 
     // Probe each package; build two lists: already-installed (for the log) and
@@ -877,7 +889,7 @@ fn step_install_deps(
         &format!("Installing missing packages: {missing_list} (may take a minute)…"), false);
 
     let mut child = Command::new(venv_pip(venv_dir))
-        .args(["install", "--no-color", "--progress-bar", "off"])
+        .args(["install", "--no-color", "--progress-bar", "off", "--prefer-binary"])
         .args(&missing)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -913,12 +925,9 @@ fn step_install_deps(
 
     // Confirm by re-probing every package that was just installed.
     let required_confirm: &[(&str, &str, &str)] = &[
-        ("transformers!=4.57.0", "transformers",    "transformers.__version__"),
-        ("torch",                "torch",           "torch.__version__"),
-        ("huggingface_hub",      "huggingface_hub", "huggingface_hub.__version__"),
+        ("llama-cpp-python", "llama_cpp",        "llama_cpp.__version__"),
+        ("huggingface_hub",  "huggingface_hub",  "huggingface_hub.__version__"),
     ];
-    // The confirm loop uses pip_name for the missing-contains check; the probe
-    // expression for transformers uses __import__ style to avoid side-effects.
     for (pip_name, import_name, version_expr) in required_confirm {
         if !missing.contains(pip_name) { continue; }
         let probe = format!("import {import_name}; print({version_expr})");
@@ -941,11 +950,16 @@ fn ensure_venv(
     venv_dir: &std::path::Path,
     app:      &tauri::AppHandle,
 ) -> Result<std::path::PathBuf, String> {
-    // 1 — Locate a suitable system Python
-    let system_py = step_find_python(app)?;
+    if !venv_python(venv_dir).exists() {
+        // 1 — Locate a suitable system Python (only needed when creating a new venv)
+        let system_py = step_find_python(app)?;
 
-    // 2 — Create the venv (no-op if it already exists)
-    step_create_venv(venv_dir, &system_py, app)?;
+        // 2 — Create the venv
+        step_create_venv(venv_dir, &system_py, app)?;
+    } else {
+        emit_progress(app, "find_python", "Existing venv found — skipping Python search", false);
+        emit_progress(app, "create_venv", "Existing environment found — skipping creation", false);
+    }
 
     // 3 — Verify the venv is self-contained
     let py_bin = step_verify_venv(venv_dir, app)?;
@@ -953,7 +967,7 @@ fn ensure_venv(
     // 4 — Upgrade pip inside the venv
     step_upgrade_pip(&py_bin, app)?;
 
-    // 5 — Install transformers + torch + einops + timm (no-op if already present)
+    // 5 — Install llama-cpp-python + huggingface_hub + PyMuPDF (no-op if already present)
     step_install_deps(venv_dir, &py_bin, app)?;
 
     Ok(py_bin)
@@ -974,7 +988,7 @@ fn launch_sidecar(
     // Python can load the user's similarity_fn / compute_embedding_fn hooks.
     // Read app_config.json once to extract both the plugin script path and the
     // HuggingFace API token (needed for gated models like google/gemma-3-1b-it).
-    let (plugin_script, hf_token): (String, String) = {
+    let (plugin_script, models_dir_str): (String, String) = {
         // NOTE: we don't have &AppState here, only venv_dir.  Infer data_dir
         // as venv_dir's parent (similarity_venv is created directly inside data_dir).
         let data_dir = venv_dir.parent().unwrap_or(venv_dir);
@@ -986,11 +1000,12 @@ fn launch_sidecar(
             .and_then(|c| c["sidecar_script"].as_str().map(String::from))
             .filter(|p| !p.is_empty() && std::path::Path::new(p).exists())
             .unwrap_or_default();
-        let token = cfg.as_ref()
-            .and_then(|c| c["hf_token"].as_str().map(String::from))
-            .filter(|t| !t.is_empty())
-            .unwrap_or_default();
-        (script, token)
+        let models_dir = cfg.as_ref()
+            .and_then(|c| c["models_dir"].as_str())
+            .filter(|p| !p.is_empty())
+            .map(String::from)
+            .unwrap_or_else(|| data_dir.join("models").to_string_lossy().into_owned());
+        (script, models_dir)
     };
 
     let mut child = Command::new(&python)
@@ -1001,7 +1016,7 @@ fn launch_sidecar(
         .env_remove("VIRTUAL_ENV")
         .env_remove("VIRTUAL_ENV_PROMPT")
         .env("LitAtlas_PLUGIN_SCRIPT", &plugin_script)
-        .env("HUGGING_FACE_HUB_TOKEN", &hf_token)
+        .env("LITATLAS_MODELS_DIR",    &models_dir_str)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1030,8 +1045,13 @@ fn launch_sidecar(
         return Err(hint);
     }
 
-    // Drain remaining stderr in the background so the pipe doesn't block.
-    std::thread::spawn(move || { let mut s = String::new(); let _ = stderr_reader.read_to_string(&mut s); if !s.trim().is_empty() { eprintln!("[LitAtlas sidecar stderr] {}", s.trim()); } });
+    // Stream Python stderr line-by-line so logs appear immediately and are
+    // written to litatlas.log (not batched until process exit).
+    std::thread::spawn(move || {
+        for line in stderr_reader.lines().flatten() {
+            logger::log_info("py_sidecar", &line);
+        }
+    });
 
     let v: serde_json::Value = serde_json::from_str(handshake.trim())
         .map_err(|e| format!("sidecar handshake parse: {e}\ngot: {handshake}"))?;
@@ -1055,7 +1075,6 @@ fn ensure_running<'a>(s: &'a AppState, app: &tauri::AppHandle) -> Result<std::sy
         if guard.is_some() {
             eprintln!("[LitAtlas] Sidecar crashed — restarting…");
         }
-        eprintln!("dead !!");
         *guard = Some(launch_sidecar(&s.sidecar_script(), &s.venv_dir(), app)?);
     }
     Ok(guard)
@@ -1082,10 +1101,9 @@ pub fn hf_setup_status(s: State<'_, AppState>) -> CmdResult<serde_json::Value> {
         }));
     }
 
-    // Check every required package is importable — a partial install (e.g.
-    // torch present but einops missing) should also report not-ready.
+    // Check that the core required packages are importable.
     let pkg_ok = std::process::Command::new(&py)
-        .args(["-c", "import transformers, torch, huggingface_hub"])
+        .args(["-c", "import llama_cpp, huggingface_hub"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
@@ -1095,82 +1113,33 @@ pub fn hf_setup_status(s: State<'_, AppState>) -> CmdResult<serde_json::Value> {
     if !pkg_ok {
         return Ok(serde_json::json!({
             "ready":         false,
-            "reason":        "one or more required packages (transformers, torch, huggingface_hub) not installed",
+            "reason":        "required packages (llama-cpp-python, huggingface_hub) not installed",
             "cached_models": serde_json::Value::Array(vec![]),
         }));
     }
 
-    // Scan the HuggingFace local cache for models that are available offline.
-    // This uses the same snapshot-directory heuristic as the Python sidecar's
-    // _model_snapshot_path(): a model is offline-ready when its snapshot dir
-    // contains config.json.  We do this in Rust so JS gets the list without
-    // needing to start the sidecar first.
-    let mut known_models: Vec<String> = vec![
-        "google/gemma-3-1b-it".into(),
-    ];
-
-    // Merge custom models from app_config.json so user-defined models are
-    // also scanned for offline availability.
-    let app_cfg_path = s.data_dir.join("app_config.json");
-    if let Ok(raw) = std::fs::read_to_string(&app_cfg_path) {
-        if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&raw) {
-            if let Some(arr) = cfg["custom_models"].as_array() {
-                for m in arr {
-                    if let Some(id) = m["id"].as_str() {
-                        if !known_models.iter().any(|k| k == id) {
-                            known_models.push(id.to_string());
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    let hf_cache = hf_cache_dir();
-    let cached_models: Vec<serde_json::Value> = known_models.iter()
-        .filter(|model_id| model_is_cached(&hf_cache, model_id))
-        .map(|id| serde_json::json!(id))
-        .collect();
+    // Scan models_dir for downloaded GGUF files.
+    let models_dir    = s.models_dir();
+    let cached_models: Vec<serde_json::Value> = if models_dir.is_dir() {
+        std::fs::read_dir(&models_dir)
+            .map(|entries| {
+                entries.flatten()
+                    .filter(|e| {
+                        e.path().extension()
+                            .and_then(|x| x.to_str()) == Some("gguf")
+                    })
+                    .map(|e| serde_json::json!(e.file_name().to_string_lossy()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        vec![]
+    };
 
     Ok(serde_json::json!({
         "ready":         true,
         "cached_models": cached_models,
     }))
-}
-
-/// Return the HuggingFace hub cache directory, respecting HF_HOME / XDG_CACHE_HOME.
-/// Mirrors the logic in similarity_server.py: _hf_cache_dir().
-fn hf_cache_dir() -> std::path::PathBuf {
-    if let Ok(hf_home) = std::env::var("HF_HOME") {
-        return std::path::PathBuf::from(hf_home).join("hub");
-    }
-    let cache_root = std::env::var("XDG_CACHE_HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            dirs_next_home().join(".cache")
-        });
-    cache_root.join("huggingface").join("hub")
-}
-
-/// Cross-platform home directory (mirrors dirs::home_dir without the dep).
-fn dirs_next_home() -> std::path::PathBuf {
-    std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from("."))
-}
-
-/// Return true if model_id has at least one snapshot directory containing
-/// config.json in the HuggingFace hub cache.  Mirrors _model_snapshot_path().
-fn model_is_cached(hf_cache: &std::path::Path, model_id: &str) -> bool {
-    let safe      = model_id.replace('/', "--");
-    let snap_root = hf_cache.join(format!("models--{safe}")).join("snapshots");
-    if !snap_root.is_dir() { return false; }
-    std::fs::read_dir(&snap_root)
-        .map(|entries| entries.flatten().any(|entry| {
-            entry.path().join("config.json").is_file()
-        }))
-        .unwrap_or(false)
 }
 
 /// Set up (or repair) the Python venv and install transformers + torch + einops + timm.
@@ -1298,13 +1267,14 @@ pub fn hf_check_model(
 ///   { ok: true, model, path }   on success
 ///   { ok: false, model, error } on failure
 ///
-/// Called from JS as: invoke("hf_download_model", { model })
+/// Called from JS as: invoke("hf_download_model", { model, repo_id })
 /// Returns immediately: { ok: true, background: true }
 #[tauri::command]
 pub fn hf_download_model(
-    app:   tauri::AppHandle,
-    s:     State<'_, AppState>,
-    model: String,
+    app:     tauri::AppHandle,
+    s:       State<'_, AppState>,
+    model:   String,
+    repo_id: String,
 ) -> CmdResult<serde_json::Value> {
     logger::log_call("hf_download_model");
     // Send the request while we hold the lock, then release it before
@@ -1319,7 +1289,7 @@ pub fn hf_download_model(
         let mut req = serde_json::json!({
             "id": id,
             "method": "download_model",
-            "params": { "model": model }
+            "params": { "model": model, "repo_id": repo_id }
         }).to_string();
         req.push('\n');
 
@@ -1481,12 +1451,6 @@ fn is_embedding_stale(paper_updated_at: &str, cache: &serde_json::Value) -> bool
 }
 
 fn embedding_path_for_paper(s: &AppState, paper_id: i64) -> std::path::PathBuf {
-    // Primary: alongside the PDF directory
-    let pdf_sibling = s.pdfs_dir().join(paper_id.to_string()).join("embedding.json");
-    if pdf_sibling.parent().map(|p| p.exists()).unwrap_or(false) {
-        return pdf_sibling;
-    }
-    // Fallback: dedicated embeddings directory (created lazily)
     let embeddings_dir = s.projects_dir
         .join(s.current_slug())
         .join("embeddings");
@@ -1505,18 +1469,36 @@ fn read_embedding_cache(path: &std::path::Path) -> Option<serde_json::Value> {
 /// that is fine.  recompose_embedding selects only the relevant subset.
 /// Weights are not compared — the cache stores raw per-field vectors so the
 /// composite can be recomposed locally without re-encoding when weights change.
+/// Extract the per-model embedding entry from a cache file.
+/// Handles both formats:
+///   New: { "models": { "<model>": { "field_vectors": {...}, "written_at": "..." } } }
+///   Old: { "model": "<model>", "field_vectors": {...}, "written_at": "..." }
+fn get_model_entry(cache: &serde_json::Value, model: &str) -> Option<serde_json::Value> {
+    if let Some(models) = cache["models"].as_object() {
+        return models.get(model).cloned();
+    }
+    if cache["model"].as_str() == Some(model) {
+        return Some(cache.clone());
+    }
+    None
+}
+
 fn embedding_cache_matches(
     cache:  &serde_json::Value,
     model:  &str,
     fields: &[String],
 ) -> bool {
-    if cache["model"].as_str() != Some(model) { return false; }
-    let fv = match cache["field_vectors"].as_object() {
+    let entry = match get_model_entry(cache, model) {
+        Some(e) => e,
+        None    => return false,
+    };
+    let fv = match entry["field_vectors"].as_object() {
         Some(m) => m,
         None    => return false,
     };
     fields.iter().all(|f| fv.contains_key(f.as_str()))
 }
+
 
 /// Merge `new_fv` into an existing embedding cache file and write it back.
 ///
@@ -1531,27 +1513,38 @@ fn write_merged_embedding(
     new_fv:     &serde_json::Value,
     written_at: &str,
 ) -> Result<(), String> {
-    // Seed merged map with existing vectors for the same model.
-    let mut merged: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
-    if let Some(existing) = read_embedding_cache(path) {
-        if existing["model"].as_str() == Some(model) {
-            if let Some(obj) = existing["field_vectors"].as_object() {
-                merged.extend(obj.clone());
-            }
+    let existing = read_embedding_cache(path).unwrap_or_else(|| serde_json::json!({}));
+
+    // Build models map, migrating old flat format on first write.
+    let mut models: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+    if let Some(existing_models) = existing["models"].as_object() {
+        models.extend(existing_models.clone());
+    } else if let Some(old_model) = existing["model"].as_str() {
+        models.insert(old_model.to_string(), serde_json::json!({
+            "field_vectors": existing["field_vectors"].clone(),
+            "written_at":    existing["written_at"].clone(),
+        }));
+    }
+
+    // Merge new vectors into this model's entry (new vectors win over old).
+    let mut merged_fv: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+    if let Some(current) = models.get(model) {
+        if let Some(obj) = current["field_vectors"].as_object() {
+            merged_fv.extend(obj.clone());
         }
     }
-    // Overlay with newly computed vectors (they are fresher and take precedence).
     if let Some(obj) = new_fv.as_object() {
-        merged.extend(obj.clone());
+        merged_fv.extend(obj.clone());
     }
+    models.insert(model.to_string(), serde_json::json!({
+        "field_vectors": serde_json::Value::Object(merged_fv),
+        "written_at":    written_at,
+    }));
+
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("Cannot create embedding dir: {e}"))?;
     }
-    let payload = serde_json::json!({
-        "model":         model,
-        "field_vectors": serde_json::Value::Object(merged),
-        "written_at":    written_at,
-    });
+    let payload = serde_json::json!({ "models": serde_json::Value::Object(models) });
     serde_json::to_string(&payload)
         .map_err(|e| e.to_string())
         .and_then(|s| std::fs::write(path, s).map_err(|e| e.to_string()))
@@ -1574,8 +1567,6 @@ fn recompose_embedding(
     let mut composite: Vec<f64> = Vec::new();
     let mut any = false;
     for field in fields {
-        println!("field {:?}", field);
-        
         let vec_val = match fv_map.get(field) { Some(v) => v, None => continue };
         let arr = match vec_val.as_array() { Some(a) => a, None => continue };
         let w = weights.get(field)
@@ -1591,8 +1582,6 @@ fn recompose_embedding(
         }
         any = true;
     }
-    // println!("composite : {:?}", composite);
-
     if !any || composite.is_empty() { return None; }
 
     // L2-normalise
@@ -1626,7 +1615,8 @@ pub fn hf_get_paper_embedding(
 
     if let Some(cache) = read_embedding_cache(&path) {
         if embedding_cache_matches(&cache, model, &fields) {
-            let field_vectors = cache["field_vectors"].clone();
+            let entry        = get_model_entry(&cache, model).unwrap_or_default();
+            let field_vectors = entry["field_vectors"].clone();
             let dim = field_vectors.as_object()
                 .and_then(|m| m.values().next())
                 .and_then(|v| v.as_array())
@@ -1636,6 +1626,57 @@ pub fn hf_get_paper_embedding(
         }
     }
     Ok(serde_json::json!({ "hit": false }))
+}
+
+/// Compute the `pdf` field embedding for a single paper in a background thread.
+/// Called immediately after a PDF is uploaded so the vector is available before
+/// the next "Recompute Graph". Silently no-ops if the sidecar fails or if the
+/// strategy is not `hf-embeddings`.
+fn embed_pdf_in_background(app: tauri::AppHandle, paper_id: i64, pdfs_dir: std::path::PathBuf, data_dir: std::path::PathBuf) {
+    logger::log_info("embed_pdf_in_background", &format!("paper_id={paper_id} spawning"));
+    std::thread::spawn(move || {
+        // Read model + strategy from similarity_config.json.
+        let cfg: serde_json::Value = std::fs::read_to_string(data_dir.join("similarity_config.json"))
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or(serde_json::json!({}));
+        if cfg["strategy"].as_str() != Some("hf-embeddings") { return; }
+        let model = cfg["model"].as_str().unwrap_or("gemma-4-E2B-it-Q4_K_M.gguf").to_string();
+        logger::log_info("embed_pdf_in_background", &format!("paper_id={paper_id} model={model}"));
+
+        let state = app.state::<AppState>();
+        let paper_val = match tauri::async_runtime::block_on(
+            crate::db::get_paper(&state.pool(), paper_id)
+        ) {
+            Ok(p)  => match serde_json::to_value(p) { Ok(v) => v, Err(_) => return },
+            Err(_) => return,
+        };
+
+        let py_config = serde_json::json!({ "model": &model, "fields": ["pdf"] });
+        let result = match ensure_running(&state, &app) {
+            Ok(mut guard) => {
+                let r: Result<serde_json::Value, String> = guard.as_mut().unwrap().call(
+                    "compute_embedding",
+                    serde_json::json!({ "paper": paper_val, "config": py_config }),
+                );
+                drop(guard);
+                match r { Ok(v) => v, Err(_) => return }
+            }
+            Err(_) => return,
+        };
+
+        let field_vectors = result.get("field_vectors").cloned()
+            .unwrap_or(serde_json::Value::Object(Default::default()));
+        // pdfs_dir is projects/<slug>/pdfs/; parent is projects/<slug>/
+        let emb_dir = pdfs_dir.parent()
+            .map(|d| d.join("embeddings"))
+            .unwrap_or_else(|| pdfs_dir.join("embeddings"));
+        let _ = std::fs::create_dir_all(&emb_dir);
+        let emb_path   = emb_dir.join(format!("{paper_id}.json"));
+        let written_at = chrono_now_iso();
+        let _ = write_merged_embedding(&emb_path, &model, &field_vectors, &written_at);
+        logger::log_info("embed_pdf_in_background", &format!("paper_id={paper_id} pdf embedding written"));
+    });
 }
 
 /// Re-encode every paper in the current project unconditionally.
@@ -1664,6 +1705,8 @@ pub fn hf_compute_all_embeddings(
     let model = config["model"].as_str()
         .unwrap_or("google/gemma-3-1b-it")
         .to_string();
+    let skip_fresh_log = config["skip_fresh"].as_bool().unwrap_or(false);
+    logger::log_info("hf_compute_all_embeddings", &format!("model={model} skip_fresh={skip_fresh_log}"));
     
     // Always include "pdf" so papers with a PDF get a text-extracted embedding.
     // Deduplicate in case the caller already included it.
@@ -1681,25 +1724,11 @@ pub fn hf_compute_all_embeddings(
             .map_err(|e| e.to_string())?
     };
 
-    // Pre-resolve each paper's embedding output path using the same logic as
-    // embedding_path_for_paper(): prefer pdfs/<id>/embedding.json when the
-    // per-paper PDF directory already exists, otherwise use
-    // embeddings/<id>.json.  This must be done while we still hold State so
-    // we can call pdfs_dir() / current_slug().
-    let pdfs_dir     = s.pdfs_dir();
-    let projects_dir = s.projects_dir.clone();
-    let current_slug = s.current_slug();
-
-    let embedding_paths: Vec<std::path::PathBuf> = papers.iter().map(|p| {
-        let pdf_sibling = pdfs_dir.join(p.id.to_string()).join("embedding.json");
-        if pdf_sibling.parent().map(|d| d.exists()).unwrap_or(false) {
-            pdf_sibling
-        } else {
-            let emb_dir = projects_dir.join(&current_slug).join("embeddings");
-            std::fs::create_dir_all(&emb_dir).ok();
-            emb_dir.join(format!("{}.json", p.id))
-        }
-    }).collect();
+    let emb_dir = s.projects_dir.join(s.current_slug()).join("embeddings");
+    std::fs::create_dir_all(&emb_dir).ok();
+    let embedding_paths: Vec<std::path::PathBuf> = papers.iter()
+        .map(|p| emb_dir.join(format!("{}.json", p.id)))
+        .collect();
 
     // skip_fresh: when true, papers whose embedding is already up-to-date are
     // skipped — only stale or missing embeddings are re-encoded.
@@ -1728,13 +1757,12 @@ pub fn hf_compute_all_embeddings(
             if !skip_fresh {
                 return Some((paper, emb_path, effective_fields));
             }
-            match read_embedding_cache(&emb_path) {
-                Some(ref cache)
-                    if cache["model"].as_str() == Some(&model)
-                        && !is_embedding_stale(&paper.updated_at, cache) =>
-                {
+            let cache_val = read_embedding_cache(&emb_path);
+            let entry_opt = cache_val.as_ref().and_then(|c| get_model_entry(c, &model));
+            match entry_opt {
+                Some(ref entry) if !is_embedding_stale(&paper.updated_at, entry) => {
                     // Model matches and paper content is fresh — encode only missing fields.
-                    let fv = cache["field_vectors"].as_object();
+                    let fv = entry["field_vectors"].as_object();
                     let missing: Vec<String> = effective_fields.iter()
                         .filter(|f| fv.map(|m| !m.contains_key(f.as_str())).unwrap_or(true))
                         .cloned()
@@ -1751,6 +1779,7 @@ pub fn hf_compute_all_embeddings(
         .collect();
 
     let total = work.len();
+    logger::log_info("hf_compute_all_embeddings", &format!("papers to encode: {total}"));
 
     // Emit "started" immediately so the JS overlay appears before the thread runs.
     let _ = app.emit("embedding://progress", serde_json::json!({
@@ -1770,6 +1799,10 @@ pub fn hf_compute_all_embeddings(
         let mut computed = 0usize;
 
         for (index, (paper, emb_path, paper_fields)) in work.iter().enumerate() {
+            logger::log_info("hf_compute_all_embeddings", &format!(
+                "[{}/{}] paper_id={} title={:?} fields={:?}",
+                index + 1, total, paper.id, paper.title, paper_fields
+            ));
             let _ = app.emit("embedding://progress", serde_json::json!({
                 "paper_id": paper.id,
                 "title":    &paper.title,
@@ -1861,8 +1894,8 @@ pub fn hf_compute_edges_from_cache(
     config: serde_json::Value,
 ) -> CmdResult<serde_json::Value> {
     logger::log_call("hf_compute_edges_from_cache");
-    // let model = config["model"].as_str()
-    //     .unwrap_or("google/gemma-3-1b-it");
+    let model = config["model"].as_str().unwrap_or("gemma-4-E2B-it-Q4_K_M.gguf");
+    logger::log_info("hf_compute_edges_from_cache", &format!("papers={} model={model}", papers.len()));
     let fields: Vec<String> = config["fields"]
         .as_array()
         .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
@@ -1871,8 +1904,6 @@ pub fn hf_compute_edges_from_cache(
         .unwrap_or(serde_json::Value::Object(Default::default()));
     let threshold = config["threshold"].as_f64().unwrap_or(0.38);
     let max_edges = config["max_edges"].as_u64().unwrap_or(7) as usize;
-
-    // println!("fields : {:?}", fields);
     // Build (paper_json, composite_vector) pairs.
     // Papers without a cache file, with a stale cache, or with a mismatched
     // model/fields are given None and produce no edges.
@@ -1881,9 +1912,11 @@ pub fn hf_compute_edges_from_cache(
         let id = match paper["id"].as_i64() { Some(v) => v, None => { vecs.push(None); continue; } };
         let updated_at = paper["updated_at"].as_str().unwrap_or("");
         let path = embedding_path_for_paper(&s, id);
-        let composite = read_embedding_cache(&path)
-            .filter(|cache| !is_embedding_stale(updated_at, cache))
-            .and_then(|cache| recompose_embedding(&cache["field_vectors"], &fields, &weights));
+        let cache_val  = read_embedding_cache(&path);
+        let entry_opt  = cache_val.as_ref().and_then(|c| get_model_entry(c, model));
+        let composite  = entry_opt
+            .filter(|e| !is_embedding_stale(updated_at, e))
+            .and_then(|e| recompose_embedding(&e["field_vectors"], &fields, &weights));
         vecs.push(composite);
     }
     // Pairwise cosine — identical edge-selection logic to the Python sidecar.
@@ -1893,7 +1926,6 @@ pub fn hf_compute_edges_from_cache(
         for j in (i + 1)..n {
             let (Some(vi), Some(vj)) = (&vecs[i], &vecs[j]) else { continue };
             let sim = cosine_f64(vi, vj);
-            println!("{:?} {:?} {:?}", i, j, sim);
             if sim >= threshold {
                 candidates.push((i, j, sim));
             }
@@ -1921,6 +1953,7 @@ pub fn hf_compute_edges_from_cache(
     }
 
     let count = edges.len();
+    logger::log_info("hf_compute_edges_from_cache", &format!("edges produced: {count}"));
     Ok(serde_json::json!({ "edges": edges, "count": count }))
 }
 
@@ -2074,5 +2107,32 @@ pub fn get_sidecar_script_info(s: State<'_, AppState>) -> CmdResult<serde_json::
     Ok(serde_json::json!({
         "path":      s.sidecar_script(),
         "is_custom": false,
+    }))
+}
+
+/// Open a directory in the OS file manager (Finder / Explorer / Nautilus).
+/// Creates the directory first if it doesn't exist.
+#[tauri::command]
+pub fn open_folder(path: String) -> CmdResult<()> {
+    use std::process::Command;
+    let p = std::path::Path::new(&path);
+    if !p.exists() {
+        std::fs::create_dir_all(p).map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "macos")]
+    { Command::new("open").arg(&path).spawn().map_err(|e| e.to_string())?; }
+    #[cfg(target_os = "windows")]
+    { Command::new("explorer").arg(&path).spawn().map_err(|e| e.to_string())?; }
+    #[cfg(target_os = "linux")]
+    { Command::new("xdg-open").arg(&path).spawn().map_err(|e| e.to_string())?; }
+    Ok(())
+}
+
+/// Return key data-directory paths so the frontend can display and open them.
+#[tauri::command]
+pub fn get_dirs(s: State<'_, AppState>) -> CmdResult<serde_json::Value> {
+    Ok(serde_json::json!({
+        "data_dir":   s.data_dir.to_string_lossy(),
+        "models_dir": s.models_dir().to_string_lossy(),
     }))
 }

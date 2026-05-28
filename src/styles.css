@@ -59,14 +59,14 @@
       --accent2:      #00d4ff;
       --accent3:      #ff6b35;
       --text-primary: #e8eaf0;
-      --text-secondary:#6b7280;
-      --text-dim:     #3d4460;
+      --text-secondary:#8b95a8;
+      --text-dim:     #606880;
       --radius:       2px;
     }
 
     /* Controlled at runtime by app_settings.js via setUiFontSize().
        Default 18px; user range 10–22px. All rem values scale automatically. */
-    html { font-size: 18px; }
+    html { font-size: 20px; }
 
     * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -2086,11 +2086,46 @@
 #app-settings-body {
   flex: 1;
   overflow-y: auto;
-  padding: 12px 16px 24px;
+  padding: 0 0 24px;
   display: flex;
   flex-direction: column;
   gap: 0;
 }
+
+/* ── Tab bar ──────────────────────────────────────────────────────────────── */
+
+.app-cfg-tab-bar {
+  display: flex;
+  border-bottom: 1px solid var(--border, #2a2d3a);
+  flex-shrink: 0;
+  background: var(--surface, #111318);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+.app-cfg-tab-btn {
+  flex: 1;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-secondary, #8b95a8);
+  font-family: 'Space Mono', monospace;
+  font-size: .55rem;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  padding: 10px 6px;
+  cursor: pointer;
+  transition: color .15s, border-color .15s;
+  margin-bottom: -1px;
+}
+.app-cfg-tab-btn:hover { color: var(--text-primary); }
+.app-cfg-tab-btn.active {
+  color: var(--accent2, #00d4ff);
+  border-bottom-color: var(--accent2, #00d4ff);
+}
+
+.app-cfg-tab-pane { display: none; padding: 0 16px; }
+.app-cfg-tab-pane.active { display: block; }
 
 /* ── Sections ─────────────────────────────────────────────────────────────── */
 
@@ -2417,6 +2452,103 @@
   margin: 0;
 }
 
+/* ── Model selection cards ────────────────────────────────────────────────── */
+
+#app-cfg-model-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+.app-cfg-model-card {
+  border: 1px solid var(--border, #2a2d3a);
+  border-radius: 4px;
+  padding: 10px 12px;
+  background: var(--surface, #111318);
+  transition: border-color .15s;
+}
+.app-cfg-model-card.active {
+  border-color: var(--accent2, #00d4ff);
+  background: rgba(0,212,255,.06);
+}
+.app-cfg-model-card-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.app-cfg-model-card-name {
+  font-size: .65rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.app-cfg-model-card-size {
+  font-size: .55rem;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.app-cfg-model-card-desc {
+  font-size: .58rem;
+  color: var(--text-dim);
+  line-height: 1.5;
+  margin-bottom: 8px;
+}
+.app-cfg-model-card-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.app-cfg-model-card-type {
+  font-size: .5rem;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  padding: 1px 6px;
+  border-radius: 20px;
+}
+.app-cfg-model-active-badge {
+  font-size: .52rem;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--accent2, #00d4ff);
+  border: 1px solid var(--accent2, #00d4ff);
+  padding: 2px 8px;
+  border-radius: 20px;
+}
+.app-cfg-model-select-btn {
+  font-size: .55rem;
+  padding: 3px 10px;
+}
+
+/* ── Directory row (input + folder button) ────────────────────────────────── */
+
+.app-cfg-dir-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin: 8px 0 6px;
+}
+.app-cfg-folder-btn {
+  flex-shrink: 0;
+  padding: 6px 10px;
+  font-size: .78rem;
+}
+.app-cfg-folder-btn:hover { border-color: var(--accent2); color: var(--accent2); }
+
+.app-cfg-dir-display {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 7px 10px;
+  background: var(--surface, #111318);
+  border: 1px solid var(--border);
+}
+
 /* ── App Settings button in header ───────────────────────────────────────── */
 
 #btn-app-settings {
@@ -2732,3 +2864,4 @@
 /* LLM error dialog */
 .llm-error-note { font-size: .68rem; color: var(--text-secondary); margin: 8px 0 0; }
 #llm-error-ok-wrap { margin-top: 16px; }
+

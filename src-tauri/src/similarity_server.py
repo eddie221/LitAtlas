@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """
-similarity_server.py — LitAtlas HuggingFace similarity sidecar.
+similarity_server.py — LitAtlas llama.cpp similarity & LLM sidecar.
 
 Protocol: newline-delimited JSON over stdin/stdout (Tauri sidecar stdio).
 
 Requests:
-  { "id": N, "method": "compute",        "params": { "papers": [...], "config": {...} } }
+  { "id": N, "method": "compute",           "params": { "papers": [...], "config": {...} } }
+  { "id": N, "method": "compute_embedding", "params": { "paper": {...}, "config": {...} } }
   { "id": N, "method": "status" }
   { "id": N, "method": "list_models" }
-  { "id": N, "method": "check_model",    "params": { "model": "<hf-model-id>" } }
-  { "id": N, "method": "download_model", "params": { "model": "<hf-model-id>" } }
+  { "id": N, "method": "check_model",       "params": { "model": "<filename.gguf>" } }
+  { "id": N, "method": "download_model",    "params": { "model": "<filename.gguf>", "repo_id": "<hf-repo>" } }
+  { "id": N, "method": "validate_plugin",   "params": { "script_path": "..." } }
 
 Responses:
   { "id": N, "ok": true,  "result": <any>   }
@@ -18,6 +20,9 @@ Responses:
 download_model also emits intermediate progress lines before the final reply:
   { "id": N, "ok": true, "progress": {
       "filename": str, "downloaded": int, "total": int, "pct": float } }
+
+Models are GGUF files stored in LITATLAS_MODELS_DIR (set by Rust at launch).
+  Embedding models: loaded with embedding=True (e.g. nomic-embed-text).
 """
 
 import sys
@@ -30,8 +35,7 @@ import traceback
 from typing import Any
 
 try:
-    import torch
-    import numpy as np
+    from llama_cpp import Llama
 except ImportError as _import_err:
     sys.stdout.write(json.dumps({
         "id": 0, "ok": False,
@@ -46,20 +50,11 @@ except ImportError as _import_err:
 except Exception as _import_err:
     sys.stdout.write(json.dumps({
         "id": 0, "ok": False,
-        "error": f"Failed to load torch/numpy: {_import_err}"
+        "error": f"Failed to load llama_cpp: {_import_err}"
     }) + "\n")
     sys.stdout.flush()
     sys.exit(1)
 
-try:
-    if torch.cuda.is_available():
-        device = "cuda"
-    elif torch.backends.mps.is_available():
-        device = "mps"
-    else:
-        device = "cpu"
-except Exception:
-    device = "cpu"
 
 # ── User plugin ──────────────────────────────────────────────────────────────
 #
@@ -68,52 +63,25 @@ except Exception:
 #
 #   def similarity_fn(papers: list[dict], config: dict) -> list[dict]:
 #       """
-#       Compute similarity edges for the given papers.
-#
-#       Parameters
-#       ----------
-#       papers : list[dict]
-#           Each dict is a PaperFull record:
-#             { id, title, venue, year, notes, hashtags: [str],
-#               authors: [str], attributes: [{key, value, order}] }
-#       config : dict
-#           The current similarity config:
-#             { model, fields, weights, threshold, max_edges, ... }
-#           Plus any extra keys the user stored in their app config.
-#
-#       Returns
-#       -------
-#       list[dict]
-#           Each dict must have:
-#             { source_id: int, target_id: int,
-#               similarity: float,       # 0.0 – 1.0
-#               weight:     int,         # 1 | 2 | 3
-#               edge_type:  str }        # "related" | "same_tag" | "same_venue" | ...
+#       Returns list of { source_id, target_id, similarity, weight, edge_type }.
 #       """
-#
-# The path to this file is passed at server startup via the environment
-# variable LitAtlas_PLUGIN_SCRIPT (set by Rust before spawning the sidecar).
-# If the variable is not set, or the file does not define `similarity_fn`,
-# the default built-in implementation is used.
-#
-# Optional additional hooks (all have the same signature contract):
 #
 #   def compute_embedding_fn(paper: dict, config: dict) -> dict:
 #       """
-#       Compute per-field embedding vectors for a single paper.
-#       Must return: { field_vectors: { field_name: [float, ...] }, dim: int }
-#       If absent, the default HuggingFace implementation is used.
+#       Returns { field_vectors: { field_name: [float, ...] }, dim: int }
 #       """
+#
+# The path is passed via LitAtlas_PLUGIN_SCRIPT env var at startup.
 
-_plugin_similarity_fn        = None  # similarity_fn(papers, config) -> edges
-_plugin_compute_embedding_fn = None  # compute_embedding_fn(paper, config) -> {field_vectors, dim}
+def _log(fn_name: str, msg: str) -> None:
+    """Write a structured status line to stderr (mirrored to litatlas.log by Rust)."""
+    print(f"[LitAtlas][INFO] {fn_name}: {msg}", file=sys.stderr, flush=True)
+
+
+_plugin_similarity_fn        = None
+_plugin_compute_embedding_fn = None
 
 def _load_plugin() -> None:
-    """
-    Load the user plugin script if LitAtlas_PLUGIN_SCRIPT is set.
-    Called once at startup.  Errors are printed to stderr but never fatal —
-    the server always falls back to the built-in implementation.
-    """
     global _plugin_similarity_fn, _plugin_compute_embedding_fn
     script = os.environ.get("LitAtlas_PLUGIN_SCRIPT", "").strip()
     if not script:
@@ -139,113 +107,112 @@ def _load_plugin() -> None:
                 file=sys.stderr,
             )
     except Exception:
-        import traceback
         print(f"[LitAtlas] ERROR loading plugin {script}:", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
 
 
-# ── Lazy-loaded text model ─────────────────────────────────────────────────────
-_model      = None
-_model_name = None
-_model_lock = threading.Lock()
+# ── Models directory ──────────────────────────────────────────────────────────
 
-DEFAULT_MODEL = "google/gemma-3-1b-it"
-# Maximum pages of a PDF to extract text from.
-PDF_MAX_PAGES = 8
+def _models_dir() -> str:
+    """Return the directory where GGUF model files are stored."""
+    return os.environ.get(
+        "LITATLAS_MODELS_DIR",
+        os.path.join(os.path.expanduser("~"), ".litatlas", "models"),
+    )
 
-# if torch.cuda.is_available():
-#     device = "cuda"
-# elif torch.backends.mps.is_available():
-#     device = "mps"
-# else:
-#     device = "cpu"
-# print(f"Using {device} device")
 
-def _get_model(model_name: str, allow_download: bool = True):
-    """
-    Load a HuggingFace model as a (tokenizer, model) tuple.
+# ── Lazy-loaded llama.cpp models ──────────────────────────────────────────────
 
-    Strategy (offline-safe):
-      1. If the model is already cached locally, load it with
-         local_files_only=True — works with no internet connection.
-      2. If NOT cached and allow_download=True, attempt a normal download.
-      3. If NOT cached and allow_download=False (or download fails because
-         the network is unreachable), raise a clear offline error rather
-         than a cryptic huggingface_hub exception.
-    """
-    global _model, _model_name
-    with _model_lock:
-        if _model is not None and _model_name == model_name:
-            return _model
-        try:
-            from transformers import AutoTokenizer, Gemma3ForCausalLM
+_embed_model      = None
+_embed_model_path = None
+_embed_model_lock = threading.Lock()
 
-            offline = _model_snapshot_path(model_name) is not None
+_gen_model      = None
+_gen_model_path = None
+_gen_model_lock = threading.Lock()
 
-            # Model not cached yet.
-            if not offline and not allow_download:
-                raise RuntimeError(
-                    f"Model '{model_name}' is not cached locally and the app is "
-                    f"in offline mode.  Connect to the internet and download the "
-                    f"model first via the Similarity Settings panel."
-                )
+DEFAULT_EMBED_MODEL = "gemma-4-E2B-it-Q4_K_M.gguf"
+DEFAULT_GEN_MODEL   = "gemma-4-E2B-it-Q4_K_M.gguf"
+DEFAULT_MMPROJ      = "mmproj-F16.gguf"
+DEFAULT_MODEL       = DEFAULT_EMBED_MODEL  # backward-compat alias
 
-            hf_token = os.environ.get("HUGGING_FACE_HUB_TOKEN") or None
-            kwargs   = {"local_files_only": True} if offline else {}
-            if hf_token:
-                kwargs["token"] = hf_token
+# Remap legacy or mistyped filenames that may be saved in similarity_config.json.
+_FILENAME_ALIASES = {
+    "Qwen3-VL-2B-Instruct-Q4_K_M.gguf":  "gemma-4-E2B-it-Q4_K_M.gguf",
+    "Qwen3VL-2B-Instruct-Q4_K_M.gguf":   "gemma-4-E2B-it-Q4_K_M.gguf",
+    "nomic-embed-text-v1.5.Q4_K_M.gguf":  "gemma-4-E2B-it-Q4_K_M.gguf",
+}
+
+# Companion files automatically downloaded alongside their parent model.
+_MODEL_COMPANIONS = {
+    DEFAULT_EMBED_MODEL: {
+        "filename": DEFAULT_MMPROJ,
+        "repo_id":  "unsloth/gemma-4-E2B-it-GGUF",
+    },
+}
+
+def _get_embed_model(filename: str) -> "Llama":
+    filename = _FILENAME_ALIASES.get(filename, filename)
+    global _embed_model, _embed_model_path
+    with _embed_model_lock:
+        if _embed_model is not None and _embed_model_path == filename:
+            return _embed_model
+        path = os.path.join(_models_dir(), filename)
+        if not os.path.isfile(path):
+            raise RuntimeError(
+                f"Embedding model not found: {path}\n"
+                "Download it first from the Similarity Settings panel."
+            )
+        print(f"[LitAtlas] Loading embed model: {path}", file=sys.stderr, flush=True)
+        _embed_model      = Llama(model_path=path, embedding=True, pooling_type=3, n_ctx=0, verbose=False, n_gpu_layers=-1)
+        _embed_model_path = filename
+        return _embed_model
+
+
+def _get_gen_model(filename: str) -> "Llama":
+    filename = _FILENAME_ALIASES.get(filename, filename)
+    global _gen_model, _gen_model_path
+    with _gen_model_lock:
+        if _gen_model is not None and _gen_model_path == filename:
+            return _gen_model
+        path = os.path.join(_models_dir(), filename)
+        if not os.path.isfile(path):
+            raise RuntimeError(
+                f"Generative model not found: {path}\n"
+                "Download it first from the Similarity Settings panel."
+            )
+        print(f"[LitAtlas] Loading gen model: {path}", file=sys.stderr, flush=True)
+        mmproj_path = os.path.join(_models_dir(), DEFAULT_MMPROJ)
+        if os.path.isfile(mmproj_path):
             try:
-                tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side = "left", **kwargs)
-                model     = Gemma3ForCausalLM.from_pretrained(model_name, trust_remote_code=True, **kwargs)
-                model.eval()
-            except Exception as dl_err:
-                err_str = str(dl_err).lower()
-                # Auth / gated-model errors
-                if any(kw in err_str for kw in ("401", "403", "gated", "access",
-                                                 "authenticate", "restricted",
-                                                 "token", "unauthorized")):
-                    raise RuntimeError(
-                        f"Cannot download model '{model_name}': authentication failed.\n"
-                        f"This model may be gated. Set your HuggingFace API token in "
-                        f"App Settings → HuggingFace Token, then try again."
-                    ) from dl_err
-                # Network / connectivity errors
-                if any(kw in err_str for kw in ("connection", "network", "timeout",
-                                                 "offline", "unreachable", "resolve")):
-                    raise RuntimeError(
-                        f"Cannot download model '{model_name}': no internet connection.\n"
-                        f"Connect to the internet and try again, or download the model "
-                        f"while online and it will be available offline afterwards."
-                    ) from dl_err
-                raise RuntimeError(f"Failed to load model '{model_name}': {dl_err}") from dl_err
-
-            _model      = (tokenizer, model)
-            _model_name = model_name
-            return _model
-
-        except RuntimeError:
-            raise
-        except Exception as e:
-            raise RuntimeError(f"Failed to load model '{model_name}': {e}") from e
+                from llama_cpp.llama_chat_format import LlavaGemma3ChatHandler
+                handler    = LlavaGemma3ChatHandler(clip_model_path=mmproj_path, verbose=False)
+                _gen_model = Llama(model_path=path, chat_handler=handler, n_ctx=0, verbose=False, n_gpu_layers=-1)
+                print(f"[LitAtlas] VL handler loaded (mmproj: {mmproj_path})", file=sys.stderr, flush=True)
+            except Exception as _vl_err:
+                print(f"[LitAtlas] VL handler failed ({_vl_err}), text-only fallback", file=sys.stderr, flush=True)
+                _gen_model = Llama(model_path=path, n_ctx=0, verbose=False, chat_format="gemma", n_gpu_layers=-1)
+        else:
+            _gen_model = Llama(model_path=path, n_ctx=0, verbose=False, chat_format="gemma")
+        _gen_model_path = filename
+        return _gen_model
 
 
+# ── PDF text extraction ───────────────────────────────────────────────────────
 
-def _pdf_extract_text(pdf_path: str, max_pages: int = PDF_MAX_PAGES) -> str:
-    """
-    Extract plain text from a PDF using PyMuPDF (fitz), up to max_pages.
-    Returns a single string (page texts joined by spaces).
-    Returns empty string if fitz is unavailable or the file cannot be opened.
-    """
+def _pdf_extract_text(pdf_path: str) -> str:
     try:
-        import fitz  # PyMuPDF
+        import fitz
     except ImportError:
         print("[LitAtlas] WARNING: PyMuPDF not installed — pdf field skipped.", file=sys.stderr)
         return ""
     if not pdf_path or not os.path.isfile(pdf_path):
         return ""
     try:
-        doc   = fitz.open(pdf_path)
-        texts = [doc[i].get_text() for i in range(min(len(doc), max_pages))]
+        doc    = fitz.open(pdf_path)
+        n_pages = len(doc)
+        _log("_pdf_extract_text", f"extracting text from {n_pages} page(s) — {os.path.basename(pdf_path)}")
+        texts  = [doc[i].get_text() for i in range(n_pages)]
         doc.close()
         return " ".join(texts).strip()
     except Exception as e:
@@ -253,65 +220,86 @@ def _pdf_extract_text(pdf_path: str, max_pages: int = PDF_MAX_PAGES) -> str:
         return ""
 
 
-def _mean_pool(model_output, attention_mask):
+# ── PDF visual description (all pages) ───────────────────────────────────────
+
+def _pdf_vl_describe_all_pages(pdf_path: str, paper: dict) -> str:
     """
-    Mean-pool token embeddings across the sequence dimension,
-    masking out padding tokens, then L2-normalise each row.
-    Returns a numpy array of shape (batch, dim).
+    Render every page as a PNG and ask the VL model to describe its content
+    (text layout, figures, charts, tables, equations).
+    Returns all per-page descriptions concatenated.
     """
-    token_embeddings = model_output.hidden_states[-1]            # (B, T, D)
-    # # Sanitise model output — some models (e.g. Gemma on MPS) can emit NaN/Inf
-    # # in hidden states due to numerical overflow; replace them with 0 so pooling
-    # # and normalisation stay well-defined and JSON serialisation never produces
-    # # bare NaN/Infinity tokens that serde_json rejects.
-    # token_embeddings = torch.nan_to_num(token_embeddings, nan=0.0, posinf=0.0, neginf=0.0)
-    # mask = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
-    # summed = torch.sum(token_embeddings * mask, dim=1)
-    # counts = torch.clamp(mask.sum(dim=1), min=1e-9)
-    # pooled = summed / counts                                      # (B, D)
-    # norms  = pooled.norm(dim=1, keepdim=True).clamp(min=1e-9)
-    # result = (pooled / norms).detach().cpu()
-    # # Final safety: nan_to_num again in case any residual NaN survived
-    # return torch.nan_to_num(result, nan=0.0, posinf=0.0, neginf=0.0).numpy()  # (B, D)
-    return token_embeddings[:, -1]
+    if not pdf_path or not os.path.isfile(pdf_path):
+        return ""
+    try:
+        import fitz
+        import base64
+    except ImportError:
+        print("[LitAtlas] WARNING: PyMuPDF not installed — VL page pass skipped.", file=sys.stderr)
+        return ""
+    try:
+        gen_model = _get_gen_model(DEFAULT_GEN_MODEL)
+    except Exception as e:
+        print(f"[LitAtlas] WARNING: VL model unavailable — skipping visual pass: {e}", file=sys.stderr)
+        return ""
+    try:
+        doc      = fitz.open(pdf_path)
+        n_pages  = len(doc)
+        title    = paper.get("title", "")
+        _log("_pdf_vl_describe_all_pages", f"processing {n_pages} page(s) for '{title}'")
+        descriptions = []
+        for i in range(n_pages):
+            try:
+                _log("_pdf_vl_describe_all_pages", f"page {i + 1}/{n_pages}")
+                pix     = doc[i].get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
+                img_b64 = base64.b64encode(pix.tobytes("png")).decode("utf-8")
+                resp    = gen_model.create_chat_completion(
+                    messages=[{"role": "user", "content": [
+                        {"type": "image_url",
+                         "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
+                        {"type": "text", "text": (
+                            f"Page {i + 1} of the research paper '{title}'. "
+                            "Describe all content visible on this page — body text, "
+                            "figures, charts, tables, and equations — in 2-3 sentences."
+                        )},
+                    ]}],
+                    max_tokens=200,
+                )
+                desc = resp["choices"][0]["message"]["content"].strip()
+                if desc:
+                    descriptions.append(f"[Page {i + 1}] {desc}")
+            except Exception as e:
+                print(f"[LitAtlas] WARNING: VL page {i + 1} failed: {e}", file=sys.stderr)
+        doc.close()
+        _log("_pdf_vl_describe_all_pages", f"done — {len(descriptions)} page description(s) produced")
+        return " ".join(descriptions)
+    except Exception as e:
+        print(f"[LitAtlas] WARNING: VL all-pages extraction failed: {e}", file=sys.stderr)
+        return ""
 
 
-# ── HuggingFace cache helpers ─────────────────────────────────────────────────
-
-def _hf_cache_dir() -> str:
-    hf_home = os.environ.get("HF_HOME") or os.path.join(
-        os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")),
-        "huggingface",
-    )
-    return os.path.join(hf_home, "hub")
-
-
-def _model_snapshot_path(model_id: str):
+def _pdf_to_rich_text(pdf_path: str, paper: dict) -> str:
     """
-    Return the snapshot directory for model_id if fully cached, else None.
-    A model is cached when at least one snapshot directory contains config.json.
+    Combine full-text extraction (all pages) with VL descriptions of each page.
+    This captures body text, figures, charts, tables, and equations in one string.
     """
-    safe      = model_id.replace("/", "--")
-    snap_root = os.path.join(_hf_cache_dir(), f"models--{safe}", "snapshots")
-    if not os.path.isdir(snap_root):
-        return None
-    for snap in os.listdir(snap_root):
-        candidate = os.path.join(snap_root, snap)
-        if os.path.isfile(os.path.join(candidate, "config.json")):
-            return candidate
-    return None
+    text    = _pdf_extract_text(pdf_path)
+    visual  = _pdf_vl_describe_all_pages(pdf_path, paper)
+    parts   = [p for p in [text, visual] if p]
+    return " ".join(parts)
+
+
+# ── GGUF model cache helpers ──────────────────────────────────────────────────
+
+def _gguf_model_path(filename: str):
+    """Return the full path if the GGUF file exists, else None."""
+    path = os.path.join(_models_dir(), filename)
+    return path if os.path.isfile(path) else None
 
 
 # ── check_model ───────────────────────────────────────────────────────────────
 
-def handle_check_model(req_id: Any, model_id: str) -> None:
-    """
-    Filesystem-only cache check — never touches the network.
-    Returns { cached: bool, path?: str, offline_ready: bool }.
-    offline_ready is True when the model can be loaded without a network
-    connection (i.e. a complete snapshot exists in the HF cache).
-    """
-    path = _model_snapshot_path(model_id)
+def handle_check_model(req_id: Any, model_filename: str) -> None:
+    path = _gguf_model_path(model_filename)
     if path:
         ok(req_id, {"cached": True, "path": path, "offline_ready": True})
     else:
@@ -321,69 +309,81 @@ def handle_check_model(req_id: Any, model_id: str) -> None:
 # ── download_model ────────────────────────────────────────────────────────────
 
 _DOWNLOAD_MAX_RETRIES = 3
-_DOWNLOAD_RETRY_DELAY = 5   # seconds between retries (network errors only)
+_DOWNLOAD_RETRY_DELAY = 5
 
-def handle_download_model(req_id: Any, model_id: str) -> None:
+def handle_download_model(req_id: Any, model_filename: str, repo_id: str) -> None:
     """
-    Download model_id using AutoTokenizer.from_pretrained /
-    AutoModel.from_pretrained (via _get_model), which is HuggingFace's
-    native download-and-cache mechanism.
-
-    Protection mechanism:
-    • Auth / gated-model errors (401 / 403 / "gated") are reported immediately
-      with a helpful message — no retries since a bad token won't fix itself.
-    • Transient network errors are retried up to _DOWNLOAD_MAX_RETRIES times
-      with a _DOWNLOAD_RETRY_DELAY-second pause between attempts.
-
-    The model stays loaded in memory after this call so the first
-    compute_embedding request is instant.  Elapsed wall-clock time is
-    written to stderr.
+    Download a GGUF file from HuggingFace into LITATLAS_MODELS_DIR.
+    Uses huggingface_hub.hf_hub_download with retry logic for transient errors.
+    Auth errors are reported immediately (no retry).
     """
+    from huggingface_hub import hf_hub_download
+
+    models_dir = _models_dir()
+    os.makedirs(models_dir, exist_ok=True)
+
+    # Download companion files (e.g. mmproj) before the main model so the
+    # completion event signals a fully usable model.
+    companion = _MODEL_COMPANIONS.get(model_filename)
+    if companion:
+        comp_path = os.path.join(models_dir, companion["filename"])
+        if not os.path.isfile(comp_path):
+            print(
+                f"[LitAtlas] download_model: fetching companion '{companion['filename']}'",
+                file=sys.stderr, flush=True,
+            )
+            try:
+                hf_hub_download(
+                    repo_id=companion["repo_id"],
+                    filename=companion["filename"],
+                    local_dir=models_dir,
+                )
+            except Exception as comp_err:
+                print(
+                    f"[LitAtlas] WARNING: companion download failed: {comp_err}",
+                    file=sys.stderr, flush=True,
+                )
+
     t0       = time.monotonic()
-    last_err: Exception | None = None
+    last_err = None
 
     for attempt in range(1, _DOWNLOAD_MAX_RETRIES + 1):
         try:
             print(
-                f"[LitAtlas] download_model: attempt {attempt}/{_DOWNLOAD_MAX_RETRIES} '{model_id}'",
+                f"[LitAtlas] download_model: attempt {attempt}/{_DOWNLOAD_MAX_RETRIES} "
+                f"'{model_filename}' from '{repo_id}'",
                 file=sys.stderr, flush=True,
             )
-            _get_model(model_id, allow_download=True)
+            path = hf_hub_download(
+                repo_id=repo_id,
+                filename=model_filename,
+                local_dir=models_dir,
+            )
             elapsed = time.monotonic() - t0
             print(
-                f"[LitAtlas] download_model: '{model_id}' completed in {elapsed:.1f}s",
+                f"[LitAtlas] download_model: '{model_filename}' completed in {elapsed:.1f}s",
                 file=sys.stderr, flush=True,
             )
-            ok(req_id, {"done": True})
+            ok(req_id, {"done": True, "path": path})
             return
-        except RuntimeError as exc:
+        except Exception as exc:
             last_err = exc
             msg = str(exc)
             print(f"[LitAtlas] download_model error (attempt {attempt}): {msg}",
                   file=sys.stderr, flush=True)
-            # Auth errors — never retry, user must fix the token
             if any(kw in msg.lower() for kw in
-                   ("authentication failed", "gated", "401", "403", "unauthorized")):
-                err(req_id, msg)
+                   ("401", "403", "gated", "authentication", "unauthorized", "restricted")):
+                err(req_id, f"Download failed: {msg}")
                 return
-            # Network errors — wait and retry
             if attempt < _DOWNLOAD_MAX_RETRIES:
-                print(f"[LitAtlas] download_model: retrying in {_DOWNLOAD_RETRY_DELAY}s…",
+                print(f"[LitAtlas] retrying in {_DOWNLOAD_RETRY_DELAY}s…",
                       file=sys.stderr, flush=True)
                 time.sleep(_DOWNLOAD_RETRY_DELAY)
-        except Exception:
-            last_err = None
-            print(
-                f"[LitAtlas] download_model: '{model_id}' failed\n{traceback.format_exc()}",
-                file=sys.stderr, flush=True,
-            )
-            err(req_id, f"Model download failed:\n{traceback.format_exc()}")
-            return
 
-    err(req_id, f"Model download failed after {_DOWNLOAD_MAX_RETRIES} attempts:\n{last_err}")
+    err(req_id, f"Download failed after {_DOWNLOAD_MAX_RETRIES} attempts: {last_err}")
 
 
-# ── Paper → text ──────────────────────────────────────────────────────────────
+# ── Paper → field text ────────────────────────────────────────────────────────
 
 def _attr(paper: dict, key: str, fallback: str = "") -> str:
     for a in paper.get("attributes", []):
@@ -393,12 +393,6 @@ def _attr(paper: dict, key: str, fallback: str = "") -> str:
 
 
 def _field_text(paper: dict, field: str) -> str:
-    """Extract the text for one field from a paper dict.
-
-    For the "pdf" field, text is extracted from the PDF file at pdf_path using
-    PyMuPDF so it can be embedded by the same text model as all other fields.
-    Papers without a pdf_path silently return an empty string and are skipped.
-    """
     if field == "title":    return paper.get("title", "")
     if field == "abstract": return _attr(paper, "abstract")
     if field == "venue":    return paper.get("venue", "")
@@ -406,29 +400,25 @@ def _field_text(paper: dict, field: str) -> str:
     if field == "notes":    return paper.get("notes", "") or ""
     if field == "year":     return str(paper.get("year", ""))
     if field == "pdf":      return _pdf_extract_text(paper.get("pdf_path") or "")
-    return _attr(paper, field)   # custom attribute key
+    return _attr(paper, field)
 
 
-def paper_embedding(paper: dict, fields: list, weights: dict, model) -> list:
+# ── Embedding computation ─────────────────────────────────────────────────────
+
+def _embed_text(embed_model: "Llama", text: str) -> list:
+    """Embed a single text string; always return a flat float list."""
+    vec = embed_model.embed(text or " ")
+    # Per-token fallback (pooling_type not honoured) — take the last token.
+    if vec and isinstance(vec[0], list):
+        vec = vec[-1]
+    return [float(v) for v in vec]
+
+
+def paper_embedding(paper: dict, fields: list, weights: dict, embed_model: "Llama") -> list:
     """
-    Compute a paper's embedding as a weighted sum of per-field embeddings,
-    then L2-normalise the result.
-
-    Algorithm:
-      1. For each enabled field, extract its text.
-      2. Batch-encode all non-empty field texts in a single model.encode() call.
-      3. Weighted-sum the resulting vectors using the user-defined weights.
-      4. L2-normalise the composite vector so cosine similarity works correctly.
-
-    This is semantically correct: each field's meaning lives in its own region
-    of the embedding space, and the weight controls how much that region pulls
-    the final vector.  Repeating concatenated text (the old approach) is a
-    crude proxy — it shifts the distribution of tokens but doesn't cleanly
-    decompose field contributions.
-
-    Falls back to encoding just the title if every field is empty.
+    Weighted composite embedding for a paper, L2-normalised.
+    Each field is embedded independently; vectors are weighted-summed.
     """
-    # Gather (field, text, weight) triples for non-empty fields
     items = []
     for field in fields:
         text = _field_text(paper, field).strip()
@@ -437,39 +427,73 @@ def paper_embedding(paper: dict, fields: list, weights: dict, model) -> list:
             if w > 0:
                 items.append((field, text, w))
 
-    # Fallback: always include title with weight 1 if nothing else is available
     if not items:
-        title = paper.get("title", "").strip()
-        items = [("title", title or "unknown", 1.0)]
+        items = [("title", paper.get("title", "").strip() or "unknown", 1.0)]
 
-    # Batch encode all field texts at once (single GPU/CPU pass)
-    texts = [text for _, text, _ in items]
-    tokenizer, hf_model = model
-    hf_model.to(device)
-    inputs = tokenizer(texts, padding=True, truncation=True, max_length=512, return_tensors="pt").to(device)
-    with torch.no_grad():
-        outputs = hf_model(**inputs, output_hidden_states = True)
-    vecs = _mean_pool(outputs, inputs["attention_mask"])
+    composite = None
+    dim       = 0
+    for _, text, w in items:
+        vec = _embed_text(embed_model, text)
+        if dim == 0:
+            dim       = len(vec)
+            composite = [0.0] * dim
+        for k, v in enumerate(vec):
+            if not (math.isnan(v) or math.isinf(v)):
+                composite[k] += w * v
 
-    # Weighted sum — skip any field whose encoded vector is effectively zero
-    # (all-zero vectors arise when text was empty or NaN sanitisation zeroed out
-    # a degenerate model output; including them would dilute the composite).
-    dim       = vecs.shape[1]
-    composite = [0.0] * dim
-    for (_, _, w), vec in zip(items, vecs):
-        sanitized = [0.0 if (math.isnan(float(vec[k])) or math.isinf(float(vec[k]))) else float(vec[k])
-                     for k in range(dim)]
-        if not any(v != 0.0 for v in sanitized):
-            continue  # skip degenerate / empty-field vector
-        for k, v in enumerate(sanitized):
-            composite[k] += w * v
+    if composite is None:
+        return []
 
-    # L2-normalise so downstream cosine() works correctly on these vectors
     norm = math.sqrt(sum(x * x for x in composite))
     if norm > 0:
         composite = [x / norm for x in composite]
-
     return composite
+
+
+def compute_embedding(paper: dict, config: dict) -> dict:
+    """
+    Compute per-field embedding vectors for a single paper.
+    Returns { field_vectors: { field: [float, ...] }, dim: int }.
+    """
+    if _plugin_compute_embedding_fn is not None:
+        try:
+            return _plugin_compute_embedding_fn(paper, config)
+        except Exception:
+            print("[LitAtlas] plugin compute_embedding_fn raised — falling back:",
+                  file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+
+    model_filename = config.get("model", DEFAULT_EMBED_MODEL)
+    fields         = config.get("fields", ["title", "abstract", "hashtags"])
+    _log("compute_embedding", f"paper='{paper.get('title', '')}' fields={fields} model={model_filename}")
+    embed_model    = _get_embed_model(model_filename)
+
+    pdf_path      = paper.get("pdf_path") or ""
+    field_vectors = {}
+    dim           = 0
+    for field in fields:
+        if field == "pdf":
+            # Log page count before handing off to the LLM so the log shows
+            # how much work the VL model will do for this paper.
+            if pdf_path and os.path.isfile(pdf_path):
+                try:
+                    import fitz as _fitz
+                    _doc = _fitz.open(pdf_path)
+                    _n   = len(_doc)
+                    _doc.close()
+                    _log("compute_embedding", f"pdf field: {_n} page(s) will be sent to LLM")
+                except Exception:
+                    pass
+            # Combine full-text extraction with per-page VL descriptions so that
+            # figures, charts, tables, and equations are included alongside body text.
+            text = _pdf_to_rich_text(pdf_path, paper)
+        else:
+            text = _field_text(paper, field).strip()
+        vec               = _embed_text(embed_model, text or " ")
+        field_vectors[field] = vec
+        dim               = len(vec)
+
+    return {"field_vectors": field_vectors, "dim": dim}
 
 
 # ── Cosine / edge helpers ─────────────────────────────────────────────────────
@@ -494,118 +518,66 @@ def edge_type(a: dict, b: dict) -> str:
 # ── Available models / fields ─────────────────────────────────────────────────
 
 AVAILABLE_MODELS = [
-    # Gemma-3-1B-IT is the sole built-in model.
-    # It is a gated model — users must accept the license on HuggingFace and
-    # set their API token in App Settings → HuggingFace Token before downloading.
-    { "id": DEFAULT_MODEL,
-      "label": "Gemma 3 1B IT (default)",
-      "description": "Default text embedding model. Lightweight and fast. Supports all text fields and PDF text extraction. Requires a HuggingFace API token (gated model).",
-      "size_mb": 2000,
-      "gated": True },
+    {
+        "id":          "gemma-4-E2B-it-Q4_K_M.gguf",
+        "repo_id":     "unsloth/gemma-4-E2B-it-GGUF",
+        "label":       "Gemma 4 E2B Instruct (Q4_K_M)",
+        "description": (
+            "Multimodal model: text embeddings + visual understanding of PDF pages. "
+            "Auto-downloads mmproj companion for vision support."
+        ),
+        "size_mb":     1200,
+        "gated":       False,
+        "type":        "multimodal",
+    },
+    {
+        "id":          "nomic-embed-text-v1.5.Q4_K_M.gguf",
+        "repo_id":     "nomic-ai/nomic-embed-text-v1.5-GGUF",
+        "label":       "Nomic Embed Text v1.5 (Q4_K_M)",
+        "description": "Fast, high-quality text-only embeddings (~274 MB).",
+        "size_mb":     274,
+        "gated":       False,
+        "type":        "embedding",
+    },
 ]
 
 AVAILABLE_FIELDS = [
-    { "key": "title",    "label": "Title",    "default_weight": 1.5 },
-    { "key": "abstract", "label": "Abstract", "default_weight": 2.0 },
-    { "key": "venue",    "label": "Venue",    "default_weight": 0.5 },
-    { "key": "hashtags", "label": "Hashtags", "default_weight": 1.0 },
-    { "key": "notes",    "label": "Notes",    "default_weight": 0.5 },
-    { "key": "year",     "label": "Year",     "default_weight": 0.2 },
-    # PDF text is extracted with PyMuPDF and embedded like any other text field.
-    # Papers without an uploaded PDF silently skip this field during encoding.
+    { "key": "title",    "label": "Title",      "default_weight": 1.5 },
+    { "key": "abstract", "label": "Abstract",   "default_weight": 2.0 },
+    { "key": "venue",    "label": "Venue",      "default_weight": 0.5 },
+    { "key": "hashtags", "label": "Hashtags",   "default_weight": 1.0 },
+    { "key": "notes",    "label": "Notes",      "default_weight": 0.5 },
+    { "key": "year",     "label": "Year",       "default_weight": 0.2 },
     { "key": "pdf",      "label": "PDF (text)", "default_weight": 2.0 },
 ]
 
 
-# ── Compute ───────────────────────────────────────────────────────────────────
-
-
-def compute_embedding(paper: dict, config: dict) -> dict:
-    """
-    Compute and return raw per-field embedding vectors for a single paper.
-
-    Returns:
-      {
-        "field_vectors": { "<field>": [float, ...], ... },  # one raw vector per field
-        "dim":           int,
-      }
-
-    No composite vector is returned here.  The composite is recomposed at query
-    time by Rust (inject_cached_embeddings / recompose_embedding) using whatever
-    weights the user currently has set.  This means embedding.json stays valid
-    across weight changes — only a model or field-set change triggers re-encoding.
-
-    The "pdf" field is handled by extracting text from the PDF with PyMuPDF and
-    embedding it with the same text model as all other fields.  Papers without an
-    uploaded PDF silently skip the "pdf" field.
-    """
-    print("[LitAtlas] compute_embedding: called", file=sys.stderr)
-    # Delegate to user plugin if one was loaded at startup.
-    if _plugin_compute_embedding_fn is not None:
-        try:
-            return _plugin_compute_embedding_fn(paper, config)
-        except Exception:
-            print("[LitAtlas] plugin compute_embedding_fn raised — falling back to built-in:",
-                  file=sys.stderr)
-            traceback.print_exc(file=sys.stderr)
-
-    model_name    = config.get("model", DEFAULT_MODEL)
-    fields        = config.get("fields", ["title", "abstract", "hashtags"])
-    field_vectors = {}
-    dim           = 0
-
-    tokenizer, hf_model = _get_model(model_name)
-    hf_model.to(device)
-
-    items = []
-    for field in fields:
-        text = _field_text(paper, field).strip()
-        inputs = tokenizer(text, max_length=512, return_tensors="pt").to(device)
-        with torch.no_grad():
-            outputs = hf_model(**inputs, output_hidden_states = True)
-        vecs = _mean_pool(outputs, inputs["attention_mask"])
-        dim  = vecs.shape[1]
-
-        raw = vecs[0].tolist()
-        field_vectors[field] = raw
-        
-    return {"field_vectors": field_vectors, "dim": dim}
-
+# ── Compute (batch similarity) ────────────────────────────────────────────────
 
 def compute(papers: list, config: dict) -> list:
-    # Delegate to user plugin if one was loaded at startup.
     if _plugin_similarity_fn is not None:
         try:
             return _plugin_similarity_fn(papers, config)
         except Exception:
-            import traceback
-            print("[LitAtlas] plugin similarity_fn raised an error — falling back to built-in:",
+            print("[LitAtlas] plugin similarity_fn raised — falling back:",
                   file=sys.stderr)
             traceback.print_exc(file=sys.stderr)
-            # Fall through to built-in implementation below.
 
-    model_name = config.get("model", DEFAULT_MODEL)
-    fields     = config.get("fields",    ["title", "abstract", "hashtags"])
-    weights    = config.get("weights",   {})
-    threshold  = float(config.get("threshold", 0.38))
-    max_edges  = int(config.get("max_edges",   7))
-    if not papers: return []
-    model      = _get_model(model_name)
+    model_filename = config.get("model", DEFAULT_EMBED_MODEL)
+    fields         = config.get("fields",    ["title", "abstract", "hashtags"])
+    weights        = config.get("weights",   {})
+    threshold      = float(config.get("threshold", 0.38))
+    max_edges      = int(config.get("max_edges",   7))
+    _log("compute", f"papers={len(papers)} model={model_filename} fields={fields} threshold={threshold}")
+    if not papers:
+        return []
 
-    print(fields, file=sys.stderr)
+    embed_model = _get_embed_model(model_filename)
 
-    # Build composite embedding vectors for all papers.
-    #
-    # Rust's inject_cached_embeddings pre-processes the papers list before this
-    # call: for each paper whose embedding.json is cached (model+fields match),
-    # it recomposes the weighted composite from the stored raw field_vectors using
-    # the *current* weights, then injects it as paper["_embedding"].
-    #
-    # Here we simply use those pre-recomposed vectors directly.  Papers without
-    # a cache hit (new papers, or after a model/field change) are encoded fresh
-    # via paper_embedding(), which applies weights during encoding.
+    # Use pre-recomposed vectors injected by Rust (inject_cached_embeddings),
+    # encode fresh only for papers without a cached _embedding.
     vecs             = []
-    papers_to_encode = []   # (original_index, paper_dict) needing fresh encoding
+    papers_to_encode = []
     for i, p in enumerate(papers):
         cached_vec = p.get("_embedding")
         if isinstance(cached_vec, list) and len(cached_vec) > 0:
@@ -615,39 +587,37 @@ def compute(papers: list, config: dict) -> list:
             papers_to_encode.append((i, p))
 
     for i, p in papers_to_encode:
-        vecs[i] = paper_embedding(p, fields, weights, model).to(device)
+        vecs[i] = paper_embedding(p, fields, weights, embed_model)
 
-    n = len(papers)
+    n          = len(papers)
     candidates = []
     for i in range(n):
         for j in range(i + 1, n):
+            if not vecs[i] or not vecs[j]:
+                continue
             sim = cosine(vecs[i], vecs[j])
             if sim >= threshold:
                 candidates.append({
                     "source_id": papers[i]["id"], "target_id": papers[j]["id"],
                     "similarity": round(sim, 6), "weight": edge_weight(sim),
-                    "edge_type": edge_type(papers[i], papers[j]),
+                    "edge_type":  edge_type(papers[i], papers[j]),
                     "_i": i, "_j": j,
                 })
     candidates.sort(key=lambda e: e["similarity"], reverse=True)
     edge_count = [0] * n
-    result = []
+    result     = []
     for e in candidates:
         i, j = e["_i"], e["_j"]
         if edge_count[i] < max_edges and edge_count[j] < max_edges:
             edge_count[i] += 1; edge_count[j] += 1
             result.append({k: e[k] for k in
-                           ("source_id","target_id","similarity","weight","edge_type")})
+                           ("source_id", "target_id", "similarity", "weight", "edge_type")})
     return result
 
 
-# ── Plugin validation ────────────────────────────────────────────────────────
+# ── Plugin validation ─────────────────────────────────────────────────────────
 
-def _handle_validate_plugin(req_id, script_path: str) -> None:
-    """
-    Validate a plugin script without loading it permanently.
-    Reports which hooks it exports and whether it can be imported cleanly.
-    """
+def _handle_validate_plugin(req_id: Any, script_path: str) -> None:
     if not script_path:
         ok(req_id, {"valid": False, "error": "No script path provided."})
         return
@@ -659,19 +629,13 @@ def _handle_validate_plugin(req_id, script_path: str) -> None:
         spec   = importlib.util.spec_from_file_location("_pg_plugin_validate", script_path)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        has_sim = hasattr(module, "similarity_fn")
-        has_emb = hasattr(module, "compute_embedding_fn")
         ok(req_id, {
-            "valid":               True,
-            "has_similarity_fn":   has_sim,
-            "has_embedding_fn":    has_emb,
+            "valid":             True,
+            "has_similarity_fn": hasattr(module, "similarity_fn"),
+            "has_embedding_fn":  hasattr(module, "compute_embedding_fn"),
         })
     except Exception:
-        import traceback
-        ok(req_id, {
-            "valid": False,
-            "error": traceback.format_exc(),
-        })
+        ok(req_id, {"valid": False, "error": traceback.format_exc()})
 
 
 # ── JSON-RPC helpers ──────────────────────────────────────────────────────────
@@ -695,57 +659,65 @@ def handle(line: str) -> None:
     req_id = req.get("id")
     method = req.get("method", "")
     params = req.get("params") or {}
+    _log("handle", f"id={req_id} method={method}")
 
     try:
-        if   method == "status":
-            offline_models = [m["id"] for m in AVAILABLE_MODELS
-                              if _model_snapshot_path(m["id"]) is not None]
+        if method == "status":
+            cached = [m["id"] for m in AVAILABLE_MODELS if _gguf_model_path(m["id"])]
             ok(req_id, {
-                "ready":          True,
-                "loaded_model":   _model_name,
-                "python":         sys.version,
-                "offline_models": offline_models,
+                "ready":              True,
+                "loaded_embed_model": _embed_model_path,
+                "loaded_gen_model":   _gen_model_path,
+                "python":             sys.version,
+                "offline_models":     cached,
             })
+
         elif method == "list_models":
-            models_annotated = [
-                {**m, "cached": _model_snapshot_path(m["id"]) is not None}
-                for m in AVAILABLE_MODELS
-            ]
+            annotated = [{**m, "cached": _gguf_model_path(m["id"]) is not None}
+                         for m in AVAILABLE_MODELS]
             ok(req_id, {
-                "models":        models_annotated,
-                "fields":        AVAILABLE_FIELDS,
-                "default_model": DEFAULT_MODEL,
+                "models":           annotated,
+                "fields":           AVAILABLE_FIELDS,
+                "default_model":    DEFAULT_EMBED_MODEL,
+                "default_gen_model": DEFAULT_GEN_MODEL,
             })
-        elif method == "check_model":    handle_check_model(req_id, params.get("model", ""))
-        elif method == "download_model": handle_download_model(req_id, params.get("model", ""))
+
+        elif method == "check_model":
+            handle_check_model(req_id, params.get("model", ""))
+
+        elif method == "download_model":
+            handle_download_model(
+                req_id,
+                params.get("model", ""),
+                params.get("repo_id", ""),
+            )
+
         elif method == "compute_embedding":
-            # Encode a single paper; returns { field_vectors, dim }.
-            # Params: { paper: <PaperFull>, config: { model, fields } }
             result = compute_embedding(params.get("paper", {}), params.get("config", {}))
             ok(req_id, result)
+
         elif method == "compute":
-            print(params, file=sys.stderr)
             edges = compute(params.get("papers", []), params.get("config", {}))
             ok(req_id, {"edges": edges, "count": len(edges)})
+
         elif method == "validate_plugin":
-            # Validate a plugin script without loading it permanently.
-            # Params: { script_path: str }
-            # Returns: { valid: bool, has_similarity_fn: bool, has_embedding_fn: bool, error?: str }
             _handle_validate_plugin(req_id, params.get("script_path", ""))
+
         else:
             err(req_id, f"Unknown method: '{method}'")
+
     except Exception:
         err(req_id, traceback.format_exc())
 
 
 def main() -> None:
-    # Load user plugin script (if LitAtlas_PLUGIN_SCRIPT env var is set).
     _load_plugin()
     sys.stdout.write(json.dumps({"id": 0, "ok": True, "result": "ready"}) + "\n")
     sys.stdout.flush()
     for raw in sys.stdin:
         line = raw.strip()
-        if line: handle(line)
+        if line:
+            handle(line)
 
 
 if __name__ == "__main__":
