@@ -288,6 +288,125 @@ def _pdf_to_rich_text(pdf_path: str, paper: dict) -> str:
     return " ".join(parts)
 
 
+# ── Structured MD generation from PDF content ─────────────────────────────────
+
+_MD_SECTIONS = ["summary", "motivation", "contribution", "method", "experiment"]
+
+def _parse_md_sections(md_text: str) -> dict:
+    """Parse # Section headers into {section_name_lower: content_text} dict."""
+    import re
+    sections: dict = {}
+    current:  str | None = None
+    lines:    list = []
+    for line in md_text.splitlines():
+        m = re.match(r'^#+\s+(.+)', line)
+        if m:
+            if current is not None:
+                sections[current] = " ".join(lines).strip()
+            current = m.group(1).strip().lower()
+            lines   = []
+        elif current is not None:
+            stripped = line.strip()
+            if stripped:
+                lines.append(stripped)
+    if current is not None:
+        sections[current] = " ".join(lines).strip()
+    return sections
+
+
+def _generate_md_from_paper(rich_text: str, paper: dict, pdf_dir: str) -> dict:
+    """
+    Ask the gen model to write structured section MD files from the paper content.
+    Parses FILE: blocks from the LLM response, saves each as an individual .md file
+    (lowercased filename) in pdf_dir, and also writes combined paper.md.
+    Returns {filename: content} dict of all files written.
+    """
+    title   = paper.get("title", "")
+    content = rich_text[:8000]  # guard against huge context windows
+    _log("_generate_md_from_paper", f"generating structured MD for '{title}'")
+    prompt = (
+        f"You are analyzing the research paper: '{title}'.\n\n"
+        f"Content:\n{content}\n\n"
+        "Return plain text only using this exact repeated section format:\n\n"
+        "FILE: Overview.md\n"
+        "# Overview\n"
+        "...\n\n"
+        "FILE: MOTIVATION.md\n"
+        "# Motivation\n"
+        "...\n\n"
+        "FILE: CONTRIBUTION.md\n"
+        "# Contribution\n"
+        "...\n\n"
+        "FILE: METHOD.md\n"
+        "# Method\n"
+        "...\n\n"
+        "FILE: EXPERIMENT.md\n"
+        "# Experiment\n"
+        "...\n\n"
+        "Each section starts with `FILE: filename.md`; the lines after it are the "
+        "content of that Markdown file until the next `FILE:` line. Each file "
+        "filename should be the section name, not the original PDF name. The "
+        "writer will place all files under a subfolder named after the PDF file. "
+        "You decide how many Markdown files to create based on the PDF content. "
+        "Create as many files as needed to preserve the PDF's important details, "
+        "structure, and topic boundaries. Do not force a fixed number of files. "
+        "Do not output reasoning, analysis, chain-of-thought, or tool calls. "
+        "Output only the final FILE sections. "
+        "Each file must contain specific information, not a duplicate summary. "
+        "Split by semantic topic, chapter, concept, table group, action items, "
+        "or other natural boundaries from the PDF. Preserve as much useful detail "
+        "as possible while removing only obvious extraction noise and repetition. "
+        "Preserve important headings, key ideas, decisions, definitions, action "
+        "items, notable numbers, and tables when present. Represent tables in "
+        "Markdown format when possible. Do not invent information. Use ASCII hyphens."
+    )
+    try:
+        gen_model = _get_gen_model(DEFAULT_GEN_MODEL)
+        resp      = gen_model.create_chat_completion(
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=700,
+        )
+        md_text = resp["choices"][0]["message"]["content"].strip()
+
+        # Parse FILE: blocks into {filename: content} dict (filenames lowercased)
+        files: dict         = {}
+        current_name: str | None = None
+        current_lines: list = []
+        for line in md_text.splitlines():
+            if line.startswith("FILE:"):
+                if current_name is not None:
+                    files[current_name] = "\n".join(current_lines).strip()
+                current_name  = line[5:].strip().lower()
+                current_lines = []
+            else:
+                current_lines.append(line)
+        if current_name is not None:
+            files[current_name] = "\n".join(current_lines).strip()
+
+        # Save individual section files
+        os.makedirs(pdf_dir, exist_ok=True)
+        for filename, file_content in files.items():
+            try:
+                with open(os.path.join(pdf_dir, filename), "w", encoding="utf-8") as f:
+                    f.write(file_content)
+            except Exception as e:
+                print(f"[LitAtlas] WARNING: could not save {filename}: {e}", file=sys.stderr)
+
+        # Write combined paper.md for backward compatibility
+        combined = "\n\n".join(c for c in files.values() if c)
+        try:
+            with open(os.path.join(pdf_dir, "paper.md"), "w", encoding="utf-8") as f:
+                f.write(combined)
+        except Exception as e:
+            print(f"[LitAtlas] WARNING: could not save paper.md: {e}", file=sys.stderr)
+
+        _log("_generate_md_from_paper", f"saved {len(files)} section file(s) to {os.path.basename(pdf_dir)}")
+        return files
+    except Exception as e:
+        print(f"[LitAtlas] WARNING: MD generation failed: {e}", file=sys.stderr)
+        return {}
+
+
 # ── GGUF model cache helpers ──────────────────────────────────────────────────
 
 def _gguf_model_path(filename: str):
@@ -400,6 +519,29 @@ def _field_text(paper: dict, field: str) -> str:
     if field == "notes":    return paper.get("notes", "") or ""
     if field == "year":     return str(paper.get("year", ""))
     if field == "pdf":      return _pdf_extract_text(paper.get("pdf_path") or "")
+    if field.startswith("md_"):
+        pdf_path = paper.get("pdf_path") or ""
+        if not pdf_path:
+            return ""
+        pdf_dir = os.path.dirname(pdf_path)
+        section = field[3:]  # e.g. "summary" from "md_summary"
+        # Try individual section file (lowercased, then capitalized, then uppercased)
+        for fname in (f"{section}.md", f"{section.capitalize()}.md", f"{section.upper()}.md"):
+            fpath = os.path.join(pdf_dir, fname)
+            if os.path.isfile(fpath):
+                try:
+                    return open(fpath, encoding="utf-8").read().strip()
+                except Exception:
+                    pass
+        # Fall back to parsing combined paper.md
+        md_path = os.path.join(pdf_dir, "paper.md")
+        if not os.path.isfile(md_path):
+            return ""
+        try:
+            sections = _parse_md_sections(open(md_path, encoding="utf-8").read())
+            return sections.get(section, "")
+        except Exception:
+            return ""
     return _attr(paper, field)
 
 
@@ -468,30 +610,47 @@ def compute_embedding(paper: dict, config: dict) -> dict:
     _log("compute_embedding", f"paper='{paper.get('title', '')}' fields={fields} model={model_filename}")
     embed_model    = _get_embed_model(model_filename)
 
-    pdf_path      = paper.get("pdf_path") or ""
-    field_vectors = {}
-    dim           = 0
+    pdf_path = paper.get("pdf_path") or ""
+
+    # Resolve paper.md path (alongside the PDF).
+    md_path   = os.path.join(os.path.dirname(pdf_path), "paper.md") if pdf_path else ""
+    md_text   = ""
+    md_loaded = False
+    if md_path and os.path.isfile(md_path):
+        try:
+            md_text   = open(md_path, encoding="utf-8").read()
+            md_loaded = True
+            _log("compute_embedding", f"loaded paper.md ({len(md_text)} chars)")
+        except Exception:
+            pass
+
+    # Rich text (raw PDF text + VL) is the fallback for pdf field when no MD exists.
+    # Only run the expensive VL pass when actually needed.
+    needs_raw_fallback = "pdf" in fields and not md_loaded
+    rich_text = ""
+    if needs_raw_fallback and pdf_path and os.path.isfile(pdf_path):
+        try:
+            import fitz as _fitz
+            _doc = _fitz.open(pdf_path)
+            _log("compute_embedding", f"pdf field fallback: {len(_doc)} page(s) → LLM")
+            _doc.close()
+        except Exception:
+            pass
+        rich_text = _pdf_to_rich_text(pdf_path, paper)
+
+    field_vectors: dict = {}
+    dim = 0
     for field in fields:
         if field == "pdf":
-            # Log page count before handing off to the LLM so the log shows
-            # how much work the VL model will do for this paper.
-            if pdf_path and os.path.isfile(pdf_path):
-                try:
-                    import fitz as _fitz
-                    _doc = _fitz.open(pdf_path)
-                    _n   = len(_doc)
-                    _doc.close()
-                    _log("compute_embedding", f"pdf field: {_n} page(s) will be sent to LLM")
-                except Exception:
-                    pass
-            # Combine full-text extraction with per-page VL descriptions so that
-            # figures, charts, tables, and equations are included alongside body text.
-            text = _pdf_to_rich_text(pdf_path, paper)
+            # Prefer structured MD (already visually-informed) over raw extraction.
+            text = md_text if md_loaded else rich_text
+        elif field.startswith("md_"):
+            text = _field_text(paper, field)
         else:
             text = _field_text(paper, field).strip()
-        vec               = _embed_text(embed_model, text or " ")
+        vec                  = _embed_text(embed_model, text or " ")
         field_vectors[field] = vec
-        dim               = len(vec)
+        dim                  = len(vec)
 
     return {"field_vectors": field_vectors, "dim": dim}
 
@@ -542,13 +701,18 @@ AVAILABLE_MODELS = [
 ]
 
 AVAILABLE_FIELDS = [
-    { "key": "title",    "label": "Title",      "default_weight": 1.5 },
-    { "key": "abstract", "label": "Abstract",   "default_weight": 2.0 },
-    { "key": "venue",    "label": "Venue",      "default_weight": 0.5 },
-    { "key": "hashtags", "label": "Hashtags",   "default_weight": 1.0 },
-    { "key": "notes",    "label": "Notes",      "default_weight": 0.5 },
-    { "key": "year",     "label": "Year",       "default_weight": 0.2 },
-    { "key": "pdf",      "label": "PDF (text)", "default_weight": 2.0 },
+    { "key": "title",           "label": "Title",            "default_weight": 1.5 },
+    { "key": "abstract",        "label": "Abstract",         "default_weight": 2.0 },
+    { "key": "venue",           "label": "Venue",            "default_weight": 0.5 },
+    { "key": "hashtags",        "label": "Hashtags",         "default_weight": 1.0 },
+    { "key": "notes",           "label": "Notes",            "default_weight": 0.5 },
+    { "key": "year",            "label": "Year",             "default_weight": 0.2 },
+    { "key": "pdf",             "label": "PDF (text+vision)","default_weight": 2.0 },
+    { "key": "md_summary",      "label": "MD Summary",       "default_weight": 1.5 },
+    { "key": "md_motivation",   "label": "MD Motivation",    "default_weight": 1.0 },
+    { "key": "md_contribution", "label": "MD Contribution",  "default_weight": 1.5 },
+    { "key": "md_method",       "label": "MD Method",        "default_weight": 1.0 },
+    { "key": "md_experiment",   "label": "MD Experiment",    "default_weight": 0.8 },
 ]
 
 
@@ -638,6 +802,28 @@ def _handle_validate_plugin(req_id: Any, script_path: str) -> None:
         ok(req_id, {"valid": False, "error": traceback.format_exc()})
 
 
+# ── generate_paper_md handler ─────────────────────────────────────────────────
+
+def handle_generate_paper_md(req_id: Any, paper: dict, config: dict) -> None:
+    """
+    Generate structured section MD files from the PDF using full-text extraction +
+    VL page descriptions.  Each FILE: block from the LLM is saved as its own .md
+    file in the paper's PDF directory; combined paper.md is also written.
+    """
+    pdf_path = paper.get("pdf_path") or ""
+    if not pdf_path or not os.path.isfile(pdf_path):
+        err(req_id, "No PDF file available for this paper")
+        return
+    pdf_dir   = os.path.dirname(pdf_path)
+    _log("generate_paper_md", f"paper='{paper.get('title', '')}' → {pdf_dir}")
+    rich_text = _pdf_to_rich_text(pdf_path, paper)
+    files     = _generate_md_from_paper(rich_text, paper, pdf_dir)
+    if not files:
+        err(req_id, "MD generation failed — check model availability")
+        return
+    ok(req_id, {"pdf_dir": pdf_dir, "files": files})
+
+
 # ── JSON-RPC helpers ──────────────────────────────────────────────────────────
 
 def reply(req_id: Any, ok_flag: bool, key: str, val: Any) -> None:
@@ -691,6 +877,9 @@ def handle(line: str) -> None:
                 params.get("model", ""),
                 params.get("repo_id", ""),
             )
+
+        elif method == "generate_paper_md":
+            handle_generate_paper_md(req_id, params.get("paper", {}), params.get("config", {}))
 
         elif method == "compute_embedding":
             result = compute_embedding(params.get("paper", {}), params.get("config", {}))

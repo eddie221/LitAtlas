@@ -147,6 +147,99 @@ fn remove_pdf_field_from_cache(cache: &mut serde_json::Value) {
     }
 }
 
+// ── AI Summary (section .md files) ───────────────────────────────────────────
+
+/// Read all per-section .md files for a paper.
+/// Returns {filename → content} for every *.md file in the PDF directory
+/// except the combined paper.md.  Falls back to {"paper.md": content} when
+/// only the legacy combined file exists (no individual section files).
+#[tauri::command]
+pub fn read_paper_md(
+    s:        State<'_, AppState>,
+    paper_id: i64,
+) -> CmdResult<std::collections::HashMap<String, String>> {
+    logger::log_call("read_paper_md");
+    let pdf_dir = s.pdfs_dir().join(paper_id.to_string());
+    let mut files: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    if !pdf_dir.exists() {
+        return Ok(files);
+    }
+    if let Ok(rd) = std::fs::read_dir(&pdf_dir) {
+        for entry in rd.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("md") { continue; }
+            let name = path.file_name()
+                .unwrap_or_default().to_string_lossy().to_string();
+            if name == "paper.md" { continue; }
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                files.insert(name, content);
+            }
+        }
+    }
+    // Fallback: if no individual section files, return legacy paper.md.
+    if files.is_empty() {
+        let md_path = pdf_dir.join("paper.md");
+        if md_path.exists() {
+            if let Ok(content) = std::fs::read_to_string(&md_path) {
+                files.insert("paper.md".to_string(), content);
+            }
+        }
+    }
+    logger::log_info("read_paper_md",
+        &format!("paper_id={paper_id} {} file(s)", files.len()));
+    Ok(files)
+}
+
+/// Rebuild the combined paper.md from all individual section files.
+fn rebuild_paper_md(pdf_dir: &std::path::Path) {
+    let mut entries: Vec<_> = std::fs::read_dir(pdf_dir)
+        .into_iter().flatten().flatten()
+        .filter(|e| {
+            e.path().extension().and_then(|x| x.to_str()) == Some("md")
+                && e.file_name().to_string_lossy() != "paper.md"
+        })
+        .collect();
+    entries.sort_by_key(|e| e.file_name());
+    let combined: String = entries.iter()
+        .filter_map(|e| std::fs::read_to_string(e.path()).ok())
+        .filter(|c| !c.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let _ = std::fs::write(pdf_dir.join("paper.md"), combined);
+}
+
+/// Persist user edits to a named section .md file and trigger re-embedding.
+/// Also rebuilds the combined paper.md so downstream embedding stays in sync.
+#[tauri::command]
+pub fn save_paper_md(
+    app:      tauri::AppHandle,
+    s:        State<'_, AppState>,
+    paper_id: i64,
+    filename: String,
+    content:  String,
+) -> CmdResult<()> {
+    logger::log_call("save_paper_md");
+    let pdf_dir = s.pdfs_dir().join(paper_id.to_string());
+    if !pdf_dir.exists() {
+        return Err(format!(
+            "PDF directory not found for paper {paper_id}. Upload a PDF first."
+        ));
+    }
+    // Reject path traversal attempts.
+    if filename.contains('/') || filename.contains('\\') || filename.contains("..") {
+        return Err("Invalid filename".to_string());
+    }
+    std::fs::write(pdf_dir.join(&filename), &content)
+        .map_err(|e| format!("Failed to write {filename}: {e}"))?;
+    rebuild_paper_md(&pdf_dir);
+    logger::log_info("save_paper_md",
+        &format!("paper_id={paper_id} saved {filename} ({} bytes), triggering re-embed",
+            content.len()));
+    embed_pdf_in_background(app, paper_id, s.pdfs_dir(), s.data_dir.clone(), false);
+    Ok(())
+}
+
 // ── Authors ───────────────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -305,7 +398,7 @@ pub async fn store_pdf_bytes(
         .map_err(|e| format!("Failed to write PDF: {e}"))?;
     db::save_pdf_path(&s.pool(), paper_id, Some(&dest.to_string_lossy()))
         .await.map_err(map_log_err!("store_pdf_bytes"))?;
-    embed_pdf_in_background(app, paper_id, s.pdfs_dir(), s.data_dir.clone());
+    embed_pdf_in_background(app, paper_id, s.pdfs_dir(), s.data_dir.clone(), true);
     Ok(dest.to_string_lossy().to_string())
 }
 
@@ -372,7 +465,7 @@ pub async fn copy_pdf(
     std::fs::copy(src, &dest).map_err(|e| format!("Failed to copy PDF: {e}"))?;
     db::save_pdf_path(&s.pool(), paper_id, Some(&dest.to_string_lossy()))
         .await.map_err(map_log_err!("store_pdf_bytes"))?;
-    embed_pdf_in_background(app, paper_id, s.pdfs_dir(), s.data_dir.clone());
+    embed_pdf_in_background(app, paper_id, s.pdfs_dir(), s.data_dir.clone(), true);
     Ok(dest.to_string_lossy().to_string())
 }
 
@@ -1628,21 +1721,33 @@ pub fn hf_get_paper_embedding(
     Ok(serde_json::json!({ "hit": false }))
 }
 
-/// Compute the `pdf` field embedding for a single paper in a background thread.
-/// Called immediately after a PDF is uploaded so the vector is available before
-/// the next "Recompute Graph". Silently no-ops if the sidecar fails or if the
-/// strategy is not `hf-embeddings`.
-fn embed_pdf_in_background(app: tauri::AppHandle, paper_id: i64, pdfs_dir: std::path::PathBuf, data_dir: std::path::PathBuf) {
-    logger::log_info("embed_pdf_in_background", &format!("paper_id={paper_id} spawning"));
+// All PDF-related field keys that carry per-paper content from the paper.md.
+const PDF_EMBED_FIELDS: &[&str] = &[
+    "pdf", "md_summary", "md_motivation", "md_contribution", "md_method", "md_experiment",
+];
+
+/// Core PDF embedding worker.
+///
+/// * `generate_md` = true  — first call `generate_paper_md` (fresh upload flow).
+/// * `generate_md` = false — skip generation, re-embed from existing paper.md (edit flow).
+///
+/// Silently no-ops if HF strategy is not active or if the sidecar fails.
+fn embed_pdf_in_background(
+    app:         tauri::AppHandle,
+    paper_id:    i64,
+    pdfs_dir:    std::path::PathBuf,
+    data_dir:    std::path::PathBuf,
+    generate_md: bool,
+) {
+    logger::log_info("embed_pdf_in_background",
+        &format!("paper_id={paper_id} generate_md={generate_md} spawning"));
     std::thread::spawn(move || {
-        // Read model + strategy from similarity_config.json.
+        // Read config — model and strategy used later.
         let cfg: serde_json::Value = std::fs::read_to_string(data_dir.join("similarity_config.json"))
             .ok()
             .and_then(|raw| serde_json::from_str(&raw).ok())
             .unwrap_or(serde_json::json!({}));
-        if cfg["strategy"].as_str() != Some("hf-embeddings") { return; }
         let model = cfg["model"].as_str().unwrap_or("gemma-4-E2B-it-Q4_K_M.gguf").to_string();
-        logger::log_info("embed_pdf_in_background", &format!("paper_id={paper_id} model={model}"));
 
         let state = app.state::<AppState>();
         let paper_val = match tauri::async_runtime::block_on(
@@ -1652,7 +1757,31 @@ fn embed_pdf_in_background(app: tauri::AppHandle, paper_id: i64, pdfs_dir: std::
             Err(_) => return,
         };
 
-        let py_config = serde_json::json!({ "model": &model, "fields": ["pdf"] });
+        // Step 1: Generate paper.md (fresh upload only, regardless of embedding strategy).
+        // Silently skipped if the sidecar is not yet set up.
+        if generate_md {
+            logger::log_info("embed_pdf_in_background",
+                &format!("paper_id={paper_id} calling generate_paper_md"));
+            if let Ok(mut guard) = ensure_running(&state, &app) {
+                let _: Result<serde_json::Value, String> = guard.as_mut().unwrap().call(
+                    "generate_paper_md",
+                    serde_json::json!({ "paper": &paper_val, "config": {} }),
+                );
+                // Don't abort on failure — embedding can still fall back to raw text.
+            } else {
+                logger::log_error("embed_pdf_in_background",
+                    &format!("paper_id={paper_id} sidecar unavailable, MD skipped"));
+            }
+        }
+
+        // Step 2: embed pdf + all md_* fields (reads paper.md written in step 1).
+        // Only runs when the HF embeddings strategy is active.
+        if cfg["strategy"].as_str() != Some("hf-embeddings") { return; }
+        logger::log_info("embed_pdf_in_background", &format!("paper_id={paper_id} model={model}"));
+        let py_config = serde_json::json!({
+            "model":  &model,
+            "fields": PDF_EMBED_FIELDS,
+        });
         let result = match ensure_running(&state, &app) {
             Ok(mut guard) => {
                 let r: Result<serde_json::Value, String> = guard.as_mut().unwrap().call(
@@ -1675,7 +1804,8 @@ fn embed_pdf_in_background(app: tauri::AppHandle, paper_id: i64, pdfs_dir: std::
         let emb_path   = emb_dir.join(format!("{paper_id}.json"));
         let written_at = chrono_now_iso();
         let _ = write_merged_embedding(&emb_path, &model, &field_vectors, &written_at);
-        logger::log_info("embed_pdf_in_background", &format!("paper_id={paper_id} pdf embedding written"));
+        logger::log_info("embed_pdf_in_background",
+            &format!("paper_id={paper_id} embeddings written"));
     });
 }
 
@@ -1749,8 +1879,9 @@ pub fn hf_compute_all_embeddings(
             // is always "missing" from the cache), wasting a Python call every
             // recompute with only one pseudo-embedding (title fallback).
             let has_pdf = paper.pdf_path.as_deref().map(|p| !p.is_empty()).unwrap_or(false);
+            // Exclude pdf and md_* fields for papers without an uploaded PDF.
             let effective_fields: Vec<String> = fields.iter()
-                .filter(|f| *f != "pdf" || has_pdf)
+                .filter(|f| (*f != "pdf" && !f.starts_with("md_")) || has_pdf)
                 .cloned()
                 .collect();
 

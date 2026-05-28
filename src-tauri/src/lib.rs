@@ -245,6 +245,8 @@ pub fn run() {
             // PDF
             copy_pdf, get_pdf_url, store_pdf_bytes, read_pdf_bytes,
             delete_pdf_file,
+            // AI Summary (paper.md)
+            read_paper_md, save_paper_md,
             // Projects
             list_projects, create_project, rename_project,
             delete_project, switch_project, get_current_project,

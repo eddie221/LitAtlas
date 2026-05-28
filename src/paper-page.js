@@ -783,12 +783,151 @@ async function delectPaper() {
     }
 }
 
+// ── AI Summary tab ────────────────────────────────────────────────────────────
+async function renderAiSummaryTab(paper) {
+  const container = document.getElementById("pp-ai-summary-content");
+  container.innerHTML = `<div class="pp-ai-summary-loading">Loading…</div>`;
+
+  // Load section files: { filename → content }
+  let files;
+  try {
+    files = await invoke("read_paper_md", { paperId: paper.id });
+  } catch (e) {
+    container.innerHTML =
+      `<div class="pp-ai-summary-loading" style="color:var(--accent3)">Failed to load: ${e}</div>`;
+    return;
+  }
+
+  const _TAB_ORDER = ["overview", "motivation", "method", "experiment", "contribution"];
+  const filenames = Object.keys(files).sort((a, b) => {
+    const ai = _TAB_ORDER.indexOf(a.replace(/\.md$/i, "").toLowerCase());
+    const bi = _TAB_ORDER.indexOf(b.replace(/\.md$/i, "").toLowerCase());
+    if (ai === -1 && bi === -1) return a.localeCompare(b);
+    if (ai === -1) return 1;
+    if (bi === -1) return -1;
+    return ai - bi;
+  });
+
+  if (!filenames.length) {
+    container.innerHTML = `<div class="pp-ai-summary-loading">${
+      paper.pdf_path
+        ? "Generating AI summary… (check back after embedding completes)"
+        : "Upload a PDF to generate an AI summary."
+    }</div>`;
+    return;
+  }
+
+  // Build the section tab bar + panes
+  const tabsHtml = filenames.map((fn, i) => {
+    const label = fn.replace(/\.md$/i, "");
+    return `<button class="pp-ai-section-tab${i === 0 ? " active" : ""}" data-file="${fn}">${label}</button>`;
+  }).join("");
+
+  container.innerHTML = `
+    <div class="pp-ai-section-tabs">${tabsHtml}</div>
+    <div class="pp-ai-summary-toolbar">
+      <span id="pp-ai-summary-status" class="pp-ai-summary-status"></span>
+      <button class="pp-notes-view-btn active" id="pp-ai-view-edit">Edit</button>
+      <button class="pp-notes-view-btn" id="pp-ai-view-preview">Preview</button>
+      <button class="btn pp-ai-save-btn" id="pp-ai-save-btn" disabled>Save &amp; Re-embed</button>
+    </div>
+    <div id="pp-ai-summary-panes" class="pp-notes-panes edit-only">
+      <textarea id="pp-ai-textarea" style="font-family:monospace;font-size:0.85rem"></textarea>
+      <div id="pp-ai-preview" class="pp-md-preview"></div>
+    </div>`;
+
+  const textarea  = container.querySelector("#pp-ai-textarea");
+  const preview   = container.querySelector("#pp-ai-preview");
+  const panesEl   = container.querySelector("#pp-ai-summary-panes");
+  const statusEl  = container.querySelector("#pp-ai-summary-status");
+  const saveBtn   = container.querySelector("#pp-ai-save-btn");
+  const editBtn   = container.querySelector("#pp-ai-view-edit");
+  const previewBtn= container.querySelector("#pp-ai-view-preview");
+
+  function setStatus(msg, color) {
+    statusEl.textContent = msg;
+    statusEl.style.color = color ?? "";
+  }
+
+  // Track which file is active and whether it's been edited
+  let activeFile = filenames[0];
+  // Local edits buffer — keeps unsaved changes when switching tabs
+  const edits = { ...files };
+
+  function loadFile(fn) {
+    activeFile = fn;
+    textarea.value = edits[fn] ?? "";
+    saveBtn.disabled = edits[fn] === files[fn];
+    // Refresh preview if in preview mode
+    if (panesEl.classList.contains("preview-only")) {
+      preview.innerHTML = typeof marked !== "undefined"
+        ? marked.parse(textarea.value || "")
+        : `<pre>${textarea.value}</pre>`;
+    }
+    setStatus(edits[fn] !== files[fn] ? "Unsaved changes" : "", "var(--accent2)");
+  }
+
+  // Wire section tabs
+  container.querySelectorAll(".pp-ai-section-tab").forEach(btn => {
+    btn.addEventListener("click", () => {
+      container.querySelectorAll(".pp-ai-section-tab")
+        .forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      loadFile(btn.dataset.file);
+    });
+  });
+
+  // View mode toggle
+  editBtn.addEventListener("click", () => {
+    panesEl.className = "pp-notes-panes edit-only";
+    editBtn.classList.add("active"); previewBtn.classList.remove("active");
+  });
+  previewBtn.addEventListener("click", () => {
+    panesEl.className = "pp-notes-panes preview-only";
+    previewBtn.classList.add("active"); editBtn.classList.remove("active");
+    preview.innerHTML = typeof marked !== "undefined"
+      ? marked.parse(textarea.value || "")
+      : `<pre>${textarea.value}</pre>`;
+  });
+
+  // Track edits
+  textarea.addEventListener("input", () => {
+    edits[activeFile] = textarea.value;
+    saveBtn.disabled = false;
+    setStatus("Unsaved changes", "var(--accent2)");
+  });
+
+  // Save active section file
+  saveBtn.addEventListener("click", async () => {
+    saveBtn.disabled = true;
+    setStatus("Saving…", "var(--text-secondary)");
+    try {
+      await invoke("save_paper_md", {
+        paperId:  paper.id,
+        filename: activeFile,
+        content:  textarea.value,
+      });
+      files[activeFile] = textarea.value;
+      setStatus("✓ Saved — re-embedding in background", "var(--accent)");
+    } catch (e) {
+      saveBtn.disabled = false;
+      setStatus(`✗ ${e}`, "var(--accent3)");
+    }
+  });
+
+  // Load first file
+  loadFile(filenames[0]);
+}
+
 // ── Wire overlay controls ─────────────────────────────────────────────────────
 document.addEventListener("DOMContentLoaded", () => {
   document.querySelectorAll(".pp-tab-btn").forEach(btn =>
     btn.addEventListener("click", () => {
       switchTab(btn.dataset.tab);
-      if (btn.dataset.tab === "pdf" && getCurrentPaperCache()) renderPdfTab(getCurrentPaperCache());
+      const p = getCurrentPaperCache();
+      if (!p) return;
+      if (btn.dataset.tab === "pdf")        renderPdfTab(p);
+      if (btn.dataset.tab === "ai-summary") renderAiSummaryTab(p);
     }));
 
   document.getElementById("pp-close-btn").addEventListener("click", () => {
