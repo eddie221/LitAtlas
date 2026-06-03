@@ -1,6 +1,5 @@
 "use strict";
 
-import { getCustomModels } from "./app_settings.js";
 
 /**
  * similarity_settings.js
@@ -59,24 +58,26 @@ export function closeSimilaritySettings() {
 // ── Built-in model list (fallback when sidecar is not yet running) ─────────────
 const _BUILTIN_MODELS = [
   {
-    id:          "gemma-4-E2B-it-Q4_K_M.gguf",
-    repo_id:     "unsloth/gemma-4-E2B-it-GGUF",
-    label:       "Gemma 4 E2B Instruct (Q4_K_M)",
-    description: "Multimodal: text embeddings + visual understanding of PDF pages. Auto-downloads mmproj companion for vision support.",
-    size_mb:     1200,
+    id:          "openai:text-embedding-3-small",
+    label:       "OpenAI text-embedding-3-small",
+    description: "Cloud embedding via OpenAI API. Requires OPENAI_API_KEY in App Settings.",
+    size_mb:     0,
     gated:       false,
-    type:        "multimodal",
+    type:        "api",
   },
   {
-    id:          "nomic-embed-text-v1.5.Q4_K_M.gguf",
-    repo_id:     "nomic-ai/nomic-embed-text-v1.5-GGUF",
-    label:       "Nomic Embed Text v1.5 (Q4_K_M)",
-    description: "Fast, high-quality text-only embeddings via llama.cpp.",
-    size_mb:     274,
+    id:          "openai:text-embedding-3-large",
+    label:       "OpenAI text-embedding-3-large",
+    description: "Higher-quality cloud embedding via OpenAI API. Requires OPENAI_API_KEY in App Settings.",
+    size_mb:     0,
     gated:       false,
-    type:        "embedding",
+    type:        "api",
   },
 ];
+
+// ── Active model list (updated each time the settings panel opens) ────────────
+// Starts with built-ins; replaced with live API list when a custom URL is set.
+let _currentModels = _BUILTIN_MODELS;
 
 // ── Per-model cache status memo: modelId → true | false | null (unknown) ──────
 const _cacheStatus = {};
@@ -95,82 +96,55 @@ async function _checkModelCached(modelId) {
 
 // ── Main render ───────────────────────────────────────────────────────────────
 async function renderSettings(panel) {
-  const cfg    = _getSimConfig();
-  const isHF   = cfg.strategy === "hf-embeddings";
-  const hfOk   = window.LitAtlas?.isHfEnabled?.() === true;
-  let   models = _BUILTIN_MODELS;
-  // console.log("hfOk : ", hfOk);
+  const cfg   = _getSimConfig();
+  const isHF  = cfg.strategy === "hf-embeddings";
+  const hfOk  = window.LitAtlas?.isHfEnabled?.() === true;
+
+  // Try to fetch the live model list from the custom API endpoint.
+  // Falls back to built-ins if the endpoint is not configured or unreachable.
+  _currentModels = _BUILTIN_MODELS;
+  if (invoke) {
+    try {
+      const res = await invoke("list_api_models");
+      if (res?.ok && Array.isArray(res.models) && res.models.length > 0) {
+        _currentModels = res.models.map(id => ({
+          id,
+          label:       id,
+          description: "Model served by your custom API endpoint",
+          size_mb:     0,
+          gated:       false,
+          type:        "custom-endpoint",
+        }));
+      }
+    } catch (_) {}
+  }
+
   const body = panel.querySelector("#sim-settings-body");
   if (!body) return;
-  body.innerHTML = buildHTML(cfg, models, isHF, hfOk);
-  wireEvents(panel, cfg, models, hfOk);
+  body.innerHTML = buildHTML(cfg, _currentModels, isHF, hfOk);
+  wireEvents(panel, cfg, _currentModels, hfOk);
 
-  // Always refresh the model list so custom models added in App Settings
-  // are present immediately, regardless of which strategy is active.
-  await refreshModelSelect(body);
+  if (isHF && hfOk) {
+    const sel = body.querySelector("#sim-model-select");
+    await _refreshDownloadUI(body, sel?.value ?? cfg.model ?? _currentModels[0]?.id, _currentModels);
+  }
 }
 
 // ── Refresh the model <select> in an already-rendered panel ──────────────────
-// Exported so app_settings.js can call it immediately after adding a model,
-// making the new entry appear in the dropdown without reopening the panel.
 export async function refreshModelSelect(bodyOrPanel) {
-  // Accept either the panel root or the #sim-settings-body directly.
   const body = bodyOrPanel?.id === "sim-settings-body"
     ? bodyOrPanel
     : bodyOrPanel?.querySelector("#sim-settings-body");
   if (!body) return;
 
-  const cfg    = _getSimConfig();
-  const isHF   = cfg.strategy === "hf-embeddings";
-  const hfLive = window.LitAtlas?.isHfEnabled?.() === true;
-  let models = _BUILTIN_MODELS;
+  const cfg  = _getSimConfig();
+  const isHF = cfg.strategy === "hf-embeddings";
+  const hfOk = window.LitAtlas?.isHfEnabled?.() === true;
 
-  // Only contact the sidecar when HF mode is active — avoid triggering
-  // Python environment setup (ensure_running → launch_sidecar → ensure_venv)
-  // when the user is running JS-cosine and has not enabled AI features.
-  if (invoke && hfLive) {
-    try {
-      const [sidecarRes, customModels] = await Promise.all([
-        invoke("hf_list_models").catch(() => null),
-        getCustomModels().catch(() => []),
-      ]);
-
-      // Use sidecar's list as base when available; otherwise fall back to builtin.
-      // Custom models are always merged on top regardless of sidecar state.
-      const baseModels = sidecarRes?.models?.length ? sidecarRes.models : _BUILTIN_MODELS;
-
-      const knownIds = new Set(baseModels.map(m => m.id));
-      const extras   = customModels
-        .filter(m => m.id && !knownIds.has(m.id))
-        .map(m => ({
-          id:          m.id,
-          label:       m.label || m.id,
-          description: "User-defined model",
-          size_mb:     m.size_mb ?? null,
-          cached:      sidecarRes?.models?.find(sm => sm.id === m.id)?.cached ?? false,
-        }));
-
-      models = [...baseModels, ...extras];
-
-      const sel = body.querySelector("#sim-model-select");
-      if (sel) {
-        const cur = sel.value;
-        sel.innerHTML = models.map(m => {
-          const label = m.cached ? `${m.label}` : m.label;
-          return `<option value="${m.id}" ${m.id === cur ? "selected" : ""}>${label}</option>`;
-        }).join("");
-        _setModelDesc(body, models, sel.value);
-      }
-    } catch (_) { /* use builtin list */ }
-  }
-
-  // Only check model download status when HF is the active strategy —
-  // hf_check_model also goes through ensure_running and must be skipped
-  // in JS-cosine mode.
-  if (isHF && hfLive) {
+  if (isHF && hfOk) {
     const modelId = body.querySelector("#sim-model-select")?.value
-                 ?? cfg.model ?? _BUILTIN_MODELS[0].id;
-    await _refreshDownloadUI(body, modelId, models);
+                 ?? cfg.model ?? _currentModels[0]?.id;
+    await _refreshDownloadUI(body, modelId, _currentModels);
   }
 }
 
@@ -245,7 +219,7 @@ function buildHTML(cfg, models, isHF, hfOk) {
           <span class="sim-strat-icon">😎</span>
           <div>
             <div class="sim-strat-name">AI mode</div>
-            <div class="sim-strat-desc">${hfOk?"Deep embeddings · Requires Python":"Disabled this session · Restart to enable"}</div>
+            <div class="sim-strat-desc">${hfOk?"Deep embeddings via cloud API":"Requires API key in App Settings"}</div>
           </div>
         </button>
       </div>
@@ -307,7 +281,18 @@ function buildHTML(cfg, models, isHF, hfOk) {
 function _setModelDesc(body, models, modelId) {
   const m    = models.find(m => m.id === modelId);
   const desc = body.querySelector("#sim-model-desc");
-  if (desc && m) desc.textContent = `${m.description}  (~${m.size_mb} MB)`;
+  if (desc && m) {
+    const sizeText = m.size_mb ? `  (~${m.size_mb} MB)` : "";
+    desc.textContent = `${m.description}${sizeText}`;
+  }
+}
+
+function _isApiModel(modelId) {
+  return modelId.startsWith("openai:") || modelId.startsWith("anthropic:");
+}
+
+function _isCustomEndpointModel(modelId, models) {
+  return models.find(m => m.id === modelId)?.type === "custom-endpoint";
 }
 
 async function _refreshDownloadUI(body, modelId, models) {
@@ -316,6 +301,42 @@ async function _refreshDownloadUI(body, modelId, models) {
   if (!area) return;
 
   _setModelDesc(body, models, modelId);
+
+  // ── Custom API endpoint model: no download needed ─────────────────────────
+  if (_isCustomEndpointModel(modelId, models)) {
+    area.innerHTML = `
+      <div class="sim-dl-row">
+        <span class="sim-dl-badge sim-dl-ok">✓ Ready</span>
+        <span class="sim-dl-hint">Served by your custom API endpoint</span>
+      </div>`;
+    if (recomputeBtn) recomputeBtn.disabled = false;
+    return;
+  }
+
+  // ── OpenAI / Anthropic API model: show key status ─────────────────────────
+  if (_isApiModel(modelId)) {
+    area.innerHTML = `<div class="sim-dl-checking">Checking API key…</div>`;
+    const hasKey = await _checkModelCached(modelId); // returns true if key is set
+    if (hasKey === true) {
+      area.innerHTML = `
+        <div class="sim-dl-row">
+          <span class="sim-dl-badge sim-dl-ok">✓ API key configured</span>
+          <span class="sim-dl-hint">Ready to use — no local download needed</span>
+        </div>`;
+      if (recomputeBtn) recomputeBtn.disabled = false;
+    } else {
+      const provider = modelId.startsWith("openai:") ? "OpenAI" : "Anthropic";
+      area.innerHTML = `
+        <div class="sim-dl-row">
+          <span class="sim-dl-badge sim-dl-needed">✗ No API key</span>
+          <span class="sim-dl-hint">Set your ${provider} key in App Settings → API</span>
+        </div>`;
+      if (recomputeBtn) recomputeBtn.disabled = true;
+    }
+    return;
+  }
+
+  // ── Local GGUF model ─────────────────────────────────────────────────────
   area.innerHTML = `<div class="sim-dl-checking">Checking local cache…</div>`;
 
   const cached = await _checkModelCached(modelId);
@@ -462,15 +483,53 @@ async function _startDownload(body, modelId, models) {
   }
 }
 
+function _showApiErrorDialog(msg) {
+  const backdrop = document.getElementById("pg-dialog-backdrop");
+  const titleEl  = document.getElementById("pg-dialog-title");
+  const msgEl    = document.getElementById("pg-dialog-message");
+  const okBtn    = document.getElementById("pg-dialog-ok");
+  const cancelBtn= document.getElementById("pg-dialog-cancel");
+  if (!backdrop || !okBtn) return;
+  if (titleEl)  titleEl.textContent  = "API Connection Failed";
+  if (msgEl)    msgEl.textContent    = msg;
+  if (cancelBtn) cancelBtn.style.display = "none";
+  backdrop.classList.add("open");
+  function close() {
+    backdrop.classList.remove("open");
+    if (cancelBtn) cancelBtn.style.display = "";
+    okBtn.removeEventListener("click", close);
+  }
+  okBtn.addEventListener("click", close);
+}
+
 function wireEvents(panel, initialCfg, models, hfOk) {
   const body = panel.querySelector("#sim-settings-body");
   if (!body) return;
   const cfg = { ...initialCfg };
 
-  // Strategy toggle — HF button is a no-op when HF is disabled this session
+  // Strategy toggle
   body.querySelectorAll(".sim-strat-btn").forEach(btn => {
     btn.addEventListener("click", async () => {
-      if (btn.disabled) return; // HF locked
+      if (btn.disabled) return;
+      if (btn.dataset.strat === "hf-embeddings") {
+        // Verify API connectivity before entering AI mode.
+        const statusEl = body.querySelector("#sim-status");
+        if (statusEl) { statusEl.textContent = "Checking API connection…"; statusEl.className = "sim-status-msg"; }
+        let connOk = false;
+        let connErr = "Unknown error";
+        try {
+          const res = await invoke("check_api_connection");
+          connOk = res?.ok === true;
+          if (!connOk) connErr = res?.error ?? "API check failed";
+        } catch (e) {
+          connErr = String(e);
+        }
+        if (statusEl) { statusEl.textContent = ""; statusEl.className = "sim-status-msg"; }
+        if (!connOk) {
+          _showApiErrorDialog(connErr);
+          return; // Stay on current strategy
+        }
+      }
       cfg.strategy = btn.dataset.strat;
       body.querySelectorAll(".sim-strat-btn").forEach(b =>
         b.classList.toggle("active", b.dataset.strat === cfg.strategy));
@@ -480,8 +539,6 @@ function wireEvents(panel, initialCfg, models, hfOk) {
         const sel = body.querySelector("#sim-model-select");
         _refreshDownloadUI(body, sel?.value ?? cfg.model, models);
       }
-      // Save the new strategy immediately so graph.js _simConfig is in sync,
-      // then swap to cached edges (or trigger a first-time compute if none exist).
       await _saveSimConfig(cfg);
       await _switchStrategy(cfg.strategy);
     });

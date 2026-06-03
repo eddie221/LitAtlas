@@ -19,8 +19,7 @@
        any JS module runs — avoids the missing @keyframes in build mode.
   ══════════════════════════════════════════════════ -->
   <div id="pg-loading">
-    <!-- Content is stamped by showOverlay() / _renderVenvOverlay() /
-         _showEmbeddingOverlay() in graph.js -->
+    <!-- Content is stamped by showOverlay() / _showEmbeddingOverlay() in graph.js -->
   </div>
 
   <!-- ══════════════════════════════════════════════════
@@ -339,7 +338,10 @@
     </div>
   </div>
 
+  <link rel="stylesheet" href="libs/katex.min.css">
   <script src="libs/marked.min.js"></script>
+  <script src="libs/katex.min.js"></script>
+  <script src="libs/auto-render.min.js"></script>
 
   <!-- ══════════════════════════════════════════════════
        SIMILARITY SETTINGS PANEL
@@ -476,49 +478,6 @@
     </div>
   </div>
 
-  <!-- ══════════════════════════════════════════════════
-       LLM MODULE CONSENT DIALOG
-       Shown on every launch so the user can choose
-       whether to activate HF embeddings this session.
-  ══════════════════════════════════════════════════ -->
-  <div id="llm-consent-dialog">
-    <div id="llm-consent-panel">
-      <div id="llm-consent-icon"><i class="bi bi-robot"></i></div>
-      <div id="llm-consent-title">Enable AI Similarity Features?</div>
-      <div id="llm-consent-body">
-        <p>LitAtlas can use a local <strong>HuggingFace</strong>
-           model to compute semantic similarity between papers.</p>
-        <ul>
-          <li>Runs entirely <strong>on your machine</strong> — no data leaves your device</li>
-          <li>Requires Python 3.8+ on your system PATH</li>
-          <li>First-time setup downloads ~80–440 MB (model dependent)</li>
-          <li>You can change this later in <em>⚙ Similarity Settings</em></li>
-        </ul>
-        <p class="llm-consent-note">
-          Selecting <strong>No</strong> uses the fast built-in cosine similarity engine
-          instead — no Python required. You will be asked again next time you open the app.
-        </p>
-      </div>
-      <div id="llm-consent-btns">
-        <button id="llm-consent-no"  class="btn">No, use built-in engine</button>
-        <button id="llm-consent-yes" class="btn btn-new-paper">Yes, enable AI features</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- LLM setup error dialog -->
-  <div id="llm-error-dialog">
-    <div id="llm-error-panel">
-      <div id="llm-error-title"><i class="bi bi-exclamation-triangle"></i> AI Setup Failed</div>
-      <div id="llm-error-msg"></div>
-      <p class="llm-error-note">
-        AI features have been disabled. You can retry from ⚙ Similarity Settings.
-      </p>
-      <div id="llm-error-ok-wrap">
-        <button id="llm-error-ok" class="btn btn-new-paper">OK</button>
-      </div>
-    </div>
-  </div>
 
 </body>
 </html>

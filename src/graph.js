@@ -130,15 +130,6 @@ export async function saveSimConfig(cfg) {
   catch (e) { console.warn("[LitAtlas] Could not save similarity config:", e); }
 }
 
-async function _persistHfEnabled(val) {
-  _hfEnabled = val;
-  try {
-    await invoke("save_similarity_config", {
-      config: { ..._simConfig, llm_enabled: val }
-    });
-  } catch (e) { console.warn("[LitAtlas] Could not persist llm_enabled:", e); }
-}
-
 export function getSimConfig() { return { ..._simConfig }; }
 
 // ── PDF display helper ────────────────────────────────────────────────────────
@@ -228,103 +219,11 @@ function hideOverlay() {
   if (el) el.classList.remove("visible");
 }
 
-// ── Venv setup overlay ────────────────────────────────────────────────────────
-// Shown while Rust is creating the venv and installing sentence-transformers.
-// Each step name maps to a human-readable label shown in a step list.
-const _VENV_STEPS = [
-  { key: "find_python",  label: "Locate system Python" },
-  { key: "create_venv",  label: "Create isolated environment" },
-  { key: "verify_venv",  label: "Verify environment" },
-  { key: "upgrade_pip",  label: "Upgrade pip" },
-  { key: "install_deps", label: "Install packages" },
-  { key: "starting",     label: "Start similarity engine" },
-];
-
-// Tracks which steps have completed so the list renders correctly as events arrive.
-const _venvStepsDone   = new Set();
-let   _venvCurrentStep = "";
-let   _venvDetail      = "";
-
-// Rolling pip / pip-upgrade log lines — capped to avoid DOM bloat.
-const _pipLog    = [];
-const _PIP_LOG_MAX = 120;
-
-// Classify a pip output line for colour coding in the terminal widget.
-function _pipLineClass(line) {
-  const l = line.toLowerCase();
-  if (l.includes("error") || l.includes("failed") || l.includes("traceback")) return "venv-log-err";
-  if (l.includes("warn")  || l.includes("notice"))                             return "venv-log-warn";
-  if (l.startsWith("collecting") || l.startsWith("downloading") ||
-      l.startsWith("installing") || l.startsWith("successfully"))              return "venv-log-ok";
-  return "";
-}
-
-// Shared render function — called on every step change AND every pip-log line.
-function _renderVenvOverlay() {
-  const stepRows = _VENV_STEPS.map(s => {
-    const done    = _venvStepsDone.has(s.key) && s.key !== _venvCurrentStep;
-    const current = s.key === _venvCurrentStep;
-    const icon    = done    ? '<i class="bi bi-check"></i>'
-                  : current ? `<span class="pg-venv-spin"></span>`
-                  : "·";
-    const state   = done ? "done" : current ? "current" : "pending";
-    return `<div class="pg-step-row pg-step-row--${state}">
-              <span class="pg-step-icon">${icon}</span>
-              <span>${s.label}</span>
-            </div>`;
-  }).join("");
-
-  // Terminal log box — only shown when pip output exists.
-  const showTerminal = _pipLog.length > 0;
-  const logHTML = showTerminal
-    ? `<div id="pg-venv-terminal">
-         <div id="pg-venv-terminal-inner">${
-           _pipLog.map(({ text, cls }) =>
-             `<div class="pg-log-line ${cls.replace("venv-log-", "pg-log-")}">${
-               text.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
-             }</div>`
-           ).join("")
-         }<span class="pg-log-cursor"></span></div>
-       </div>`
-    : "";
-
-  const el = _overlayEl();
-  el.innerHTML = `
-    <div class="pg-title">Paper<span>Graph</span></div>
-    <div class="pg-subtitle">Setting up similarity engine — first launch only</div>
-    <div class="pg-steps-box">${stepRows}</div>
-    <div class="pg-step-detail">${_venvDetail}</div>
-    ${logHTML}
-    <div class="pg-spinner-sm"></div>`;
-  el.classList.add("visible");
-
-  // Auto-scroll terminal to bottom after render.
-  if (showTerminal) {
-    requestAnimationFrame(() => {
-      const inner = document.getElementById("pg-venv-terminal-inner");
-      if (inner) inner.scrollTop = inner.scrollHeight;
-    });
-  }
-}
-
-function _showVenvOverlay(step, detail) {
-  _venvCurrentStep = step;
-  _venvDetail      = detail;
-  _venvStepsDone.add(step);
-  _renderVenvOverlay();
-}
-
 // Register Tauri event listeners once on load.
-// "venv://progress"     — step transitions emitted by the Rust orchestrator.
-// "venv://pip-log"      — individual pip/pip-upgrade output lines (streamed).
-// "venv://error"        — fatal error from background venv setup thread.
 // "embedding://progress"— per-paper encoding progress from hf_compute_all_embeddings.
 // "embedding://error"   — fatal error from background embedding thread.
 
-// Callbacks registered by waitForVenvDone() / waitForEmbeddingDone() so they
-// can resolve/reject when the background job finishes.
-let _venvDoneResolve   = null;
-let _venvDoneReject    = null;
+// Callbacks registered by waitForEmbeddingDone().
 let _embedDoneResolve  = null;
 let _embedDoneReject   = null;
 
@@ -352,39 +251,6 @@ function _showEmbeddingOverlay() {
 }
 
 if (tauriListen) {
-  tauriListen("venv://progress", ({ payload }) => {
-    const { step, detail, done } = payload;
-    if (done) {
-      _VENV_STEPS.forEach(s => _venvStepsDone.add(s.key));
-      _venvCurrentStep = "";
-      _renderVenvOverlay();
-      setTimeout(() => {
-        hideOverlay();
-        if (_venvDoneResolve) { _venvDoneResolve(); _venvDoneResolve = _venvDoneReject = null; }
-      }, 800);
-    } else {
-      _showVenvOverlay(step, detail);
-    }
-  });
-
-  tauriListen("venv://error", ({ payload }) => {
-    hideOverlay();
-    if (_venvDoneReject) {
-      _venvDoneReject(payload?.error ?? "Unknown venv error");
-      _venvDoneResolve = _venvDoneReject = null;
-    }
-  });
-
-  tauriListen("venv://pip-log", ({ payload }) => {
-    const line = (payload?.line ?? "").trimEnd();
-    if (!line) return;
-    _pipLog.push({ text: line, cls: _pipLineClass(line) });
-    if (_pipLog.length > _PIP_LOG_MAX) _pipLog.shift();
-    if (_venvCurrentStep === "install_deps" || _venvCurrentStep === "upgrade_pip") {
-      _renderVenvOverlay();
-    }
-  });
-
   tauriListen("embedding://progress", ({ payload }) => {
     if (payload?.done) {
       hideOverlay();
@@ -406,15 +272,6 @@ if (tauriListen) {
   });
 }
 
-// Returns a promise that resolves when venv://progress { done } fires,
-// or rejects on venv://error. Always set this up BEFORE calling invoke("hf_setup_venv").
-function _waitForVenvDone() {
-  return new Promise((resolve, reject) => {
-    _venvDoneResolve = resolve;
-    _venvDoneReject  = reject;
-  });
-}
-
 // Returns a promise that resolves when embedding://progress { done } fires,
 // or rejects on embedding://error. Set up BEFORE invoke("hf_compute_all_embeddings").
 function _waitForEmbeddingDone() {
@@ -424,91 +281,6 @@ function _waitForEmbeddingDone() {
   });
 }
 
-// ── LLM consent dialog ───────────────────────────────────────────────────────
-// Shown on every launch so the user can opt in/out of HF embeddings per session.
-// • If the user says Yes and the venv is already ready → start/reuse sidecar.
-// • If the user says Yes and the venv is missing → run full setup with progress UI.
-// • If the user says No → HF strategy is locked; ⚙ Similarity still opens.
-// Returns true if HF was successfully enabled, false otherwise.
-async function _runLlmConsentFlow() {
-  const agreed = await _showLlmConsentDialog();
-  if (!agreed) {
-    await _persistHfEnabled(false);
-    _applyHfEnabled(false);
-    return false;
-  }
-
-  // User said Yes — check whether the venv + sentence-transformers are already
-  // in place so we can skip the (slow) install steps.
-  let venvReady = false;
-  try {
-    const status = await invoke("hf_setup_status");
-    venvReady = status?.ready === true;
-  } catch (_) { /* treat as not ready */ }
-
-  _venvStepsDone.clear();
-  _venvCurrentStep = "";
-  _venvDetail      = "";
-  _pipLog.length   = 0;
-  // Show the overlay BEFORE invoking so it's visible while the background
-  // thread runs — the command now returns immediately.
-  _renderVenvOverlay();
-
-  try {
-    // Register the done-promise BEFORE invoking to avoid any race.
-    const venvDone = _waitForVenvDone();
-    await invoke("hf_setup_venv");
-    // hf_setup_venv returns immediately; wait for venv://progress { done } event.
-    await venvDone;
-    // Overlay is hidden by the event handler; proceed with enabling HF.
-    await _persistHfEnabled(true);
-    _applyHfEnabled(true);
-    return true;
-  } catch (err) {
-    hideOverlay();
-    await _showLlmErrorDialog(String(err));
-    await _persistHfEnabled(false);
-    _applyHfEnabled(false);
-    return false;
-  }
-}
-
-function _showLlmConsentDialog() {
-  return new Promise(resolve => {
-    const dlg = document.getElementById("llm-consent-dialog");
-    if (!dlg) { resolve(false); return; }
-    dlg.classList.add("open");
-    const yes = document.getElementById("llm-consent-yes");
-    const no  = document.getElementById("llm-consent-no");
-    function close(r) {
-      dlg.classList.remove("open");
-      yes.removeEventListener("click", onYes);
-      no.removeEventListener("click",  onNo);
-      resolve(r);
-    }
-    const onYes = () => close(true);
-    const onNo  = () => close(false);
-    yes.addEventListener("click", onYes);
-    no.addEventListener("click",  onNo);
-  });
-}
-
-function _showLlmErrorDialog(msg) {
-  return new Promise(resolve => {
-    const dlg = document.getElementById("llm-error-dialog");
-    if (!dlg) { resolve(); return; }
-    const msgEl = document.getElementById("llm-error-msg");
-    if (msgEl) msgEl.textContent = msg;
-    dlg.classList.add("open");
-    const btn = document.getElementById("llm-error-ok");
-    function close() {
-      dlg.classList.remove("open");
-      btn.removeEventListener("click", close);
-      resolve();
-    }
-    btn.addEventListener("click", close);
-  });
-}
 
 // ── Startup load ──────────────────────────────────────────────────────────────
 async function loadFromDB() {
@@ -518,19 +290,8 @@ async function loadFromDB() {
     await loadSimConfig();
     _simConfig.strategy = "js-cosine";
     await loadNodeColors();
-    // ── LLM module consent ──────────────────────────────────────────────────
-    // Ask on every launch whether the user wants HF active this session.
-    // If the venv is already set up, saying Yes just enables it immediately
-    // with no download/install step. Saying No keeps the ⚙ Similarity panel
-    // accessible but locks the HuggingFace strategy option.
-    try {
-      hideOverlay();
-      await _runLlmConsentFlow();
-      showOverlay("Opening database…");
-    } catch (e) {
-      console.warn("[LitAtlas] LLM consent flow failed:", e);
-      _applyHfEnabled(false);
-    }
+    // AI mode is always available — API key health is checked at recompute time.
+    _applyHfEnabled(true);
 
     showOverlay("Loading papers…");
     setPapersCache((await invoke("get_papers")).map(adaptPaper));
@@ -1806,7 +1567,6 @@ window.LitAtlas = {
   recomputeEdgesForPaper,
   reloadGraph,
   isHfEnabled: () => _hfEnabled,
-  enableHf:    () => _runLlmConsentFlow(),
   getUiFontSize,
   setUiFontSize,
   getUiFontSize_MAX,

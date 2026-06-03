@@ -2,15 +2,14 @@
 
 mod db;
 mod commands;
-mod logger;   // ← NEW: structured call/error logger
+mod logger;
+mod api_client;
 
 use commands::*;
-use commands::PySidecar;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::Manager;
 use sqlx::SqlitePool;
-use std::fs;
 
 // ── AppState ──────────────────────────────────────────────────────────────────
 
@@ -19,9 +18,6 @@ pub struct AppState {
     pub projects_dir: PathBuf,
     pub current_slug: Mutex<String>,
     pub data_dir:     PathBuf,
-    /// Live Python sidecar process.  None = not yet started (lazy init).
-    /// Rust owns the full lifecycle — JS never talks to Python directly.
-    pub sidecar:      Mutex<Option<PySidecar>>,
 }
 
 impl AppState {
@@ -36,56 +32,6 @@ impl AppState {
     }
     pub fn projects_json(&self) -> PathBuf {
         self.data_dir.join("projects.json")
-    }
-    /// Directory for the isolated Python venv used by the similarity sidecar.
-    /// Created automatically on the first hf_* call via ensure_venv().
-    /// Safe to delete — the app recreates it on next launch.
-    pub fn venv_dir(&self) -> PathBuf {
-        self.data_dir.join("similarity_venv")
-    }
-    /// Directory where GGUF model files are stored.
-    /// Reads custom path from app_config.json["models_dir"]; falls back to data_dir/models.
-    pub fn models_dir(&self) -> PathBuf {
-        let cfg_path = self.data_dir.join("app_config.json");
-        if let Ok(raw) = std::fs::read_to_string(&cfg_path) {
-            if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&raw) {
-                if let Some(p) = cfg["models_dir"].as_str() {
-                    if !p.is_empty() {
-                        return PathBuf::from(p);
-                    }
-                }
-            }
-        }
-        self.data_dir.join("models")
-    }
-    /// Absolute path to similarity_server.py.
-    ///
-    /// Resolution order:
-    ///   0. User override in app_data_dir/app_config.json["sidecar_script"]
-    ///   1. app_data_dir/similarity_server.py  (bundled release copy)
-    ///   2. <workspace_root>/similarity_server.py  (dev — next to src-tauri/)
-    pub fn sidecar_script(&self) -> String {
-        // 0. User override — respects custom script path set in App Settings.
-        let app_cfg = self.data_dir.join("app_config.json");
-        if let Ok(raw) = std::fs::read_to_string(&app_cfg) {
-            if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&raw) {
-                if let Some(p) = cfg["sidecar_script"].as_str() {
-                    let path = std::path::Path::new(p);
-                    if !p.is_empty() && path.exists() {
-                        return p.to_owned();
-                    }
-                }
-            }
-        }
-        // 1. Bundled location (production)
-        let bundled = self.data_dir.join("similarity_server.py");
-        if bundled.exists() {
-            return bundled.to_string_lossy().into_owned();
-        }
-        // 2. Dev location: two directories up from src-tauri/src/ == workspace root
-        let dev = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("src/similarity_server.py");
-        dev.to_string_lossy().into_owned()
     }
 }
 
@@ -179,10 +125,6 @@ pub fn run() {
                 .expect("Failed to resolve app data dir");
             std::fs::create_dir_all(&data_dir).unwrap();
 
-            // ── Initialise logger ────────────────────────────────────────────
-            // Must happen before any command can be invoked so the log file
-            // path is known.  litatlas.log is appended across sessions;
-            // delete it manually to reset (the app always appends, never truncates).
             logger::init(data_dir.join("litatlas.log"));
             logger::log_call("app::startup");
 
@@ -213,18 +155,12 @@ pub fn run() {
                 .to_string();
 
             let pool = open_project(&projects_dir, &first_slug);
-            const SIMILARITY_PY: &str = include_str!("./similarity_server.py");
-            let script = data_dir.join("similarity_server.py");
-            // Always write the embedded script so it exists on a fresh install and
-            // stays up to date after app upgrades.
-            fs::write(&script, SIMILARITY_PY).map_err(|e| format!("Failed to write eval script: {e}"))?;
 
             app.manage(AppState {
                 pool:         Mutex::new(pool),
                 projects_dir,
                 current_slug: Mutex::new(first_slug),
                 data_dir,
-                sidecar:      Mutex::new(None), // started lazily on first hf_* call
             });
             Ok(())
         })
@@ -250,19 +186,19 @@ pub fn run() {
             // Projects
             list_projects, create_project, rename_project,
             delete_project, switch_project, get_current_project,
-            // HuggingFace similarity (Rust owns Python sidecar)
-            hf_list_models, hf_sidecar_status,
+            // API-based similarity
+            hf_list_models,
             hf_check_model, hf_download_model,
+            check_api_connection,
+            test_api_endpoint,
+            list_api_models,
             hf_get_paper_embedding, hf_compute_all_embeddings,
             hf_compute_edges_from_cache,
             hf_setup_status, hf_setup_venv,
             // Similarity config persistence
             get_similarity_config, save_similarity_config,
-            // App config (custom sidecar path, custom models)
+            // App config
             get_app_config, save_app_config,
-            pick_sidecar_script, get_sidecar_script_info,
-            // Plugin validation
-            hf_validate_plugin,
             // Filesystem utilities
             open_folder, get_dirs,
         ])

@@ -171,7 +171,7 @@ pub fn read_paper_md(
             if path.extension().and_then(|e| e.to_str()) != Some("md") { continue; }
             let name = path.file_name()
                 .unwrap_or_default().to_string_lossy().to_string();
-            if name == "paper.md" { continue; }
+            if name == "paper.md" || name == "PDF_TEXT.md" { continue; }
             if let Ok(content) = std::fs::read_to_string(&path) {
                 files.insert(name, content);
             }
@@ -593,895 +593,157 @@ pub fn switch_project(s: State<'_, AppState>, slug: String) -> CmdResult<()> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// PYTHON SIDECAR — HuggingFace similarity
+// HuggingFace / API similarity
 // ═══════════════════════════════════════════════════════════════════════════════
 //
-// The Python process is spawned lazily on the first hf_* command and kept alive
-// for the lifetime of the app.  Subsequent calls reuse the warm process so the
-// model stays loaded in RAM.
-//
-// Wire protocol: newline-delimited JSON over stdin/stdout.
-//
-//   Request  → { "id": u64, "method": str, "params": any }
-//   Success  ← { "id": u64, "ok": true,  "result": any  }
-//   Failure  ← { "id": u64, "ok": false, "error":  str  }
-//
-
-use std::io::{BufRead, BufReader, Read, Write};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-
-/// Owns the live Python child process.
-pub struct PySidecar {
-    child:   Child,
-    stdin:   ChildStdin,
-    stdout:  BufReader<ChildStdout>,
-    next_id: u64,
-}
-
-impl PySidecar {
-    /// Send one JSON-RPC call and wait for the response.
-    fn call(&mut self, method: &str, params: serde_json::Value)
-        -> Result<serde_json::Value, String>
-    {
-        let id = self.next_id;
-        self.next_id += 1;
-
-        let mut req = serde_json::json!({
-            "id": id, "method": method, "params": params
-        }).to_string();
-        req.push('\n');
-
-        self.stdin.write_all(req.as_bytes())
-            .map_err(|e| format!("sidecar write: {e}"))?;
-        self.stdin.flush()
-            .map_err(|e| format!("sidecar flush: {e}"))?;
-
-        let mut line = String::new();
-        self.stdout.read_line(&mut line)
-            .map_err(|e| format!("sidecar read: {e}"))?;
-
-        let v: serde_json::Value = serde_json::from_str(line.trim())
-            .map_err(|e| format!("sidecar parse: {e} — got: {line}"))?;
-
-        if v["ok"].as_bool() != Some(true) {
-            return Err(v["error"].as_str().unwrap_or("unknown error").to_string());
-        }
-        Ok(v["result"].clone())
-    }
-
-    fn is_alive(&mut self) -> bool {
-        self.child.try_wait().map(|r| r.is_none()).unwrap_or(false)
-    }
-}
-
-// ── Internal helpers ──────────────────────────────────────────────────────────
+// All embedding and generation calls go directly to cloud APIs (OpenAI /
+// Anthropic) from Rust — no Python sidecar required.
+// API keys are read from app_data_dir/app_config.json at call time.
 
 use tauri::Emitter;
 
-fn emit_progress(app: &tauri::AppHandle, step: &str, detail: &str, done: bool) {
-    let _ = app.emit("venv://progress", serde_json::json!({
-        "step":   step,
-        "detail": detail,
-        "done":   done,
-    }));
-}
 
-/// Emit a pip install log line in real time.
-/// Fires "venv://pip-log" with { line: str } so the frontend can stream it.
-fn emit_pip_log(app: &tauri::AppHandle, line: &str) {
-    let _ = app.emit("venv://pip-log", serde_json::json!({ "line": line }));
-}
+// ── Tauri commands ─────────────────────────────────────────────────────────────
 
-fn venv_python(venv_dir: &std::path::Path) -> std::path::PathBuf {
-    if cfg!(target_os = "windows") {
-        venv_dir.join("Scripts").join("python.exe")
-    } else {
-        venv_dir.join("bin").join("python")
-    }
-}
-
-fn venv_pip(venv_dir: &std::path::Path) -> std::path::PathBuf {
-    if cfg!(target_os = "windows") {
-        venv_dir.join("Scripts").join("pip.exe")
-    } else {
-        venv_dir.join("bin").join("pip")
-    }
-}
-
-// ── Process 1 of 5 : find a system Python 3.8+ ───────────────────────────────
-//
-// Scans well-known binary names on PATH, skipping any that resolve inside an
-// active conda or venv prefix (those would break isolation).
-// Emits granular status so the UI can show which candidate is being tried.
-fn step_find_python(app: &tauri::AppHandle) -> Result<String, String> {
-    let conda_prefix = std::env::var("CONDA_PREFIX").unwrap_or_default();
-    let venv_prefix  = std::env::var("VIRTUAL_ENV").unwrap_or_default();
-
-    emit_progress(app, "find_python", "Scanning PATH for Python 3.8+…", false);
-
-    let candidates = [
-        "python3.13","python3.12","python3.11",
-        "python3.10","python3.9","python3.8",
-        "python3","python",
-    ];
-
-    for &bin in &candidates {
-        emit_progress(app, "find_python", &format!("Trying {bin}…"), false);
-
-        let exe_out = Command::new(bin)
-            .args(["-c", "import sys; print(sys.executable)"])
-            .stdout(Stdio::piped()).stderr(Stdio::null()).output();
-
-        let exe_path = match exe_out {
-            Ok(o) if o.status.success() =>
-                String::from_utf8_lossy(&o.stdout).trim().to_string(),
-            _ => continue,   // binary not on PATH
-        };
-
-        if !conda_prefix.is_empty() && exe_path.starts_with(&conda_prefix) {
-            eprintln!("[LitAtlas] Skipping {bin} — inside conda: {exe_path}");
-            emit_progress(app, "find_python",
-                &format!("Skipped {bin} (conda env — needs isolation)"), false);
-            continue;
-        }
-        if !venv_prefix.is_empty() && exe_path.starts_with(&venv_prefix) {
-            eprintln!("[LitAtlas] Skipping {bin} — inside venv: {exe_path}");
-            emit_progress(app, "find_python",
-                &format!("Skipped {bin} (active venv — needs isolation)"), false);
-            continue;
-        }
-
-        let ver_ok = Command::new(bin)
-            .args(["-c",
-                "import sys; v=sys.version_info; \
-                 assert v.major==3 and v.minor>=8, \
-                 f'need 3.8+, got {v.major}.{v.minor}'"])
-            .stdout(Stdio::null()).stderr(Stdio::null())
-            .status().map(|s| s.success()).unwrap_or(false);
-
-        if ver_ok {
-            emit_progress(app, "find_python",
-                &format!("Found {bin} → {exe_path}"), false);
-            eprintln!("[LitAtlas] Using Python: {exe_path}");
-            return Ok(bin.to_string());
-        }
-    }
-
-    Err("Python 3.8+ not found on PATH (every candidate was either missing or \
-         inside an active conda / venv environment).\n\
-         Install Python 3 from https://python.org and restart LitAtlas.".into())
-}
-
-// ── Process 2 of 5 : create isolated venv ────────────────────────────────────
-//
-// Runs `<system_python> -m venv --clear <venv_dir>`.
-// Skipped if the venv binary already exists (idempotent on subsequent launches).
-fn step_create_venv(
-    venv_dir:  &std::path::Path,
-    system_py: &str,
-    app:       &tauri::AppHandle,
-) -> Result<(), String> {
-    let py_bin = venv_python(venv_dir);
-
-    if py_bin.exists() {
-        emit_progress(app, "create_venv", "Existing environment found — skipping creation", false);
-        return Ok(());
-    }
-
-    emit_progress(app, "create_venv",
-        &format!("Creating venv at {}", venv_dir.display()), false);
-
-    let status = Command::new(system_py)
-        .args(["-m", "venv", "--clear"])
-        .arg(venv_dir)
-        .status()
-        .map_err(|e| format!("Failed to spawn venv process: {e}"))?;
-
-    if !status.success() {
-        return Err(format!(
-            "Could not create venv at '{}'.\n\
-             On Debian/Ubuntu you may need: sudo apt install python3-venv\n\
-             On Fedora/RHEL: sudo dnf install python3-virtualenv",
-            venv_dir.display()));
-    }
-
-    emit_progress(app, "create_venv",
-        &format!("Venv created at {}", venv_dir.display()), false);
-    Ok(())
-}
-
-// ── Process 3 of 5 : verify the venv is self-contained ───────────────────────
-//
-// Queries `sys.prefix` inside the venv Python and canonically compares it to
-// venv_dir.  Catches the rare case where the binary exists but points elsewhere
-// (e.g. a broken symlink left over from a partial install).
-fn step_verify_venv(
-    venv_dir: &std::path::Path,
-    app:      &tauri::AppHandle,
-) -> Result<std::path::PathBuf, String> {
-    let py_bin = venv_python(venv_dir);
-    
-    emit_progress(app, "verify_venv",
-        "Verifying venv isolation (sys.prefix check)…", false);
-
-    let out = Command::new(&py_bin)
-        .args(["-c", "import sys; print(sys.prefix)"])
-        .stdout(Stdio::piped()).stderr(Stdio::null()).output()
-        .map_err(|e| format!("Cannot query venv sys.prefix: {e}"))?;
-
-    let reported_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    let expected = venv_dir.canonicalize().unwrap_or_else(|_| venv_dir.to_path_buf());
-    let reported = std::path::Path::new(&reported_str)
-        .canonicalize()
-        .unwrap_or_else(|_| std::path::PathBuf::from(&reported_str));
-
-    if reported != expected {
-        return Err(format!(
-            "Venv sanity check failed — prefix mismatch.\n\
-             Expected : {}\n\
-             Got      : {}\n\n\
-             Delete '{}' and restart to recreate it.",
-            expected.display(), reported.display(), venv_dir.display()));
-    }
-
-    // Also check the Python version inside the venv matches expectations
-    let ver_out = Command::new(&py_bin)
-        .args(["-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"])
-        .stdout(Stdio::piped()).stderr(Stdio::null()).output()
-        .unwrap_or_else(|_| std::process::Output {
-            status: std::process::ExitStatus::default(),
-            stdout: vec![], stderr: vec![],
-        });
-    let ver_str = String::from_utf8_lossy(&ver_out.stdout).trim().to_string();
-    emit_progress(app, "verify_venv",
-        &format!("Venv OK — Python {ver_str} at {}", py_bin.display()), false);
-
-    Ok(py_bin)
-}
-
-// ── Process 4 of 5 : upgrade pip inside the venv ─────────────────────────────
-//
-// A fresh venv ships with the pip version bundled into the Python installer,
-// which may be months or years old.  Running `pip install --upgrade pip` before
-// installing transformers avoids resolver bugs and improves download
-// reliability.  This step streams its output exactly like the main install.
-// Skipped if pip is already reasonably modern (≥ 23).
-fn step_upgrade_pip(
-    py_bin:   &std::path::Path,
-    app:      &tauri::AppHandle,
-) -> Result<(), String> {
-    // Query current pip version — e.g. "24.0"
-    let ver_out = Command::new(py_bin)
-        .args(["-m", "pip", "--version"])
-        .stdout(Stdio::piped()).stderr(Stdio::null()).output()
-        .unwrap_or_else(|_| std::process::Output {
-            status: std::process::ExitStatus::default(),
-            stdout: vec![], stderr: vec![],
-        });
-    let ver_line = String::from_utf8_lossy(&ver_out.stdout).trim().to_string();
-    // "pip 23.3.1 from /…" — parse the version number after "pip "
-    let current_major: u32 = ver_line
-        .strip_prefix("pip ")
-        .and_then(|s| s.split('.').next())
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-
-    if current_major >= 23 {
-        emit_progress(app, "upgrade_pip",
-            &format!("pip {current_major} is current — skipping upgrade"), false);
-        return Ok(());
-    }
-
-    emit_progress(app, "upgrade_pip",
-        &format!("Upgrading pip (currently {ver_line})…"), false);
-
-    let mut child = Command::new(py_bin)
-        .args(["-m", "pip", "install", "--upgrade",
-               "--no-color", "--progress-bar", "off",
-               "pip"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("pip upgrade failed to start: {e}"))?;
-
-    // Stream stderr on a background thread (pip writes warnings/progress there)
-    let app_err = app.clone();
-    let stderr  = BufReader::new(child.stderr.take().ok_or("no pip stderr")?);
-    std::thread::spawn(move || {
-        for line in stderr.lines().flatten() { emit_pip_log(&app_err, &line); }
-    });
-
-    // Stream stdout on the current thread
-    let stdout = BufReader::new(child.stdout.take().ok_or("no pip stdout")?);
-    for line in stdout.lines().flatten() { emit_pip_log(app, &line); }
-
-    let status = child.wait()
-        .map_err(|e| format!("pip upgrade wait failed: {e}"))?;
-
-    if !status.success() {
-        // Non-fatal: log a warning but do not abort the install
-        eprintln!("[LitAtlas] pip upgrade exited non-zero — continuing anyway");
-        emit_progress(app, "upgrade_pip",
-            "pip upgrade failed (non-fatal) — continuing…", false);
-    } else {
-        // Re-query version to confirm the upgrade
-        let new_ver = Command::new(py_bin)
-            .args(["-m", "pip", "--version"])
-            .stdout(Stdio::piped()).stderr(Stdio::null()).output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .unwrap_or_default();
-        emit_progress(app, "upgrade_pip",
-            &format!("pip upgraded → {new_ver}"), false);
-    }
-
-    // Small gap so the UI can show the "upgraded" message before moving on
-    std::thread::sleep(std::time::Duration::from_millis(300));
-    Ok(())
-}
-
-// ── Process 5 of 5 : install transformers + torch + einops + timm ────────────
-//
-// Checks EVERY required package individually so a partial install (e.g. torch
-// present but einops missing) is detected and repaired.  Each package is probed
-// by importing it; missing ones are collected into a list and installed together
-// in a single pip invocation.  If all packages are present the step is skipped
-// entirely (fast path on every launch after the first).
-// When installation IS needed, pip stdout and stderr are forwarded line-by-line
-// as "venv://pip-log" events so the UI can render a live terminal.
-fn step_install_deps(
-    venv_dir: &std::path::Path,
-    py_bin:   &std::path::Path,
-    app:      &tauri::AppHandle,
-) -> Result<(), String> {
-    // Each entry: (pip package name, python import name, version expression)
-    // The version expression is embedded in the import probe so we can report
-    // the installed version in the progress message.
-    let required: &[(&str, &str, &str)] = &[
-        ("llama-cpp-python", "llama_cpp", "llama_cpp.__version__"),
-        ("huggingface_hub",  "huggingface_hub", "huggingface_hub.__version__"),
-        ("PyMuPDF",          "PyMuPDF",         "PyMuPDF.__version__"),
-    ];
-
-    // Probe each package; build two lists: already-installed (for the log) and
-    // missing (need to be installed).
-    let mut missing: Vec<&str> = Vec::new();
-
-    for (pip_name, import_name, version_expr) in required {
-        let probe = format!("import {import_name}; print({version_expr})");
-        let result = Command::new(py_bin)
-            .args(["-c", &probe])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .output()
-            .ok()
-            .filter(|o| o.status.success());
-
-        match result {
-            Some(o) => {
-                let ver = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                emit_progress(app, "install_deps",
-                    &format!("✓ {pip_name} {ver} already installed"), false);
-            }
-            None => {
-                emit_progress(app, "install_deps",
-                    &format!("✗ {pip_name} not found — will install"), false);
-                missing.push(pip_name);
-            }
-        }
-    }
-
-    // All packages present — nothing to do.
-    if missing.is_empty() {
-        emit_progress(app, "install_deps",
-            "All requirements satisfied — skipping installation", false);
-        return Ok(());
-    }
-
-    let missing_list = missing.join(", ");
-    emit_progress(app, "install_deps",
-        &format!("Installing missing packages: {missing_list} (may take a minute)…"), false);
-
-    let mut child = Command::new(venv_pip(venv_dir))
-        .args(["install", "--no-color", "--progress-bar", "off", "--prefer-binary"])
-        .args(&missing)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("pip install failed to start: {e}"))?;
-
-    // stderr on a background thread — pip writes download progress there
-    let app_err    = app.clone();
-    let stderr_buf = BufReader::new(child.stderr.take().ok_or("no pip stderr")?);
-    std::thread::spawn(move || {
-        for line in stderr_buf.lines().flatten() { emit_pip_log(&app_err, &line); }
-    });
-
-    // stdout on the current thread
-    let stdout_buf = BufReader::new(child.stdout.take().ok_or("no pip stdout")?);
-    for line in stdout_buf.lines().flatten() { emit_pip_log(app, &line); }
-
-    let status = child.wait()
-        .map_err(|e| format!("pip install wait failed: {e}"))?;
-
-    if !status.success() {
-        return Err(format!(
-            "Installation of [{missing_list}] failed.\n\
-             Check the terminal log above for details.\n\
-             Common causes:\n\
-             • No internet connection — connect to the internet and try again.\n\
-             • Disk full — free up space and retry.\n\
-             • Outdated pip — will be upgraded automatically on the next attempt.\n\n\
-             Note: once installed, the AI similarity features work fully offline.\n\
-             Only the initial setup and model downloads require internet access."
-        ));
-    }
-
-    // Confirm by re-probing every package that was just installed.
-    let required_confirm: &[(&str, &str, &str)] = &[
-        ("llama-cpp-python", "llama_cpp",        "llama_cpp.__version__"),
-        ("huggingface_hub",  "huggingface_hub",  "huggingface_hub.__version__"),
-    ];
-    for (pip_name, import_name, version_expr) in required_confirm {
-        if !missing.contains(pip_name) { continue; }
-        let probe = format!("import {import_name}; print({version_expr})");
-        let ver = Command::new(py_bin)
-            .args(["-c", &probe])
-            .stdout(Stdio::piped()).stderr(Stdio::null()).output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .unwrap_or_else(|_| "unknown".into());
-        emit_progress(app, "install_deps",
-            &format!("✓ {pip_name} {ver} installed successfully"), false);
-    }
-    Ok(())
-}
-
-// ── Orchestrator ──────────────────────────────────────────────────────────────
-//
-// Calls each step in sequence.  Returns the path to the venv Python binary on
-// success so `launch_sidecar` can spawn the server with the right interpreter.
-fn ensure_venv(
-    venv_dir: &std::path::Path,
-    app:      &tauri::AppHandle,
-) -> Result<std::path::PathBuf, String> {
-    if !venv_python(venv_dir).exists() {
-        // 1 — Locate a suitable system Python (only needed when creating a new venv)
-        let system_py = step_find_python(app)?;
-
-        // 2 — Create the venv
-        step_create_venv(venv_dir, &system_py, app)?;
-    } else {
-        emit_progress(app, "find_python", "Existing venv found — skipping Python search", false);
-        emit_progress(app, "create_venv", "Existing environment found — skipping creation", false);
-    }
-
-    // 3 — Verify the venv is self-contained
-    let py_bin = step_verify_venv(venv_dir, app)?;
-
-    // 4 — Upgrade pip inside the venv
-    step_upgrade_pip(&py_bin, app)?;
-
-    // 5 — Install llama-cpp-python + huggingface_hub + PyMuPDF (no-op if already present)
-    step_install_deps(venv_dir, &py_bin, app)?;
-
-    Ok(py_bin)
-}
-
-
-fn launch_sidecar(
-    script:   &str,
-    venv_dir: &std::path::Path,
-    app:      &tauri::AppHandle,
-) -> Result<PySidecar, String> {
-    emit_progress(app, "starting", "Starting similarity engine…", false);
-
-    let python = ensure_venv(venv_dir, app)?;
-
-    // Read the custom plugin script path from app_config.json (if set).
-    // Pass it to the sidecar via the LitAtlas_PLUGIN_SCRIPT env var so
-    // Python can load the user's similarity_fn / compute_embedding_fn hooks.
-    // Read app_config.json once to extract both the plugin script path and the
-    // HuggingFace API token (needed for gated models like google/gemma-3-1b-it).
-    let (plugin_script, models_dir_str): (String, String) = {
-        // NOTE: we don't have &AppState here, only venv_dir.  Infer data_dir
-        // as venv_dir's parent (similarity_venv is created directly inside data_dir).
-        let data_dir = venv_dir.parent().unwrap_or(venv_dir);
-        let cfg_path = data_dir.join("app_config.json");
-        let cfg: Option<serde_json::Value> = std::fs::read_to_string(&cfg_path)
-            .ok()
-            .and_then(|raw| serde_json::from_str(&raw).ok());
-        let script = cfg.as_ref()
-            .and_then(|c| c["sidecar_script"].as_str().map(String::from))
-            .filter(|p| !p.is_empty() && std::path::Path::new(p).exists())
-            .unwrap_or_default();
-        let models_dir = cfg.as_ref()
-            .and_then(|c| c["models_dir"].as_str())
-            .filter(|p| !p.is_empty())
-            .map(String::from)
-            .unwrap_or_else(|| data_dir.join("models").to_string_lossy().into_owned());
-        (script, models_dir)
-    };
-
-    let mut child = Command::new(&python)
-        .arg("-u")
-        .arg(script)
-        .env_remove("CONDA_PREFIX")
-        .env_remove("CONDA_DEFAULT_ENV")
-        .env_remove("VIRTUAL_ENV")
-        .env_remove("VIRTUAL_ENV_PROMPT")
-        .env("LitAtlas_PLUGIN_SCRIPT", &plugin_script)
-        .env("LITATLAS_MODELS_DIR",    &models_dir_str)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Failed to spawn sidecar at '{script}': {e}"))?;
-
-    let stdin  = child.stdin.take().ok_or("no sidecar stdin")?;
-    let stdout = BufReader::new(child.stdout.take().ok_or("no sidecar stdout")?);
-    let mut stderr_reader = BufReader::new(child.stderr.take().ok_or("no sidecar stderr")?);
-
-    let mut sc = PySidecar { child, stdin, stdout, next_id: 1 };
-
-    let mut handshake = String::new();
-    sc.stdout.read_line(&mut handshake)
-        .map_err(|e| format!("sidecar handshake read: {e}"))?;
-
-    if handshake.trim().is_empty() {
-        // Python exited before writing the handshake — read stderr for the real error.
-        let mut stderr_out = String::new();
-        let _ = stderr_reader.read_to_string(&mut stderr_out);
-        let hint = if stderr_out.trim().is_empty() {
-            format!("Python exited immediately with no output.\nScript: {script}")
-        } else {
-            format!("Python exited immediately.\nScript: {script}\nPython error:\n{}", stderr_out.trim())
-        };
-        return Err(hint);
-    }
-
-    // Stream Python stderr line-by-line so logs appear immediately and are
-    // written to litatlas.log (not batched until process exit).
-    std::thread::spawn(move || {
-        for line in stderr_reader.lines().flatten() {
-            logger::log_info("py_sidecar", &line);
-        }
-    });
-
-    let v: serde_json::Value = serde_json::from_str(handshake.trim())
-        .map_err(|e| format!("sidecar handshake parse: {e}\ngot: {handshake}"))?;
-
-    if v["ok"].as_bool() != Some(true) {
-        return Err(format!("sidecar startup failed: {}", v["error"]));
-    }
-
-    emit_progress(app, "ready", "Similarity engine ready.", true);
-    eprintln!("[LitAtlas] Python sidecar started (pid {})", sc.child.id());
-    Ok(sc)
-}
-
-fn ensure_running<'a>(s: &'a AppState, app: &tauri::AppHandle) -> Result<std::sync::MutexGuard<'a, Option<PySidecar>>, String> {
-    let mut guard = s.sidecar.lock().unwrap();
-    let dead = match guard.as_mut() {
-        None     => true,
-        Some(sc) => !sc.is_alive(),
-    };
-    if dead {
-        if guard.is_some() {
-            eprintln!("[LitAtlas] Sidecar crashed — restarting…");
-        }
-        *guard = Some(launch_sidecar(&s.sidecar_script(), &s.venv_dir(), app)?);
-    }
-    Ok(guard)
-}
-
-// ── Tauri commands ────────────────────────────────────────────────────────────
-
-/// Quick check: is the Python venv ready and transformers installed?
-///
-/// Does NOT start the sidecar or trigger any installation — purely reads the
-/// filesystem.  JS calls this on startup to decide whether to show the
-/// "Enable LLM module?" prompt.
-///
-/// Returns: { ready: bool, reason?: str }
+/// Returns { ready: bool, reason?: str }.
+/// Ready when at least one API key (OpenAI or Anthropic) is configured.
 #[tauri::command]
 pub fn hf_setup_status(s: State<'_, AppState>) -> CmdResult<serde_json::Value> {
     logger::log_call("hf_setup_status");
-    let py = venv_python(&s.venv_dir());
-    if !py.exists() {
-        return Ok(serde_json::json!({
-            "ready":          false,
-            "reason":         "venv not created yet",
-            "cached_models":  serde_json::Value::Array(vec![]),
-        }));
-    }
-
-    // Check that the core required packages are importable.
-    let pkg_ok = std::process::Command::new(&py)
-        .args(["-c", "import llama_cpp, huggingface_hub"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|st| st.success())
-        .unwrap_or(false);
-
-    if !pkg_ok {
-        return Ok(serde_json::json!({
-            "ready":         false,
-            "reason":        "required packages (llama-cpp-python, huggingface_hub) not installed",
-            "cached_models": serde_json::Value::Array(vec![]),
-        }));
-    }
-
-    // Scan models_dir for downloaded GGUF files.
-    let models_dir    = s.models_dir();
-    let cached_models: Vec<serde_json::Value> = if models_dir.is_dir() {
-        std::fs::read_dir(&models_dir)
-            .map(|entries| {
-                entries.flatten()
-                    .filter(|e| {
-                        e.path().extension()
-                            .and_then(|x| x.to_str()) == Some("gguf")
-                    })
-                    .map(|e| serde_json::json!(e.file_name().to_string_lossy()))
-                    .collect()
-            })
-            .unwrap_or_default()
+    let keys = crate::api_client::ApiKeys::load(&s.data_dir);
+    if keys.has_any() {
+        Ok(serde_json::json!({ "ready": true }))
     } else {
-        vec![]
-    };
+        Ok(serde_json::json!({
+            "ready":  false,
+            "reason": "No API key configured. Add an OpenAI or Anthropic key in App Settings → API.",
+        }))
+    }
+}
 
+/// No-op — there is no venv to set up; returns { ok: true } when an API key is present.
+#[tauri::command]
+pub fn hf_setup_venv(s: State<'_, AppState>, app: tauri::AppHandle) -> CmdResult<serde_json::Value> {
+    logger::log_call("hf_setup_venv");
+    let keys = crate::api_client::ApiKeys::load(&s.data_dir);
+    let _ = app.emit("venv://progress", serde_json::json!({
+        "step": "ready", "detail": "API key found — no setup required.", "done": true,
+    }));
+    if keys.has_any() {
+        Ok(serde_json::json!({ "ok": true }))
+    } else {
+        Err("No API key configured. Add an OpenAI or Anthropic key in App Settings.".to_string())
+    }
+}
+
+/// Returns the hardcoded list of supported API embedding models.
+#[tauri::command]
+pub fn hf_list_models(_app: tauri::AppHandle, _s: State<'_, AppState>) -> CmdResult<serde_json::Value> {
+    logger::log_call("hf_list_models");
     Ok(serde_json::json!({
-        "ready":         true,
-        "cached_models": cached_models,
+        "models": [
+            {
+                "id":          "openai:text-embedding-3-small",
+                "label":       "OpenAI text-embedding-3-small",
+                "description": "Cloud embedding via OpenAI API. Requires OPENAI_API_KEY in App Settings.",
+                "size_mb":     0,
+                "gated":       false,
+                "type":        "api",
+            },
+            {
+                "id":          "openai:text-embedding-3-large",
+                "label":       "OpenAI text-embedding-3-large",
+                "description": "Higher-quality cloud embedding via OpenAI API. Requires OPENAI_API_KEY.",
+                "size_mb":     0,
+                "gated":       false,
+                "type":        "api",
+            },
+        ],
+        "fields": [
+            "title", "abstract", "hashtags", "notes",
+            "pdf", "md_summary", "md_methods", "md_experiment", "md_conclusion",
+        ],
     }))
 }
 
-/// Set up (or repair) the Python venv and install transformers + torch + einops + timm.
-///
-/// Runs the full 5-step venv orchestrator: find Python → create venv →
-/// verify → upgrade pip → install deps.  Emits "venv://progress" events
-/// so the UI can show live progress.  Does NOT start the sidecar.
-///
-/// Called from JS after the user opts in to the LLM module.
-///
-/// Returns: { ok: true } on success, error string on failure.
-// #[tauri::command]
-// pub fn hf_setup_venv(
-//     app: tauri::AppHandle,
-//     s:   State<'_, AppState>,
-// ) -> CmdResult<serde_json::Value> {
-//     ensure_venv(&s.venv_dir(), &app)
-//         .map(|_| serde_json::json!({ "ok": true }))
-// }
-
-#[tauri::command]
-pub fn hf_setup_venv(
-    app: tauri::AppHandle,
-    s:   State<'_, AppState>,
-) -> CmdResult<serde_json::Value> {
-    logger::log_call("hf_setup_venv");
-    // If a live sidecar is already running, reuse it — no second spawn.
-    {
-        let mut guard = s.sidecar.lock().unwrap();
-        if let Some(sc) = guard.as_mut() {
-            if sc.is_alive() {
-                eprintln!("[LitAtlas] hf_setup_venv: sidecar already live — reusing.");
-                emit_progress(&app, "ready", "Similarity engine ready.", true);
-                return Ok(serde_json::json!({ "ok": true }));
-            }
-            // Dead sidecar — drop it before relaunching.
-            eprintln!("[LitAtlas] hf_setup_venv: dead sidecar found — relaunching.");
-            *guard = None;
-        }
-    }
-
-    // Spawn setup on a background thread so the Tauri command returns
-    // immediately and the JS event loop can process progress events.
-    let script  = s.sidecar_script();
-    let venv    = s.venv_dir();
-    std::thread::spawn(move || {
-        match launch_sidecar(&script, &venv, &app) {
-            Ok(sc) => {
-                let state = app.state::<AppState>();
-                *state.sidecar.lock().unwrap() = Some(sc);
-                // launch_sidecar already emits the "ready" done event
-            }
-            Err(e) => {
-                eprintln!("[LitAtlas] hf_setup_venv background error: {e}");
-                let _ = app.emit("venv://error", serde_json::json!({ "error": e }));
-            }
-        }
-    });
-
-    Ok(serde_json::json!({ "ok": true, "background": true }))
-}
-
-/// Retrieve the list of supported models and fields from the sidecar.
-///
-/// Called from JS as: invoke("hf_list_models")
-/// Returns: { models: [...], fields: [...] }
-#[tauri::command]
-pub fn hf_list_models(app: tauri::AppHandle, s: State<'_, AppState>) -> CmdResult<serde_json::Value> {
-    logger::log_call("hf_list_models");
-    let mut guard = ensure_running(&s, &app)?;
-    guard.as_mut().unwrap().call("list_models", serde_json::Value::Null)
-}
-
-/// Check whether the sidecar is running and which model is currently loaded.
-///
-/// Called from JS as: invoke("hf_sidecar_status")
-/// Returns: { running: bool, details?: { loaded_model, python } }
-#[tauri::command]
-pub fn hf_sidecar_status(s: State<'_, AppState>) -> CmdResult<serde_json::Value> {
-    logger::log_call("hf_sidecar_status");
-    let mut guard = s.sidecar.lock().unwrap();
-    let alive = guard.as_mut().map(|sc| sc.is_alive()).unwrap_or(false);
-    if !alive {
-        *guard = None;
-        return Ok(serde_json::json!({ "running": false }));
-    }
-    match guard.as_mut().unwrap().call("status", serde_json::Value::Null) {
-        Ok(v)  => Ok(serde_json::json!({ "running": true, "details": v })),
-        Err(e) => Ok(serde_json::json!({ "running": true, "error": e })),
-    }
-}
-
-// ── Model cache check + download ──────────────────────────────────────────────
-
-/// Check whether a HuggingFace model is already cached locally.
-/// Fast — the sidecar only inspects the filesystem, no network call.
-///
-/// Called from JS as: invoke("hf_check_model", { model })
-/// Returns: { cached: bool, path?: str }
+/// Check whether the API key for the given model's provider is configured.
+/// Returns { cached: bool, api: true }.
 #[tauri::command]
 pub fn hf_check_model(
-    app:   tauri::AppHandle,
     s:     State<'_, AppState>,
     model: String,
 ) -> CmdResult<serde_json::Value> {
     logger::log_call("hf_check_model");
-    let mut guard = ensure_running(&s, &app)?;
-    guard.as_mut().unwrap()
-        .call("check_model", serde_json::json!({ "model": model }))
+    let keys = crate::api_client::ApiKeys::load(&s.data_dir);
+    let cached = if model.starts_with("openai:") {
+        !keys.openai.is_empty()
+    } else if model.starts_with("anthropic:") {
+        !keys.anthropic.is_empty()
+    } else {
+        false
+    };
+    Ok(serde_json::json!({ "cached": cached, "api": true }))
 }
 
-/// Download a HuggingFace model to the local cache, streaming per-file
-/// progress as "venv://model-progress" Tauri events so the JS UI can
-/// render a live progress bar.
-///
-/// The Python sidecar writes intermediate JSON lines:
-///   { "id": N, "ok": true, "progress": { filename, downloaded, total, pct } }
-/// …followed by the final reply:
-///   { "id": N, "ok": true, "result": { path, done: true } }
-///
-/// This command returns immediately and does all blocking I/O on a background
-/// thread so the sidecar mutex is not held for the full download duration.
-/// Progress is forwarded as "venv://model-progress" Tauri events.
-/// Completion is signalled via "venv://model-download-done":
-///   { ok: true, model, path }   on success
-///   { ok: false, model, error } on failure
-///
-/// Called from JS as: invoke("hf_download_model", { model, repo_id })
-/// Returns immediately: { ok: true, background: true }
+/// Probe an arbitrary endpoint URL and report what was found.
+/// Used by App Settings to validate the Model API Endpoint field.
+/// `api_key` may be empty (for unauthenticated local servers).
+#[tauri::command]
+pub async fn test_api_endpoint(url: String, api_key: String) -> CmdResult<serde_json::Value> {
+    logger::log_call("test_api_endpoint");
+    if url.trim().is_empty() {
+        return Ok(serde_json::json!({ "ok": false, "error": "No URL provided." }));
+    }
+    match crate::api_client::test_endpoint(url.trim(), api_key.trim()).await {
+        Ok(msg)  => Ok(serde_json::json!({ "ok": true,  "message": msg })),
+        Err(err) => Ok(serde_json::json!({ "ok": false, "error":   err })),
+    }
+}
+
+/// Test that the configured API endpoint is reachable.
+/// Returns { ok: bool, provider: str, error?: str }.
+#[tauri::command]
+pub async fn check_api_connection(s: State<'_, AppState>) -> CmdResult<serde_json::Value> {
+    logger::log_call("check_api_connection");
+    let keys = crate::api_client::ApiKeys::load(&s.data_dir);
+    if !keys.has_any() {
+        return Ok(serde_json::json!({
+            "ok":    false,
+            "error": "No API key or endpoint configured. Add one in App Settings → API."
+        }));
+    }
+    match crate::api_client::openai_check(&keys.openai, keys.openai_base()).await {
+        Ok(()) => Ok(serde_json::json!({ "ok": true, "provider": "openai" })),
+        Err(e)  => Ok(serde_json::json!({ "ok": false, "provider": "openai", "error": e })),
+    }
+}
+
+/// Fetch the model list from the configured custom API endpoint.
+/// Returns { ok: bool, models: [str], error?: str }.
+/// Returns { ok: false, models: [] } when no custom endpoint is configured.
+#[tauri::command]
+pub async fn list_api_models(s: State<'_, AppState>) -> CmdResult<serde_json::Value> {
+    logger::log_call("list_api_models");
+    let keys = crate::api_client::ApiKeys::load(&s.data_dir);
+    if keys.base_url.is_empty() {
+        return Ok(serde_json::json!({ "ok": false, "models": [] }));
+    }
+    match crate::api_client::list_models(&keys.openai, &keys.base_url).await {
+        Ok(ids) => Ok(serde_json::json!({ "ok": true, "models": ids })),
+        Err(e)  => Ok(serde_json::json!({ "ok": false, "models": [], "error": e })),
+    }
+}
+
+/// No-op for API models — no local download is needed.
 #[tauri::command]
 pub fn hf_download_model(
-    app:     tauri::AppHandle,
-    s:       State<'_, AppState>,
-    model:   String,
-    repo_id: String,
+    _app:     tauri::AppHandle,
+    _s:       State<'_, AppState>,
+    _model:   String,
+    _repo_id: String,
 ) -> CmdResult<serde_json::Value> {
     logger::log_call("hf_download_model");
-    // Send the request while we hold the lock, then release it before
-    // entering the blocking read loop so other commands can proceed.
-    let req_id = {
-        let mut guard = ensure_running(&s, &app)?;
-        let sc = guard.as_mut().unwrap();
-
-        let id = sc.next_id;
-        sc.next_id += 1;
-
-        let mut req = serde_json::json!({
-            "id": id,
-            "method": "download_model",
-            "params": { "model": model, "repo_id": repo_id }
-        }).to_string();
-        req.push('\n');
-
-        sc.stdin.write_all(req.as_bytes())
-            .map_err(|e| format!("sidecar write: {e}"))?;
-        sc.stdin.flush()
-            .map_err(|e| format!("sidecar flush: {e}"))?;
-
-        id   // guard is dropped here, releasing the mutex
-    };
-
-    // Move the blocking read loop to a background thread so this command
-    // returns immediately and the sidecar mutex is free for other commands.
-    std::thread::spawn(move || {
-        let state = app.state::<AppState>();
-        loop {
-            // Re-acquire lock only long enough to read one line.
-            let line = {
-                let mut guard = match state.sidecar.lock() {
-                    Ok(g) => g,
-                    Err(_) => {
-                        let _ = app.emit("venv://model-download-done", serde_json::json!({
-                            "ok": false, "model": &model,
-                            "error": "sidecar mutex poisoned"
-                        }));
-                        return;
-                    }
-                };
-                let sc = match guard.as_mut() {
-                    Some(sc) => sc,
-                    None => {
-                        let _ = app.emit("venv://model-download-done", serde_json::json!({
-                            "ok": false, "model": &model,
-                            "error": "sidecar not running"
-                        }));
-                        return;
-                    }
-                };
-                let mut buf = String::new();
-                match sc.stdout.read_line(&mut buf) {
-                    Ok(0) => {
-                        let _ = app.emit("venv://model-download-done", serde_json::json!({
-                            "ok": false, "model": &model,
-                            "error": "sidecar closed stdout unexpectedly"
-                        }));
-                        return;
-                    }
-                    Err(e) => {
-                        let _ = app.emit("venv://model-download-done", serde_json::json!({
-                            "ok": false, "model": &model,
-                            "error": format!("sidecar read: {e}")
-                        }));
-                        return;
-                    }
-                    Ok(_) => buf,
-                }
-                // guard is dropped here after each line read
-            };
-
-            let v: serde_json::Value = match serde_json::from_str(line.trim()) {
-                Ok(v) => v,
-                Err(e) => {
-                    let _ = app.emit("venv://model-download-done", serde_json::json!({
-                        "ok": false, "model": &model,
-                        "error": format!("sidecar parse: {e}")
-                    }));
-                    return;
-                }
-            };
-
-            // Skip lines for other request IDs (shouldn't happen, but be safe).
-            if v.get("id").and_then(|id| id.as_u64()) != Some(req_id) {
-                continue;
-            }
-
-            // Intermediate progress — forward to JS and keep reading.
-            if let Some(prog) = v.get("progress") {
-                let _ = app.emit("venv://model-progress", prog);
-                continue;
-            }
-
-            // Final reply.
-            if v["ok"].as_bool() != Some(true) {
-                let err = v["error"].as_str()
-                    .unwrap_or("download failed").to_string();
-                let _ = app.emit("venv://model-download-done", serde_json::json!({
-                    "ok": false, "model": &model, "error": err
-                }));
-            } else {
-                let _ = app.emit("venv://model-download-done", serde_json::json!({
-                    "ok": true, "model": &model,
-                    "path": v["result"]["path"]
-                }));
-            }
-            return;
-        }
-    });
-
-    Ok(serde_json::json!({ "ok": true, "background": true }))
+    Ok(serde_json::json!({ "done": true, "api": true }))
 }
 
 // ── Per-paper embedding cache ─────────────────────────────────────────────────
@@ -1721,17 +983,189 @@ pub fn hf_get_paper_embedding(
     Ok(serde_json::json!({ "hit": false }))
 }
 
+// ── MD generation helpers ─────────────────────────────────────────────────────
+
+fn parse_md_sections(text: &str) -> Vec<(String, String)> {
+    let mut sections: Vec<(String, String)> = Vec::new();
+    let mut current_file: Option<String> = None;
+    let mut current_lines: Vec<&str>    = Vec::new();
+    for line in text.lines() {
+        if let Some(fname) = line.strip_prefix("FILE: ") {
+            if let Some(file) = current_file.take() {
+                let body = current_lines.join("\n").trim().to_string();
+                if !body.is_empty() { sections.push((file, body)); }
+                current_lines.clear();
+            }
+            current_file = Some(fname.trim().to_string());
+        } else if current_file.is_some() {
+            current_lines.push(line);
+        }
+    }
+    if let Some(file) = current_file {
+        let body = current_lines.join("\n").trim().to_string();
+        if !body.is_empty() { sections.push((file, body)); }
+    }
+    sections
+}
+
+/// Read the text that should be embedded for a given field from a paper.
+fn field_text(
+    field:   &str,
+    paper:   &crate::db::PaperFull,
+    pdf_dir: &std::path::Path,
+) -> Option<String> {
+    match field {
+        "title"  => Some(paper.title.clone()),
+        "abstract" => paper.attributes.iter()
+            .find(|a| a.key == "abstract")
+            .map(|a| a.value.clone())
+            .filter(|s| !s.is_empty()),
+        "hashtags" => {
+            let t = paper.hashtags.join(", ");
+            if t.is_empty() { None } else { Some(t) }
+        }
+        "notes" => paper.notes.clone().filter(|n| !n.is_empty()),
+        "pdf"   => paper.pdf_path.as_deref()
+            .filter(|p| !p.is_empty())
+            .and_then(|p| crate::api_client::extract_pdf_text(p).ok()),
+        _ if field.starts_with("md_") => {
+            let suffix = &field[3..];
+            let uppercase = suffix.to_uppercase();
+            // Try UPPERCASE.md first, then suffix.md.
+            std::fs::read_to_string(pdf_dir.join(format!("{uppercase}.md"))).ok()
+                .or_else(|| std::fs::read_to_string(pdf_dir.join(format!("{suffix}.md"))).ok())
+        }
+        _ => None,
+    }
+}
+
+/// Generate per-section MD files for a paper using the best available API.
+/// Writes Overview.md, Motivation.md, Contributions.md, Method.md,
+/// Experiments.md, Limitations.md, Takeaways.md into `pdf_dir`.
+fn generate_paper_md(
+    paper:   &crate::db::PaperFull,
+    pdf_dir: &std::path::Path,
+    keys:    &crate::api_client::ApiKeys,
+) {
+    let pdf_text = paper.pdf_path.as_deref()
+        .filter(|p| !p.is_empty())
+        .and_then(|p| crate::api_client::extract_pdf_text(p).ok())
+        .unwrap_or_default();
+
+    let system = "You are an expert research assistant.\n\
+        Read the provided PDF and generate a paper summary.\n\n\
+        IMPORTANT OUTPUT FORMAT:\n\n\
+        Your entire response MUST consist of a sequence of files.\n\n\
+        Each file MUST begin with:\n\n\
+        FILE: <filename>\n\n\
+        Rules:\n\
+        1. Output only file contents.\n\
+        2. Do not wrap files in code blocks.\n\
+        3. Do not add explanations before or after the files.\n\
+        4. Every file must start with exactly: FILE: <filename>\n\
+        5. Use Markdown formatting inside each file.\n\
+        6. Use only information explicitly stated in the PDF.\n\
+        7. If information is missing, write: Not specified in the paper.";
+
+    let user = format!(
+        "PDF content:\n{pdf}\n\n\
+         Generate the following files:\n\n\
+         FILE: Overview.md\n\
+         Contents:\n\
+         - Title\n\
+         - Authors\n\
+         - Venue\n\
+         - Year\n\
+         - Abstract-style summary (300-500 words)\n\n\
+         FILE: Motivation.md\n\
+         Contents:\n\
+         - Problem statement\n\
+         - Research gap\n\
+         - Limitations of prior work\n\
+         - Motivation\n\
+         - Key observations\n\n\
+         FILE: Contributions.md\n\
+         Contents:\n\
+         - Complete list of contributions\n\
+         - Detailed explanation of each contribution\n\
+         - Novelty compared with prior work\n\n\
+         FILE: Method.md\n\
+         Contents:\n\
+         - Overall framework\n\
+         - Architecture\n\
+         - Mathematical formulations\n\
+         - Loss functions\n\
+         - Algorithms\n\
+         - Training procedure\n\
+         - Hyperparameters\n\
+         - Implementation details\n\n\
+         FILE: Experiments.md\n\
+         Contents:\n\
+         # Experimental Setup\n\
+         ## Datasets\n\
+         For every dataset: Name, Purpose, Number of samples (if provided), Task\n\
+         ## Evaluation Metrics\n\
+         ## Baselines\n\
+         ## Tested Models\n\
+         # Main Results\n\
+         For EVERY table and figure containing quantitative results:\n\
+         - Experiment name, Dataset, Metrics, Compared methods,\n\
+           Exact numerical results, Authors conclusions\n\
+         Include all reported performance numbers.\n\
+         # Ablation Studies\n\
+         For every ablation: Component changed, Settings, Results, Conclusions\n\
+         # Qualitative Results\n\
+         # Analysis\n\n\
+         FILE: Limitations.md\n\
+         Contents:\n\
+         - Limitations explicitly mentioned by the authors\n\
+         - Failure cases\n\
+         - Future work\n\n\
+         FILE: Takeaways.md\n\
+         Contents:\n\
+         - 5-10 key findings\n\
+         - Important insights\n\
+         - Practical implications\n\n\
+         Reminder:\n\
+         - Do not infer information.\n\
+         - Do not use external knowledge.\n\
+         - Report exact numbers whenever available.\n\
+         - Preserve equations and notation when useful.",
+        pdf = pdf_text,
+    );
+
+    let max_tokens = tauri::async_runtime::block_on(
+        crate::api_client::get_max_output_tokens(keys)
+    );
+    logger::log_info("generate_paper_md",
+        &format!("paper_id={} max_tokens={max_tokens}", paper.id));
+
+    let response = match tauri::async_runtime::block_on(
+        crate::api_client::generate(keys, system, &user, max_tokens)
+    ) {
+        Ok(r)  => r,
+        Err(e) => { logger::log_error("generate_paper_md", &e); return; }
+    };
+
+    let _ = std::fs::create_dir_all(pdf_dir);
+    for (filename, content) in parse_md_sections(&response) {
+        let _ = std::fs::write(pdf_dir.join(&filename), &content);
+    }
+    rebuild_paper_md(pdf_dir);
+    logger::log_info("generate_paper_md",
+        &format!("paper_id={} MD written to {}", paper.id, pdf_dir.display()));
+}
+
 // All PDF-related field keys that carry per-paper content from the paper.md.
 const PDF_EMBED_FIELDS: &[&str] = &[
-    "pdf", "md_summary", "md_motivation", "md_contribution", "md_method", "md_experiment",
+    "pdf", "md_summary", "md_motivation", "md_contribution",
+    "md_method", "md_methods", "md_experiment", "md_conclusion",
 ];
 
-/// Core PDF embedding worker.
+/// Embed a paper's fields in the background using cloud APIs.
 ///
-/// * `generate_md` = true  — first call `generate_paper_md` (fresh upload flow).
-/// * `generate_md` = false — skip generation, re-embed from existing paper.md (edit flow).
-///
-/// Silently no-ops if HF strategy is not active or if the sidecar fails.
+/// * `generate_md` = true  — generate paper.md sections first (fresh upload flow).
+/// * `generate_md` = false — skip generation, re-embed from existing .md files (edit flow).
 fn embed_pdf_in_background(
     app:         tauri::AppHandle,
     paper_id:    i64,
@@ -1742,83 +1176,110 @@ fn embed_pdf_in_background(
     logger::log_info("embed_pdf_in_background",
         &format!("paper_id={paper_id} generate_md={generate_md} spawning"));
     std::thread::spawn(move || {
-        // Read config — model and strategy used later.
-        let cfg: serde_json::Value = std::fs::read_to_string(data_dir.join("similarity_config.json"))
-            .ok()
-            .and_then(|raw| serde_json::from_str(&raw).ok())
-            .unwrap_or(serde_json::json!({}));
-        let model = cfg["model"].as_str().unwrap_or("gemma-4-E2B-it-Q4_K_M.gguf").to_string();
+        let sim_cfg: serde_json::Value = std::fs::read_to_string(
+            data_dir.join("similarity_config.json")
+        )
+        .ok()
+        .and_then(|r| serde_json::from_str(&r).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+
+        let model = sim_cfg["model"]
+            .as_str()
+            .unwrap_or("openai:text-embedding-3-small")
+            .to_string();
+
+        let keys = crate::api_client::ApiKeys::load(&data_dir);
 
         let state = app.state::<AppState>();
-        let paper_val = match tauri::async_runtime::block_on(
+        let paper = match tauri::async_runtime::block_on(
             crate::db::get_paper(&state.pool(), paper_id)
         ) {
-            Ok(p)  => match serde_json::to_value(p) { Ok(v) => v, Err(_) => return },
-            Err(_) => return,
+            Ok(p)  => p,
+            Err(e) => {
+                logger::log_error("embed_pdf_in_background",
+                    &format!("paper_id={paper_id} db error: {e}"));
+                return;
+            }
         };
 
-        // Step 1: Generate paper.md (fresh upload only, regardless of embedding strategy).
-        // Silently skipped if the sidecar is not yet set up.
+        let pdf_dir = pdfs_dir.join(paper_id.to_string());
+
+        // Step 1 — extract raw PDF text and store as PDF_TEXT.md (fresh upload only).
+        // Runs regardless of API availability so the text is always persisted.
         if generate_md {
-            logger::log_info("embed_pdf_in_background",
-                &format!("paper_id={paper_id} calling generate_paper_md"));
-            if let Ok(mut guard) = ensure_running(&state, &app) {
-                let _: Result<serde_json::Value, String> = guard.as_mut().unwrap().call(
-                    "generate_paper_md",
-                    serde_json::json!({ "paper": &paper_val, "config": {} }),
-                );
-                // Don't abort on failure — embedding can still fall back to raw text.
-            } else {
-                logger::log_error("embed_pdf_in_background",
-                    &format!("paper_id={paper_id} sidecar unavailable, MD skipped"));
+            if let Some(pdf_path) = paper.pdf_path.as_deref().filter(|p| !p.is_empty()) {
+                match crate::api_client::extract_pdf_text(pdf_path) {
+                    Ok(text) if !text.trim().is_empty() => {
+                        let content = format!("# PDF Text\n\n{text}");
+                        let out = pdf_dir.join("PDF_TEXT.md");
+                        match std::fs::write(&out, &content) {
+                            Ok(_) => {
+                                rebuild_paper_md(&pdf_dir);
+                                logger::log_info("embed_pdf_in_background",
+                                    &format!("paper_id={paper_id} PDF_TEXT.md written ({} chars)", text.len()));
+                            }
+                            Err(e) => logger::log_error("embed_pdf_in_background",
+                                &format!("paper_id={paper_id} write PDF_TEXT.md: {e}")),
+                        }
+                    }
+                    Ok(_)  => logger::log_info("embed_pdf_in_background",
+                        &format!("paper_id={paper_id} PDF text extraction returned empty")),
+                    Err(e) => logger::log_error("embed_pdf_in_background",
+                        &format!("paper_id={paper_id} PDF text extraction failed: {e}")),
+                }
             }
         }
 
-        // Step 2: embed pdf + all md_* fields (reads paper.md written in step 1).
-        // Only runs when the HF embeddings strategy is active.
-        if cfg["strategy"].as_str() != Some("hf-embeddings") { return; }
-        logger::log_info("embed_pdf_in_background", &format!("paper_id={paper_id} model={model}"));
-        let py_config = serde_json::json!({
-            "model":  &model,
-            "fields": PDF_EMBED_FIELDS,
-        });
-        let result = match ensure_running(&state, &app) {
-            Ok(mut guard) => {
-                let r: Result<serde_json::Value, String> = guard.as_mut().unwrap().call(
-                    "compute_embedding",
-                    serde_json::json!({ "paper": paper_val, "config": py_config }),
-                );
-                drop(guard);
-                match r { Ok(v) => v, Err(_) => return }
-            }
-            Err(_) => return,
-        };
+        // Step 2 — generate AI summary sections (fresh upload + API available).
+        if generate_md && keys.has_any() {
+            logger::log_info("embed_pdf_in_background",
+                &format!("paper_id={paper_id} generating MD"));
+            generate_paper_md(&paper, &pdf_dir, &keys);
+        }
 
-        let field_vectors = result.get("field_vectors").cloned()
-            .unwrap_or(serde_json::Value::Object(Default::default()));
-        // pdfs_dir is projects/<slug>/pdfs/; parent is projects/<slug>/
+        // Step 2 — embed fields (only when HF strategy is active).
+        if sim_cfg["strategy"].as_str() != Some("hf-embeddings") { return; }
+        if !keys.has_any() { return; }
+
+        let has_pdf = paper.pdf_path.as_deref().map(|p| !p.is_empty()).unwrap_or(false);
+
+        let mut field_vectors: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+        for &field in PDF_EMBED_FIELDS.iter()
+            .filter(|&&f| has_pdf || (f != "pdf" && !f.starts_with("md_")))
+        {
+            let text = match field_text(field, &paper, &pdf_dir) {
+                Some(t) if !t.is_empty() => t,
+                _ => continue,
+            };
+            match tauri::async_runtime::block_on(
+                crate::api_client::embed(&keys, &model, &text)
+            ) {
+                Ok(vec) => {
+                    field_vectors.insert(
+                        field.to_string(),
+                        serde_json::Value::Array(
+                            vec.iter().map(|&v| serde_json::json!(v)).collect()
+                        ),
+                    );
+                }
+                Err(e) => logger::log_error("embed_pdf_in_background", &e),
+            }
+        }
+
         let emb_dir = pdfs_dir.parent()
             .map(|d| d.join("embeddings"))
             .unwrap_or_else(|| pdfs_dir.join("embeddings"));
         let _ = std::fs::create_dir_all(&emb_dir);
         let emb_path   = emb_dir.join(format!("{paper_id}.json"));
         let written_at = chrono_now_iso();
-        let _ = write_merged_embedding(&emb_path, &model, &field_vectors, &written_at);
+        let fv = serde_json::Value::Object(field_vectors);
+        let _ = write_merged_embedding(&emb_path, &model, &fv, &written_at);
         logger::log_info("embed_pdf_in_background",
             &format!("paper_id={paper_id} embeddings written"));
     });
 }
 
-/// Re-encode every paper in the current project unconditionally.
-///
-/// Called when the user presses "Cache All Embeddings" — always writes fresh
-/// field_vectors for every paper regardless of any existing cache.  This
-/// guarantees that the stored raw vectors are up-to-date before
-/// hf_compute_edges_from_cache recomposes them with the current weights.
-///
-/// The "pdf" field is always included in the fields list so that papers which
-/// have a PDF uploaded will have a visual embedding extracted via the VL model.
-/// Papers without a pdf_path silently skip the pdf field in Python.
+/// Re-encode every paper in the current project using cloud API embeddings.
 ///
 /// Progress events: { paper_id, title, index, total, done? }
 ///
@@ -1832,22 +1293,19 @@ pub fn hf_compute_all_embeddings(
 ) -> CmdResult<serde_json::Value> {
     logger::log_call("hf_compute_all_embeddings");
 
-    let model = config["model"].as_str()
-        .unwrap_or("google/gemma-3-1b-it")
+    let model = config["model"]
+        .as_str()
+        .unwrap_or("openai:text-embedding-3-small")
         .to_string();
-    let skip_fresh_log = config["skip_fresh"].as_bool().unwrap_or(false);
-    logger::log_info("hf_compute_all_embeddings", &format!("model={model} skip_fresh={skip_fresh_log}"));
-    
-    // Always include "pdf" so papers with a PDF get a text-extracted embedding.
-    // Deduplicate in case the caller already included it.
-    let mut fields: Vec<String> = config["fields"]
+    let skip_fresh = config["skip_fresh"].as_bool().unwrap_or(false);
+    logger::log_info("hf_compute_all_embeddings",
+        &format!("model={model} skip_fresh={skip_fresh}"));
+
+    let fields: Vec<String> = config["fields"]
         .as_array()
         .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
         .unwrap_or_else(|| vec!["title".into(), "abstract".into(), "hashtags".into()]);
 
-    // Load papers and pre-compute embedding paths synchronously before spawning
-    // the background thread — avoids passing the non-Send State<'_> reference
-    // across the thread boundary.
     let papers: Vec<crate::db::PaperFull> = {
         let pool = s.pool();
         tauri::async_runtime::block_on(crate::db::get_all_papers(&pool))
@@ -1856,77 +1314,57 @@ pub fn hf_compute_all_embeddings(
 
     let emb_dir = s.projects_dir.join(s.current_slug()).join("embeddings");
     std::fs::create_dir_all(&emb_dir).ok();
-    let embedding_paths: Vec<std::path::PathBuf> = papers.iter()
-        .map(|p| emb_dir.join(format!("{}.json", p.id)))
-        .collect();
 
-    // skip_fresh: when true, papers whose embedding is already up-to-date are
-    // skipped — only stale or missing embeddings are re-encoded.
-    let skip_fresh = config["skip_fresh"].as_bool().unwrap_or(false);
-
-    // Pre-filter when skip_fresh is requested.  Each paper carries its own
-    // fields-to-encode list so we avoid redundant re-encoding:
-    //   • stale or wrong model  → encode all selected fields
-    //   • fresh, fields missing → encode only the missing fields
-    //   • fully fresh           → skip this paper entirely
     let work: Vec<(crate::db::PaperFull, std::path::PathBuf, Vec<String>)> = papers
         .into_iter()
-        .zip(embedding_paths.into_iter())
-        .filter_map(|(paper, emb_path)| {
-            // Exclude "pdf" for papers that have no uploaded PDF file.  Python
-            // cannot produce a pdf vector without content, so keeping "pdf" in
-            // the list causes those papers to appear perpetually stale (the key
-            // is always "missing" from the cache), wasting a Python call every
-            // recompute with only one pseudo-embedding (title fallback).
-            let has_pdf = paper.pdf_path.as_deref().map(|p| !p.is_empty()).unwrap_or(false);
-            // Exclude pdf and md_* fields for papers without an uploaded PDF.
+        .map(|paper| {
+            let emb_path = emb_dir.join(format!("{}.json", paper.id));
+            let has_pdf  = paper.pdf_path.as_deref().map(|p| !p.is_empty()).unwrap_or(false);
             let effective_fields: Vec<String> = fields.iter()
-                .filter(|f| (*f != "pdf" && !f.starts_with("md_")) || has_pdf)
+                .filter(|f| has_pdf || (*f != "pdf" && !f.starts_with("md_")))
                 .cloned()
                 .collect();
-
-            if !skip_fresh {
-                return Some((paper, emb_path, effective_fields));
-            }
-            let cache_val = read_embedding_cache(&emb_path);
-            let entry_opt = cache_val.as_ref().and_then(|c| get_model_entry(c, &model));
-            match entry_opt {
-                Some(ref entry) if !is_embedding_stale(&paper.updated_at, entry) => {
-                    // Model matches and paper content is fresh — encode only missing fields.
-                    let fv = entry["field_vectors"].as_object();
-                    let missing: Vec<String> = effective_fields.iter()
-                        .filter(|f| fv.map(|m| !m.contains_key(f.as_str())).unwrap_or(true))
+            (paper, emb_path, effective_fields)
+        })
+        .filter_map(|(paper, emb_path, eff_fields)| {
+            if !skip_fresh { return Some((paper, emb_path, eff_fields)); }
+            let cache = read_embedding_cache(&emb_path);
+            let entry  = cache.as_ref().and_then(|c| get_model_entry(c, &model));
+            match entry {
+                Some(ref e) if !is_embedding_stale(&paper.updated_at, e) => {
+                    let missing: Vec<String> = eff_fields.iter()
+                        .filter(|f| e["field_vectors"].as_object()
+                            .map(|m| !m.contains_key(f.as_str()))
+                            .unwrap_or(true))
                         .cloned()
                         .collect();
-                    if missing.is_empty() {
-                        None  // All fields cached and fresh — skip entirely.
-                    } else {
-                        Some((paper, emb_path, missing))
-                    }
+                    if missing.is_empty() { None } else { Some((paper, emb_path, missing)) }
                 }
-                _ => Some((paper, emb_path, effective_fields)),
+                _ => Some((paper, emb_path, eff_fields)),
             }
         })
         .collect();
 
     let total = work.len();
-    logger::log_info("hf_compute_all_embeddings", &format!("papers to encode: {total}"));
+    logger::log_info("hf_compute_all_embeddings",
+        &format!("papers to encode: {total}"));
 
-    // Emit "started" immediately so the JS overlay appears before the thread runs.
     let _ = app.emit("embedding://progress", serde_json::json!({
         "started": true,
         "total":   total,
     }));
 
-    // Shared config values passed into the background thread.
-    // Per-paper `fields` lists are stored in `work` and used to build each
-    // paper's Python config inside the loop.
-    let weights  = config.get("weights").cloned().unwrap_or(serde_json::Value::Object(Default::default()));
-    let vl_model = config.get("vl_model").cloned().unwrap_or(serde_json::Value::Null);
+    let data_dir = s.data_dir.clone();
 
-    // Spawn encoding loop on a background thread — command returns immediately
-    // so Tauri can deliver per-paper progress events to the JS event loop.
     std::thread::spawn(move || {
+        let keys = crate::api_client::ApiKeys::load(&data_dir);
+        if !keys.has_any() {
+            let _ = app.emit("embedding://error", serde_json::json!({
+                "error": "No API key configured. Add an OpenAI key in App Settings."
+            }));
+            return;
+        }
+
         let mut computed = 0usize;
 
         for (index, (paper, emb_path, paper_fields)) in work.iter().enumerate() {
@@ -1941,57 +1379,45 @@ pub fn hf_compute_all_embeddings(
                 "total":    total,
             }));
 
-            let paper_val = match serde_json::to_value(paper.clone()) {
-                Ok(v) => v,
-                Err(e) => {
-                    let _ = app.emit("embedding://error", serde_json::json!({ "error": e.to_string() }));
-                    return;
-                }
-            };
+            let pdf_dir = emb_path.parent()
+                .and_then(|p| p.parent())
+                .map(|p| p.join("pdfs").join(paper.id.to_string()))
+                .unwrap_or_else(|| std::path::PathBuf::from(""));
 
-            // Build a per-paper config with only the fields this paper needs.
-            let paper_config = serde_json::json!({
-                "model":    &model,
-                "fields":   paper_fields,
-                "weights":  &weights,
-                "vl_model": &vl_model,
-            });
-
-            let state = app.state::<AppState>();
-            let result = match ensure_running(&state, &app) {
-                Ok(mut guard) => {
-                    let r: Result<serde_json::Value, String> = guard.as_mut().unwrap().call(
-                        "compute_embedding",
-                        serde_json::json!({ "paper": paper_val, "config": &paper_config }),
-                    );
-                    drop(guard);
-                    match r {
-                        Ok(v) => v,
-                        Err(e) => {
-                            let _ = app.emit("embedding://error", serde_json::json!({ "error": e }));
-                            return;
-                        }
+            let mut field_vectors: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+            for field in paper_fields {
+                let text = match field_text(field, paper, &pdf_dir) {
+                    Some(t) if !t.is_empty() => t,
+                    _ => continue,
+                };
+                match tauri::async_runtime::block_on(
+                    crate::api_client::embed(&keys, &model, &text)
+                ) {
+                    Ok(vec) => {
+                        field_vectors.insert(
+                            field.clone(),
+                            serde_json::Value::Array(
+                                vec.iter().map(|&v| serde_json::json!(v)).collect()
+                            ),
+                        );
+                    }
+                    Err(e) => {
+                        let _ = app.emit("embedding://error", serde_json::json!({ "error": &e }));
+                        logger::log_error("hf_compute_all_embeddings", &e);
+                        return;
                     }
                 }
-                Err(e) => {
-                    let _ = app.emit("embedding://error", serde_json::json!({ "error": e }));
-                    return;
-                }
-            };
-            
-            let field_vectors = result.get("field_vectors").cloned()
-                .unwrap_or(serde_json::Value::Object(Default::default()));
-            
-            // Merge new vectors into the existing cache (preserve unrelated fields).
+            }
+
             let written_at = chrono_now_iso();
-            if let Err(e) = write_merged_embedding(emb_path, &model, &field_vectors, &written_at) {
-                let _ = app.emit("embedding://error", serde_json::json!({ "error": e }));
+            let fv = serde_json::Value::Object(field_vectors);
+            if let Err(e) = write_merged_embedding(emb_path, &model, &fv, &written_at) {
+                let _ = app.emit("embedding://error", serde_json::json!({ "error": &e }));
                 return;
             }
             computed += 1;
         }
 
-        // Final done event — JS resolves its waiting promise on this.
         let _ = app.emit("embedding://progress", serde_json::json!({
             "done":     true,
             "total":    total,
@@ -1999,25 +1425,9 @@ pub fn hf_compute_all_embeddings(
         }));
     });
 
-    // Return immediately — JS awaits embedding://progress { done: true }.
     Ok(serde_json::json!({ "ok": true, "background": true, "total": total }))
 }
 
-/// Compute similarity edges entirely from cached field_vectors on disk.
-///
-/// This is the second half of the recompute flow:
-///   1. hf_compute_all_embeddings  — re-encodes every paper → writes field_vectors to JSON
-///   2. hf_compute_edges_from_cache — reads JSON, applies current weights, computes cosines
-///
-/// No Python sidecar call is made here.  For every paper the function:
-///   a. Reads its embedding.json
-///   b. Recomposes the weighted composite with recompose_embedding()
-///   c. Computes pairwise cosine similarity in Rust
-///   d. Applies threshold and max-edges to produce the final edge list
-///
-/// Returns: { edges: [{ source_id, target_id, similarity, weight, edge_type }], count }
-///
-/// Called from JS as: invoke("hf_compute_edges_from_cache", { papers, config })
 #[tauri::command]
 pub fn hf_compute_edges_from_cache(
     s:      State<'_, AppState>,
@@ -2143,26 +1553,6 @@ pub fn save_similarity_config(
     let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
     std::fs::write(path, json).map_err(|e| e.to_string())
 }
-// ── Plugin validation ────────────────────────────────────────────────────────
-
-/// Ask the running sidecar to validate a plugin script.
-/// The sidecar imports the file and checks for `similarity_fn` and
-/// `compute_embedding_fn` without permanently loading it.
-///
-/// Called from JS as: invoke("hf_validate_plugin", { scriptPath })
-/// Returns: { valid: bool, has_similarity_fn: bool, has_embedding_fn: bool, error?: str }
-#[tauri::command]
-pub fn hf_validate_plugin(
-    app:         tauri::AppHandle,
-    s:           State<'_, AppState>,
-    script_path: String,
-) -> CmdResult<serde_json::Value> {
-    logger::log_call("hf_validate_plugin");
-    let mut guard = ensure_running(&s, &app)?;
-    guard.as_mut().unwrap()
-        .call("validate_plugin", serde_json::json!({ "script_path": script_path }))
-}
-
 // ── App config persistence ────────────────────────────────────────────────────
 // app_data_dir/app_config.json — stores user preferences that affect app
 // behaviour across all projects: custom sidecar script path, custom HF models.
@@ -2180,7 +1570,7 @@ pub fn get_app_config(s: State<'_, AppState>) -> CmdResult<serde_json::Value> {
     logger::log_call("get_app_config");
     let path = s.data_dir.join("app_config.json");
     if !path.exists() {
-        return Ok(serde_json::json!({ "sidecar_script": null, "custom_models": [] }));
+        return Ok(serde_json::json!({ "openai_api_key": null, "anthropic_api_key": null }));
     }
     let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
     serde_json::from_str(&raw).map_err(|e| e.to_string())
@@ -2207,44 +1597,8 @@ pub fn save_app_config(
 /// This lighter alternative simply validates a path the user typed or pasted
 /// directly into the settings input, keeping the dependency surface minimal.
 #[tauri::command]
-pub fn pick_sidecar_script(path: String) -> CmdResult<serde_json::Value> {
-    logger::log_call("pick_sidecar_script");
-    let p = std::path::Path::new(&path);
-    let exists   = p.exists();
-    let readable = exists && std::fs::read(&p).is_ok();
-    Ok(serde_json::json!({ "path": path, "exists": exists, "readable": readable }))
-}
-
-/// Return the resolved sidecar script path and whether it is a user override.
-/// JS calls this to show which script is currently active.
-///
-/// Returns: { path: str, is_custom: bool }
-#[tauri::command]
-pub fn get_sidecar_script_info(s: State<'_, AppState>) -> CmdResult<serde_json::Value> {
-    logger::log_call("get_sidecar_script_info");
-    // Check for user override in app_config.json
-    let cfg_path = s.data_dir.join("app_config.json");
-    if cfg_path.exists() {
-        if let Ok(raw) = std::fs::read_to_string(&cfg_path) {
-            if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&raw) {
-                if let Some(p) = cfg["sidecar_script"].as_str() {
-                    if !p.is_empty() && std::path::Path::new(p).exists() {
-                        return Ok(serde_json::json!({ "path": p, "is_custom": true }));
-                    }
-                }
-            }
-        }
-    }
-    Ok(serde_json::json!({
-        "path":      s.sidecar_script(),
-        "is_custom": false,
-    }))
-}
-
-/// Open a directory in the OS file manager (Finder / Explorer / Nautilus).
-/// Creates the directory first if it doesn't exist.
-#[tauri::command]
 pub fn open_folder(path: String) -> CmdResult<()> {
+    logger::log_call("open_folder");
     use std::process::Command;
     let p = std::path::Path::new(&path);
     if !p.exists() {
@@ -2262,8 +1616,8 @@ pub fn open_folder(path: String) -> CmdResult<()> {
 /// Return key data-directory paths so the frontend can display and open them.
 #[tauri::command]
 pub fn get_dirs(s: State<'_, AppState>) -> CmdResult<serde_json::Value> {
+    logger::log_call("get_dirs");
     Ok(serde_json::json!({
         "data_dir":   s.data_dir.to_string_lossy(),
-        "models_dir": s.models_dir().to_string_lossy(),
     }))
 }

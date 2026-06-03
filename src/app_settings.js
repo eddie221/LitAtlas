@@ -1,6 +1,5 @@
 "use strict";
 
-import { refreshModelSelect } from "./similarity_settings.js";
 
 /**
  * app_settings.js — App Settings panel (tabbed).
@@ -25,11 +24,11 @@ const invoke = (
 // ── Config I/O ────────────────────────────────────────────────────────────────
 
 async function _loadConfig() {
-  if (!invoke) return { sidecar_script: null, custom_models: [] };
+  if (!invoke) return {};
   try {
-    return await invoke("get_app_config") ?? { sidecar_script: null, custom_models: [] };
+    return await invoke("get_app_config") ?? {};
   } catch (_) {
-    return { sidecar_script: null, custom_models: [] };
+    return {};
   }
 }
 
@@ -38,19 +37,9 @@ async function _saveConfig(cfg) {
   await invoke("save_app_config", { config: cfg });
 }
 
-async function _loadSimConfig() {
-  if (!invoke) return {};
-  try { return await invoke("get_similarity_config") ?? {}; } catch (_) { return {}; }
-}
-
-async function _saveSimConfig(simCfg) {
-  if (!invoke) return;
-  await invoke("save_similarity_config", { config: simCfg });
-}
-
 async function _loadDirs() {
-  if (!invoke) return { data_dir: "", models_dir: "" };
-  try { return await invoke("get_dirs") ?? { data_dir: "", models_dir: "" }; } catch (_) { return { data_dir: "", models_dir: "" }; }
+  if (!invoke) return { data_dir: "" };
+  try { return await invoke("get_dirs") ?? { data_dir: "" }; } catch (_) { return { data_dir: "" }; }
 }
 
 // ── Open / close ──────────────────────────────────────────────────────────────
@@ -75,141 +64,34 @@ async function _renderAppSettings(panel) {
   if (!body) return;
   body.innerHTML = `<div class="app-cfg-loading">Loading…</div>`;
 
-  const [cfg, scriptInfo, simCfg, dirs] = await Promise.all([
-    _loadConfig(),
-    invoke
-      ? invoke("get_sidecar_script_info").catch(() => ({ path: "(unknown)", is_custom: false }))
-      : Promise.resolve({ path: "(unavailable)", is_custom: false }),
-    _loadSimConfig(),
-    _loadDirs(),
-  ]);
+  const [cfg, dirs] = await Promise.all([_loadConfig(), _loadDirs()]);
 
-  const customModels  = cfg.custom_models ?? [];
   const currentFontPx = window.LitAtlas?.getUiFontSize?.() ?? 20;
-  body.innerHTML = _buildHTML(cfg, scriptInfo, customModels, currentFontPx, simCfg, dirs);
+  body.innerHTML = _buildHTML(cfg, currentFontPx, dirs);
   _wireTabNav(body);
-  _wireEvents(body, cfg, scriptInfo, customModels, simCfg, dirs);
+  _wireEvents(body, cfg, dirs);
 }
 
 // ── Built-in models (must match similarity_server.py AVAILABLE_MODELS) ────────
 
-const _BUILTIN_MODELS = [
-  {
-    id:          "gemma-4-E2B-it-Q4_K_M.gguf",
-    repo_id:     "unsloth/gemma-4-E2B-it-GGUF",
-    label:       "Gemma 4 E2B Instruct (Q4_K_M)",
-    description: "Multimodal: text embeddings + visual understanding of PDF pages.",
-    size_mb:     1200,
-    type:        "multimodal",
-  },
-  {
-    id:          "nomic-embed-text-v1.5.Q4_K_M.gguf",
-    repo_id:     "nomic-ai/nomic-embed-text-v1.5-GGUF",
-    label:       "Nomic Embed Text v1.5 (Q4_K_M)",
-    description: "Fast, high-quality text-only embeddings (~274 MB).",
-    size_mb:     274,
-    type:        "embedding",
-  },
-];
-
 // ── HTML builder ──────────────────────────────────────────────────────────────
 
-function _buildHTML(cfg, scriptInfo, customModels, currentFontPx, simCfg, dirs) {
+function _buildHTML(cfg, currentFontPx, dirs) {
   return `
     <div class="app-cfg-tab-bar">
-      <button class="app-cfg-tab-btn active" data-tab="models">Models</button>
+      <button class="app-cfg-tab-btn active" data-tab="api">API Keys</button>
       <button class="app-cfg-tab-btn" data-tab="display">Display</button>
-      <button class="app-cfg-tab-btn" data-tab="api">API</button>
       <button class="app-cfg-tab-btn" data-tab="advanced">Advanced</button>
     </div>
 
-    <div class="app-cfg-tab-pane active" data-tab-pane="models">
-      ${_buildModelsTab(cfg, simCfg, customModels, dirs)}
+    <div class="app-cfg-tab-pane active" data-tab-pane="api">
+      ${_buildApiTab(cfg, dirs)}
     </div>
     <div class="app-cfg-tab-pane" data-tab-pane="display">
       ${_buildDisplayTab(currentFontPx)}
     </div>
-    <div class="app-cfg-tab-pane" data-tab-pane="api">
-      ${_buildApiTab(cfg, scriptInfo)}
-    </div>
     <div class="app-cfg-tab-pane" data-tab-pane="advanced">
-      ${_buildAdvancedTab(customModels)}
-    </div>`;
-}
-
-// ── Models tab ────────────────────────────────────────────────────────────────
-
-function _buildModelsTab(cfg, simCfg, customModels, dirs) {
-  const activeModel  = simCfg?.model ?? "gemma-4-E2B-it-Q4_K_M.gguf";
-  const modelsDir    = cfg.models_dir || dirs.models_dir || "";
-  const dataDir      = dirs.data_dir  || "";
-
-  const allModels = [
-    ..._BUILTIN_MODELS,
-    ...customModels.map(m => ({ id: m.id, label: m.label || m.id, description: "", size_mb: m.size_mb ?? null, type: "custom" })),
-  ];
-
-  const modelCards = allModels.map(m => {
-    const isActive = m.id === activeModel;
-    return `
-      <div class="app-cfg-model-card ${isActive ? "active" : ""}" data-model-id="${_esc(m.id)}">
-        <div class="app-cfg-model-card-header">
-          <div class="app-cfg-model-card-name">${_esc(m.label)}</div>
-          ${m.size_mb ? `<div class="app-cfg-model-card-size">${m.size_mb} MB</div>` : ""}
-        </div>
-        ${m.description ? `<div class="app-cfg-model-card-desc">${_esc(m.description)}</div>` : ""}
-        <div class="app-cfg-model-card-footer">
-          <span class="app-cfg-model-card-type">${_esc(m.type)}</span>
-          ${isActive
-            ? `<span class="app-cfg-model-active-badge">Active</span>`
-            : `<button class="btn app-cfg-model-select-btn" data-model-id="${_esc(m.id)}">Use this model</button>`}
-        </div>
-      </div>`;
-  }).join("");
-
-  return `
-    <div class="app-cfg-section">
-      <div class="app-cfg-section-title">Active Model</div>
-      <div class="app-cfg-hint">
-        Select which GGUF model is used for AI similarity. Download models from
-        <em>Similarity Settings</em>. Changes take effect on the next edge recompute.
-      </div>
-      <div id="app-cfg-model-cards">${modelCards}</div>
-      <div id="app-cfg-model-select-status" class="app-cfg-status"></div>
-    </div>
-
-    <div class="app-cfg-section">
-      <div class="app-cfg-section-title">Models Folder</div>
-      <div class="app-cfg-hint">
-        Where GGUF model files are stored. Leave blank to use the default location.
-        Takes effect on next engine start.
-      </div>
-      <div class="app-cfg-dir-row">
-        <input id="app-cfg-models-dir-input" class="app-cfg-input"
-               type="text" placeholder="Default: ${_esc(dirs.models_dir)}"
-               value="${_esc(cfg.models_dir ?? "")}" spellcheck="false">
-        <button id="app-cfg-models-dir-open" class="btn app-cfg-folder-btn"
-                title="Open models folder" data-path="${_esc(modelsDir)}">
-          <i class="bi bi-folder2-open"></i>
-        </button>
-      </div>
-      <div class="app-cfg-script-actions">
-        <button id="app-cfg-models-dir-save" class="btn btn-new-paper">Apply</button>
-        ${cfg.models_dir ? `<button id="app-cfg-models-dir-reset" class="btn app-cfg-reset-btn">↺ Reset to Default</button>` : ""}
-      </div>
-      <div id="app-cfg-models-dir-status" class="app-cfg-status"></div>
-    </div>
-
-    <div class="app-cfg-section">
-      <div class="app-cfg-section-title">App Data Folder</div>
-      <div class="app-cfg-hint">All LitAtlas data (projects, configs, embeddings) lives here.</div>
-      <div class="app-cfg-dir-display">
-        <span class="app-cfg-path-value" title="${_esc(dataDir)}">${_esc(_shortenPath(dataDir))}</span>
-        <button class="btn app-cfg-folder-btn" id="app-cfg-data-dir-open"
-                title="Open app data folder" data-path="${_esc(dataDir)}">
-          <i class="bi bi-folder2-open"></i>
-        </button>
-      </div>
+      ${_buildAdvancedTab()}
     </div>`;
 }
 
@@ -238,104 +120,113 @@ function _buildDisplayTab(currentFontPx) {
 
 // ── API tab ───────────────────────────────────────────────────────────────────
 
-function _buildApiTab(cfg, scriptInfo) {
-  const scriptPath = cfg.sidecar_script ?? "";
-  const activePath = scriptInfo?.path ?? "(unknown)";
-  const isCustom   = scriptInfo?.is_custom === true;
+function _buildApiTab(cfg, dirs) {
+  const dataDir = dirs?.data_dir ?? "";
 
   return `
     <div class="app-cfg-section">
-      <div class="app-cfg-section-title">HuggingFace API Token</div>
+      <div class="app-cfg-section-title">OpenAI API Key</div>
       <div class="app-cfg-hint">
-        Required to download gated models such as
-        <code>google/gemma-3-1b-it</code>.
-        Generate a token at <code>huggingface.co/settings/tokens</code>,
-        accept the model license on the model page, then paste the token here.
-        The token is stored locally and never sent anywhere except HuggingFace.
+        Used for embedding models (<code>text-embedding-3-small/large</code>)
+        and GPT-4o-mini for AI summary generation.
+        Generate a key at <code>platform.openai.com/api-keys</code>.
       </div>
       <div class="app-cfg-script-row">
-        <input id="app-cfg-hf-token" class="app-cfg-input"
-               type="password" placeholder="hf_…"
-               value="${_esc(cfg.hf_token ?? "")}" autocomplete="off" spellcheck="false">
-        <button id="app-cfg-hf-token-show" class="btn" title="Show / hide token"
+        <input id="app-cfg-openai-key" class="app-cfg-input"
+               type="password" placeholder="sk-…"
+               value="${_esc(cfg.openai_api_key ?? "")}" autocomplete="off" spellcheck="false">
+        <button id="app-cfg-openai-key-show" class="btn" title="Show / hide key"
                 style="flex-shrink:0">
           <i class="bi bi-eye"></i>
         </button>
       </div>
       <div class="app-cfg-script-actions">
-        <button id="app-cfg-hf-token-save" class="btn btn-new-paper">Save Token</button>
-        <button id="app-cfg-hf-token-clear" class="btn app-cfg-reset-btn"
-                ${!(cfg.hf_token) ? "disabled" : ""}>Clear</button>
+        <button id="app-cfg-openai-key-save" class="btn btn-new-paper">Save Key</button>
+        <button id="app-cfg-openai-key-clear" class="btn app-cfg-reset-btn"
+                ${!cfg.openai_api_key ? "disabled" : ""}>Clear</button>
       </div>
-      <div id="app-cfg-hf-token-status" class="app-cfg-status"></div>
+      <div id="app-cfg-openai-key-status" class="app-cfg-status"></div>
     </div>
 
     <div class="app-cfg-section">
-      <div class="app-cfg-section-title">Similarity Engine Script</div>
+      <div class="app-cfg-section-title">Model API Endpoint</div>
       <div class="app-cfg-hint">
-        By default LitAtlas uses its bundled <code>similarity_server.py</code>.
-        You can specify a custom script that implements your own
-        <code>similarity_fn</code> and/or <code>compute_embedding_fn</code>.
-        The change takes effect the next time the engine starts.
+        Base URL for the OpenAI-compatible API. Leave blank to use the default
+        OpenAI endpoint. Set this for self-hosted models
+        (Ollama, LM Studio, Azure OpenAI, etc.).
       </div>
-
-      <div class="app-cfg-active-path">
-        <span class="app-cfg-path-label">Active:</span>
-        <span class="app-cfg-path-value ${isCustom ? "app-cfg-path-custom" : ""}"
-              title="${_esc(activePath)}">${_esc(_shortenPath(activePath))}</span>
-        ${isCustom
-          ? `<span class="app-cfg-badge app-cfg-badge-custom">custom</span>`
-          : `<span class="app-cfg-badge app-cfg-badge-default">default</span>`}
-      </div>
-
       <div class="app-cfg-script-row">
-        <input id="app-cfg-script-input" class="app-cfg-input"
-               type="text" placeholder="Absolute path to similarity_server.py…"
-               value="${_esc(scriptPath)}" spellcheck="false">
-        <button id="app-cfg-check-btn" class="btn" ${!scriptPath ? "disabled" : ""}>Check</button>
+        <input id="app-cfg-api-base-url" class="app-cfg-input"
+               type="text" placeholder="https://api.openai.com/v1"
+               value="${_esc(cfg.api_base_url ?? "")}" autocomplete="off" spellcheck="false">
       </div>
-
-      <div id="app-cfg-validate-area" class="app-cfg-validate-area" style="display:none"></div>
-
       <div class="app-cfg-script-actions">
-        <button id="app-cfg-validate-btn" class="btn" ${!scriptPath ? "disabled" : ""}>
-          Validate Hooks
-        </button>
-        <button id="app-cfg-script-save-btn" class="btn btn-new-paper">
-          Apply Script
-        </button>
-        ${isCustom ? `<button id="app-cfg-reset-btn" class="btn app-cfg-reset-btn">↺ Reset to Default</button>` : ""}
+        <button id="app-cfg-api-base-url-save" class="btn btn-new-paper">Save URL</button>
+        <button id="app-cfg-api-base-url-test" class="btn">Test Connection</button>
+        <button id="app-cfg-api-base-url-clear" class="btn app-cfg-reset-btn"
+                ${!cfg.api_base_url ? "disabled" : ""}>Reset to Default</button>
       </div>
-      <div id="app-cfg-script-status" class="app-cfg-status"></div>
+      <div id="app-cfg-api-base-url-status" class="app-cfg-status"></div>
+      <div class="app-cfg-hint" style="margin-top:10px">
+        Embedding Pooling — how token vectors are combined into one embedding.
+        Required for generative models (e.g. llama.cpp with a chat model).
+        Leave blank for dedicated embedding models.
+      </div>
+      <div class="app-cfg-script-row" style="gap:8px">
+        <select id="app-cfg-api-pooling" class="app-cfg-input" style="flex:0 0 auto;width:auto">
+          <option value=""    ${!cfg.api_pooling              ? "selected" : ""}>(default)</option>
+          <option value="last"  ${ cfg.api_pooling==="last"   ? "selected" : ""}>last</option>
+          <option value="mean"  ${ cfg.api_pooling==="mean"   ? "selected" : ""}>mean</option>
+          <option value="cls"   ${ cfg.api_pooling==="cls"    ? "selected" : ""}>cls</option>
+          <option value="none"  ${ cfg.api_pooling==="none"   ? "selected" : ""}>none</option>
+        </select>
+        <button id="app-cfg-api-pooling-save" class="btn btn-new-paper">Save</button>
+      </div>
+      <div id="app-cfg-api-pooling-status" class="app-cfg-status"></div>
+    </div>
+
+    <div class="app-cfg-section">
+      <div class="app-cfg-section-title">Anthropic API Key</div>
+      <div class="app-cfg-hint">
+        Used for AI summary generation via Claude (preferred over OpenAI for generation).
+        Anthropic does not offer a public embedding API — similarity scoring
+        always uses OpenAI embeddings.
+        Generate a key at <code>console.anthropic.com/settings/keys</code>.
+      </div>
+      <div class="app-cfg-script-row">
+        <input id="app-cfg-anthropic-key" class="app-cfg-input"
+               type="password" placeholder="sk-ant-…"
+               value="${_esc(cfg.anthropic_api_key ?? "")}" autocomplete="off" spellcheck="false">
+        <button id="app-cfg-anthropic-key-show" class="btn" title="Show / hide key"
+                style="flex-shrink:0">
+          <i class="bi bi-eye"></i>
+        </button>
+      </div>
+      <div class="app-cfg-script-actions">
+        <button id="app-cfg-anthropic-key-save" class="btn btn-new-paper">Save Key</button>
+        <button id="app-cfg-anthropic-key-clear" class="btn app-cfg-reset-btn"
+                ${!cfg.anthropic_api_key ? "disabled" : ""}>Clear</button>
+      </div>
+      <div id="app-cfg-anthropic-key-status" class="app-cfg-status"></div>
+    </div>
+
+    <div class="app-cfg-section">
+      <div class="app-cfg-section-title">App Data Folder</div>
+      <div class="app-cfg-hint">All LitAtlas data (projects, configs, embeddings) lives here.</div>
+      <div class="app-cfg-dir-display">
+        <span class="app-cfg-path-value" title="${_esc(dataDir)}">${_esc(_shortenPath(dataDir))}</span>
+        <button class="btn app-cfg-folder-btn" id="app-cfg-data-dir-open"
+                title="Open app data folder" data-path="${_esc(dataDir)}">
+          <i class="bi bi-folder2-open"></i>
+        </button>
+      </div>
     </div>`;
 }
 
 // ── Advanced tab ──────────────────────────────────────────────────────────────
 
-function _buildAdvancedTab(customModels) {
-  const modelRows = _buildModelListHTML(customModels);
+function _buildAdvancedTab() {
   return `
-    <div class="app-cfg-section">
-      <div class="app-cfg-section-title">Custom HuggingFace Models</div>
-      <div class="app-cfg-hint">
-        Add any public HuggingFace model by its Hub ID
-        (e.g. <code>BAAI/bge-base-en-v1.5</code>).
-        After adding, open Similarity Settings to download and use the model.
-      </div>
-
-      <div id="app-cfg-model-list">${modelRows}</div>
-
-      <div class="app-cfg-add-model-form">
-        <div class="app-cfg-add-row">
-          <input id="app-cfg-new-id" class="app-cfg-input app-cfg-new-id"
-                 type="text" placeholder="HuggingFace model name  e.g. BAAI/bge-base-en-v1.5"
-                 spellcheck="false">
-          <button id="app-cfg-add-model-btn" class="btn btn-new-paper">Add</button>
-        </div>
-        <div id="app-cfg-model-status" class="app-cfg-status"></div>
-      </div>
-    </div>
-
     <div class="app-cfg-section">
       <button class="app-cfg-toggle" id="app-cfg-contract-toggle">
         Plugin Contract Reference <span class="app-cfg-toggle-icon"><i class="bi bi-caret-right-fill"></i></span>
@@ -390,90 +281,9 @@ function _wireTabNav(body) {
 
 // ── Event wiring ──────────────────────────────────────────────────────────────
 
-function _wireEvents(body, cfg, scriptInfo, customModels, simCfg, dirs) {
-  _wireModelsTab(body, cfg, simCfg, customModels, dirs);
+function _wireEvents(body, cfg, dirs) {
   _wireDisplayTab(body);
-  _wireApiTab(body, cfg, scriptInfo);
-  _wireAdvancedTab(body, cfg, customModels);
-}
-
-// ── Models tab events ─────────────────────────────────────────────────────────
-
-function _wireModelsTab(body, cfg, simCfg, customModels, dirs) {
-  const selectStatus  = body.querySelector("#app-cfg-model-select-status");
-  const cardsContainer = body.querySelector("#app-cfg-model-cards");
-
-  // Single delegated listener handles initial and dynamically-inserted buttons.
-  cardsContainer?.addEventListener("click", async e => {
-    const btn = e.target.closest(".app-cfg-model-select-btn");
-    if (!btn) return;
-    const modelId = btn.dataset.modelId;
-    simCfg.model  = modelId;
-    try {
-      await _saveSimConfig(simCfg);
-      // Refresh card UI to show new active model
-      body.querySelectorAll(".app-cfg-model-card").forEach(card => {
-        const isNowActive = card.dataset.modelId === modelId;
-        card.classList.toggle("active", isNowActive);
-        const footer   = card.querySelector(".app-cfg-model-card-footer");
-        const existing = footer.querySelector(".app-cfg-model-active-badge, .app-cfg-model-select-btn");
-        if (isNowActive) {
-          existing?.remove();
-          footer.insertAdjacentHTML("beforeend", `<span class="app-cfg-model-active-badge">Active</span>`);
-        } else {
-          existing?.remove();
-          footer.insertAdjacentHTML("beforeend",
-            `<button class="btn app-cfg-model-select-btn" data-model-id="${_esc(card.dataset.modelId)}">Use this model</button>`);
-        }
-      });
-      _showStatus(selectStatus, `✓ Active model set to ${modelId}`, "ok");
-      const simPanel = document.getElementById("sim-settings-panel");
-      refreshModelSelect(simPanel).catch(() => {});
-    } catch (e) { _showStatus(selectStatus, `✗ ${e}`, "err"); }
-  });
-
-  // Models dir input + open folder button
-  const modelsDirInput  = body.querySelector("#app-cfg-models-dir-input");
-  const modelsDirOpen   = body.querySelector("#app-cfg-models-dir-open");
-  const modelsDirSave   = body.querySelector("#app-cfg-models-dir-save");
-  const modelsDirReset  = body.querySelector("#app-cfg-models-dir-reset");
-  const modelsDirStatus = body.querySelector("#app-cfg-models-dir-status");
-
-  modelsDirOpen?.addEventListener("click", async () => {
-    const path = modelsDirInput?.value.trim() || dirs.models_dir;
-    if (!path || !invoke) return;
-    try { await invoke("open_folder", { path }); } catch (e) { _showStatus(modelsDirStatus, `✗ ${e}`, "err"); }
-  });
-  // Keep the open-button path in sync as the user types
-  modelsDirInput?.addEventListener("input", () => {
-    if (modelsDirOpen) modelsDirOpen.dataset.path = modelsDirInput.value.trim() || dirs.models_dir;
-  });
-
-  modelsDirSave?.addEventListener("click", async () => {
-    const path = modelsDirInput?.value.trim() ?? "";
-    cfg.models_dir = path || null;
-    try {
-      await _saveConfig(cfg);
-      _showStatus(modelsDirStatus, "✓ Saved — takes effect on next engine start", "ok");
-    } catch (e) { _showStatus(modelsDirStatus, `✗ ${e}`, "err"); }
-  });
-
-  modelsDirReset?.addEventListener("click", async () => {
-    cfg.models_dir = null;
-    if (modelsDirInput) modelsDirInput.value = "";
-    try {
-      await _saveConfig(cfg);
-      _showStatus(modelsDirStatus, "✓ Reset to default", "ok");
-      setTimeout(() => _renderAppSettings(body.closest("#app-settings-panel")), 800);
-    } catch (e) { _showStatus(modelsDirStatus, `✗ ${e}`, "err"); }
-  });
-
-  // App data dir open button
-  body.querySelector("#app-cfg-data-dir-open")?.addEventListener("click", async () => {
-    const path = dirs.data_dir;
-    if (!path || !invoke) return;
-    try { await invoke("open_folder", { path }); } catch (_) {}
-  });
+  _wireApiTab(body, cfg, dirs);
 }
 
 // ── Display tab events ────────────────────────────────────────────────────────
@@ -497,185 +307,108 @@ function _wireDisplayTab(body) {
 
 // ── API tab events ────────────────────────────────────────────────────────────
 
-function _wireApiTab(body, cfg, scriptInfo) {
-  // HF Token
-  const hfTokenInput  = body.querySelector("#app-cfg-hf-token");
-  const hfTokenShow   = body.querySelector("#app-cfg-hf-token-show");
-  const hfTokenSave   = body.querySelector("#app-cfg-hf-token-save");
-  const hfTokenClear  = body.querySelector("#app-cfg-hf-token-clear");
-  const hfTokenStatus = body.querySelector("#app-cfg-hf-token-status");
+function _wireApiKeyField(body, cfg, idPrefix, cfgKey) {
+  const input    = body.querySelector(`#app-cfg-${idPrefix}`);
+  const showBtn  = body.querySelector(`#app-cfg-${idPrefix}-show`);
+  const saveBtn  = body.querySelector(`#app-cfg-${idPrefix}-save`);
+  const clearBtn = body.querySelector(`#app-cfg-${idPrefix}-clear`);
+  const statusEl = body.querySelector(`#app-cfg-${idPrefix}-status`);
 
-  hfTokenShow?.addEventListener("click", () => {
-    const isHidden = hfTokenInput?.type === "password";
-    if (hfTokenInput) hfTokenInput.type = isHidden ? "text" : "password";
-    if (hfTokenShow)  hfTokenShow.innerHTML = isHidden
+  showBtn?.addEventListener("click", () => {
+    const hidden = input?.type === "password";
+    if (input) input.type = hidden ? "text" : "password";
+    if (showBtn) showBtn.innerHTML = hidden
       ? '<i class="bi bi-eye-slash"></i>'
       : '<i class="bi bi-eye"></i>';
   });
-  hfTokenSave?.addEventListener("click", async () => {
-    const token = hfTokenInput?.value.trim() ?? "";
-    cfg.hf_token = token || null;
-    try {
-      await _saveConfig(cfg);
-      _showStatus(hfTokenStatus, "✓ Token saved — takes effect on next engine start", "ok");
-      if (hfTokenClear) hfTokenClear.disabled = !token;
-    } catch (e) { _showStatus(hfTokenStatus, `✗ ${e}`, "err"); }
-  });
-  hfTokenClear?.addEventListener("click", async () => {
-    if (hfTokenInput) hfTokenInput.value = "";
-    cfg.hf_token = null;
-    try {
-      await _saveConfig(cfg);
-      _showStatus(hfTokenStatus, "✓ Token cleared", "ok");
-      if (hfTokenClear) hfTokenClear.disabled = true;
-    } catch (e) { _showStatus(hfTokenStatus, `✗ ${e}`, "err"); }
-  });
-
-  // Sidecar script
-  const scriptInput  = body.querySelector("#app-cfg-script-input");
-  const validateBtn  = body.querySelector("#app-cfg-validate-btn");
-  const validateArea = body.querySelector("#app-cfg-validate-area");
-  const saveBtn      = body.querySelector("#app-cfg-script-save-btn");
-  const resetBtn     = body.querySelector("#app-cfg-reset-btn");
-  const scriptStatus = body.querySelector("#app-cfg-script-status");
-  const checkBtn     = body.querySelector("#app-cfg-check-btn");
-
-  const _updateBtns = () => {
-    const hasVal = !!scriptInput?.value.trim();
-    if (validateBtn) validateBtn.disabled = !hasVal;
-    if (checkBtn)    checkBtn.disabled    = !hasVal;
-  };
-  scriptInput?.addEventListener("input", _updateBtns);
-
-  checkBtn?.addEventListener("click", async () => {
-    const path = scriptInput?.value.trim();
-    if (!path || !invoke) return;
-    _showValidate(validateArea, "Checking path…", "checking");
-    try {
-      const res = await invoke("pick_sidecar_script", { path });
-      if (res?.readable) {
-        _showValidate(validateArea, "✓ File found and readable", "ok");
-      } else if (res?.exists) {
-        _showValidate(validateArea, "✗ File exists but is not readable", "err");
-      } else {
-        _showValidate(validateArea, "✗ File not found at this path", "err");
-      }
-    } catch (e) { _showValidate(validateArea, `✗ ${e}`, "err"); }
-  });
-
-  validateBtn?.addEventListener("click", async () => {
-    const path = scriptInput?.value.trim();
-    if (!path || !invoke) return;
-    _showValidate(validateArea, "Validating…", "checking");
-    try {
-      const res = await invoke("hf_validate_plugin", { scriptPath: path });
-      if (res?.valid) {
-        const hooks = [
-          res.has_similarity_fn  && "similarity_fn",
-          res.has_embedding_fn   && "compute_embedding_fn",
-        ].filter(Boolean);
-        const hookStr = hooks.length ? hooks.join(", ") : "no recognised hooks";
-        _showValidate(validateArea, `✓ Valid — exports: ${hookStr}`, hooks.length ? "ok" : "warn");
-      } else {
-        _showValidate(validateArea, `✗ Invalid\n${res?.error ?? "Unknown error"}`, "err");
-      }
-    } catch (e) { _showValidate(validateArea, `✗ ${e}`, "err"); }
-  });
-
   saveBtn?.addEventListener("click", async () => {
-    const path = scriptInput?.value.trim() ?? "";
-    cfg.sidecar_script = path || null;
+    const val = input?.value.trim() ?? "";
+    cfg[cfgKey] = val || null;
     try {
       await _saveConfig(cfg);
-      _showStatus(scriptStatus, "✓ Saved — takes effect on next engine start", "ok");
-      setTimeout(() => _renderAppSettings(body.closest("#app-settings-panel")), 1200);
-    } catch (e) { _showStatus(scriptStatus, `✗ ${e}`, "err"); }
+      _showStatus(statusEl, "✓ Key saved — takes effect on next engine start", "ok");
+      if (clearBtn) clearBtn.disabled = !val;
+    } catch (e) { _showStatus(statusEl, `✗ ${e}`, "err"); }
   });
-
-  resetBtn?.addEventListener("click", async () => {
-    cfg.sidecar_script = null;
-    if (scriptInput) scriptInput.value = "";
+  clearBtn?.addEventListener("click", async () => {
+    if (input) input.value = "";
+    cfg[cfgKey] = null;
     try {
       await _saveConfig(cfg);
-      _showStatus(scriptStatus, "✓ Reset to default", "ok");
-      setTimeout(() => _renderAppSettings(body.closest("#app-settings-panel")), 800);
-    } catch (e) { _showStatus(scriptStatus, `✗ ${e}`, "err"); }
+      _showStatus(statusEl, "✓ Key cleared", "ok");
+      if (clearBtn) clearBtn.disabled = true;
+    } catch (e) { _showStatus(statusEl, `✗ ${e}`, "err"); }
   });
 }
 
-// ── Advanced tab events ───────────────────────────────────────────────────────
+function _wireApiTab(body, cfg, dirs) {
+  _wireApiKeyField(body, cfg, "openai-key",    "openai_api_key");
+  _wireApiKeyField(body, cfg, "anthropic-key", "anthropic_api_key");
 
-function _wireAdvancedTab(body, cfg, customModels) {
-  const modelList   = body.querySelector("#app-cfg-model-list");
-  const modelStatus = body.querySelector("#app-cfg-model-status");
-  _wireModelDelButtons(modelList, customModels, cfg, modelStatus);
+  // Model API Endpoint URL
+  const urlInput    = body.querySelector("#app-cfg-api-base-url");
+  const urlSaveBtn  = body.querySelector("#app-cfg-api-base-url-save");
+  const urlTestBtn  = body.querySelector("#app-cfg-api-base-url-test");
+  const urlClearBtn = body.querySelector("#app-cfg-api-base-url-clear");
+  const urlStatus   = body.querySelector("#app-cfg-api-base-url-status");
 
-  const addBtn  = body.querySelector("#app-cfg-add-model-btn");
-  const idInput = body.querySelector("#app-cfg-new-id");
-
-  const doAdd = async () => {
-    const id = idInput?.value.trim();
-    if (!id) { _showStatus(modelStatus, "✗ Model ID is required.", "err"); return; }
-    if (customModels.some(m => m.id === id)) {
-      _showStatus(modelStatus, "Model already in list.", "warn"); return;
-    }
-    const label = id.includes("/") ? id.split("/").pop() : id;
-    const entry = { id, label };
-    customModels.push(entry);
-    cfg.custom_models = customModels;
+  urlSaveBtn?.addEventListener("click", async () => {
+    const val = urlInput?.value.trim() ?? "";
+    cfg.api_base_url = val || null;
     try {
       await _saveConfig(cfg);
-      if (idInput) idInput.value = "";
-      modelList.innerHTML = _buildModelListHTML(customModels);
-      _wireModelDelButtons(modelList, customModels, cfg, modelStatus);
-      _showStatus(modelStatus, `✓ Added ${id}`, "ok");
-      setTimeout(() => { if (modelStatus) modelStatus.textContent = ""; }, 2000);
-      const simPanel = document.getElementById("sim-settings-panel");
-      refreshModelSelect(simPanel).catch(() => {});
+      _showStatus(urlStatus, "✓ URL saved — takes effect on next action", "ok");
+      if (urlClearBtn) urlClearBtn.disabled = !val;
+    } catch (e) { _showStatus(urlStatus, `✗ ${e}`, "err"); }
+  });
+
+  urlTestBtn?.addEventListener("click", async () => {
+    const url = urlInput?.value.trim() ?? "";
+    if (!url) { _showStatus(urlStatus, "✗ Enter a URL to test", "err"); return; }
+    urlTestBtn.disabled = true;
+    _showStatus(urlStatus, "Testing connection…", "");
+    try {
+      const apiKey = body.querySelector("#app-cfg-openai-key")?.value.trim() ?? cfg.openai_api_key ?? "";
+      const res = await invoke("test_api_endpoint", { url, apiKey });
+      if (res?.ok) {
+        _showStatus(urlStatus, `✓ ${res.message}`, "ok");
+      } else {
+        _showStatus(urlStatus, `✗ ${res?.error ?? "Connection failed"}`, "err");
+      }
     } catch (e) {
-      customModels.pop(); cfg.custom_models = customModels;
-      _showStatus(modelStatus, `✗ ${e}`, "err");
+      _showStatus(urlStatus, `✗ ${e}`, "err");
+    } finally {
+      urlTestBtn.disabled = false;
     }
-  };
-
-  addBtn?.addEventListener("click", doAdd);
-  idInput?.addEventListener("keydown", e => { if (e.key === "Enter") doAdd(); });
-
-  body.querySelector("#app-cfg-contract-toggle")?.addEventListener("click", () => {
-    const contractBody = body.querySelector("#app-cfg-contract-body");
-    const icon         = body.querySelector(".app-cfg-toggle-icon");
-    contractBody?.classList.toggle("hidden");
-    if (icon) icon.innerHTML = contractBody?.classList.contains("hidden")
-      ? '<i class="bi bi-caret-right-fill"></i>'
-      : '<i class="bi bi-caret-down-fill"></i>';
   });
-}
 
-function _wireModelDelButtons(modelList, customModels, cfg, statusEl) {
-  modelList?.querySelectorAll(".app-cfg-model-del").forEach(btn => {
-    btn.addEventListener("click", async () => {
-      const idx = parseInt(btn.dataset.idx, 10);
-      customModels.splice(idx, 1);
-      cfg.custom_models = customModels;
-      try {
-        await _saveConfig(cfg);
-        modelList.innerHTML = _buildModelListHTML(customModels);
-        _wireModelDelButtons(modelList, customModels, cfg, statusEl);
-      } catch (e) { _showStatus(statusEl, `✗ ${e}`, "err"); }
-    });
+  urlClearBtn?.addEventListener("click", async () => {
+    if (urlInput) urlInput.value = "";
+    cfg.api_base_url = null;
+    try {
+      await _saveConfig(cfg);
+      _showStatus(urlStatus, "✓ Reset to default OpenAI endpoint", "ok");
+      if (urlClearBtn) urlClearBtn.disabled = true;
+    } catch (e) { _showStatus(urlStatus, `✗ ${e}`, "err"); }
   });
-}
 
-function _buildModelListHTML(customModels) {
-  if (!customModels.length)
-    return `<div class="app-cfg-empty">No custom models added yet.</div>`;
-  return customModels.map((m, i) => `
-    <div class="app-cfg-model-row" data-idx="${i}">
-      <div class="app-cfg-model-info">
-        <code class="app-cfg-model-id">${_esc(m.id)}</code>
-      </div>
-      <button class="app-cfg-model-del" data-idx="${i}" title="Remove model">✕</button>
-    </div>`).join("");
+  // Embedding pooling
+  const poolingSel    = body.querySelector("#app-cfg-api-pooling");
+  const poolingSave   = body.querySelector("#app-cfg-api-pooling-save");
+  const poolingStatus = body.querySelector("#app-cfg-api-pooling-status");
+  poolingSave?.addEventListener("click", async () => {
+    cfg.api_pooling = poolingSel?.value || null;
+    try {
+      await _saveConfig(cfg);
+      _showStatus(poolingStatus, "✓ Pooling saved", "ok");
+    } catch (e) { _showStatus(poolingStatus, `✗ ${e}`, "err"); }
+  });
+
+  body.querySelector("#app-cfg-data-dir-open")?.addEventListener("click", async () => {
+    const path = dirs?.data_dir;
+    if (!path || !invoke) return;
+    try { await invoke("open_folder", { path }); } catch (_) {}
+  });
 }
 
 // ── Utility ───────────────────────────────────────────────────────────────────
@@ -706,12 +439,6 @@ function _shortenPath(p) {
   const parts = p.replace(/\\/g, "/").split("/");
   if (parts.length <= 3) return p;
   return "…/" + parts.slice(-2).join("/");
-}
-
-/** Expose custom model list so similarity_settings.js can merge them. */
-export async function getCustomModels() {
-  const cfg = await _loadConfig();
-  return cfg.custom_models ?? [];
 }
 
 // ── DOM wiring ────────────────────────────────────────────────────────────────

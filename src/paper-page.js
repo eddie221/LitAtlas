@@ -457,6 +457,20 @@ function wrap(textarea, before, after) {
 
 // ── Notes tab (markdown) ──────────────────────────────────────────────────────
 
+const _KATEX_OPTS = {
+  delimiters: [
+    { left: "$$", right: "$$", display: true },
+    { left: "$",  right: "$",  display: false },
+    { left: "\\(", right: "\\)", display: false },
+    { left: "\\[", right: "\\]", display: true },
+  ],
+  throwOnError: false,
+};
+
+function renderMathInEl(el) {
+  if (window.renderMathInElement) window.renderMathInElement(el, _KATEX_OPTS);
+}
+
 // Safely render markdown — falls back to plain text if marked isn't loaded
 function renderMd(text) {
   const preview = document.getElementById("pp-notes-preview");
@@ -466,7 +480,8 @@ function renderMd(text) {
     return;
   }
   if (window.marked) {
-    preview.innerHTML = window.marked.parse(text, { breaks: true, gfm: true });
+    preview.innerHTML = window.marked.parse(text);
+    renderMathInEl(preview);
   } else {
     // Fallback: pre-wrap plain text
     const pre = document.createElement("pre");
@@ -798,7 +813,7 @@ async function renderAiSummaryTab(paper) {
     return;
   }
 
-  const _TAB_ORDER = ["overview", "motivation", "method", "experiment", "contribution"];
+  const _TAB_ORDER = ["overview", "motivation", "contributions", "method", "experiments", "limitations", "takeaways"];
   const filenames = Object.keys(files).sort((a, b) => {
     const ai = _TAB_ORDER.indexOf(a.replace(/\.md$/i, "").toLowerCase());
     const bi = _TAB_ORDER.indexOf(b.replace(/\.md$/i, "").toLowerCase());
@@ -827,11 +842,11 @@ async function renderAiSummaryTab(paper) {
     <div class="pp-ai-section-tabs">${tabsHtml}</div>
     <div class="pp-ai-summary-toolbar">
       <span id="pp-ai-summary-status" class="pp-ai-summary-status"></span>
-      <button class="pp-notes-view-btn active" id="pp-ai-view-edit">Edit</button>
-      <button class="pp-notes-view-btn" id="pp-ai-view-preview">Preview</button>
-      <button class="btn pp-ai-save-btn" id="pp-ai-save-btn" disabled>Save &amp; Re-embed</button>
+      <button class="pp-notes-view-btn" id="pp-ai-view-edit">Edit</button>
+      <button class="pp-notes-view-btn active" id="pp-ai-view-preview">Preview</button>
+      <button class="btn pp-ai-save-btn" id="pp-ai-save-btn" disabled>Save</button>
     </div>
-    <div id="pp-ai-summary-panes" class="pp-notes-panes edit-only">
+    <div id="pp-ai-summary-panes" class="pp-notes-panes preview-only">
       <textarea id="pp-ai-textarea" style="font-family:monospace;font-size:0.85rem"></textarea>
       <div id="pp-ai-preview" class="pp-md-preview"></div>
     </div>`;
@@ -849,6 +864,28 @@ async function renderAiSummaryTab(paper) {
     statusEl.style.color = color ?? "";
   }
 
+  function renderPreview() {
+    const text = textarea.value || "";
+    if (!text.trim()) {
+      preview.innerHTML = `<div class="md-empty">Nothing to preview yet.</div>`;
+      return;
+    }
+    if (window.marked) {
+      const result = window.marked.parse(text);
+      if (result && typeof result.then === "function") {
+        result.then(html => { preview.innerHTML = html; renderMathInEl(preview); });
+      } else {
+        preview.innerHTML = result;
+        renderMathInEl(preview);
+      }
+    } else {
+      const pre = document.createElement("pre");
+      pre.style.cssText = "white-space:pre-wrap;font-size:.75rem;line-height:1.85";
+      pre.textContent = text;
+      preview.replaceChildren(pre);
+    }
+  }
+
   // Track which file is active and whether it's been edited
   let activeFile = filenames[0];
   // Local edits buffer — keeps unsaved changes when switching tabs
@@ -858,12 +895,7 @@ async function renderAiSummaryTab(paper) {
     activeFile = fn;
     textarea.value = edits[fn] ?? "";
     saveBtn.disabled = edits[fn] === files[fn];
-    // Refresh preview if in preview mode
-    if (panesEl.classList.contains("preview-only")) {
-      preview.innerHTML = typeof marked !== "undefined"
-        ? marked.parse(textarea.value || "")
-        : `<pre>${textarea.value}</pre>`;
-    }
+    renderPreview();
     setStatus(edits[fn] !== files[fn] ? "Unsaved changes" : "", "var(--accent2)");
   }
 
@@ -885,16 +917,15 @@ async function renderAiSummaryTab(paper) {
   previewBtn.addEventListener("click", () => {
     panesEl.className = "pp-notes-panes preview-only";
     previewBtn.classList.add("active"); editBtn.classList.remove("active");
-    preview.innerHTML = typeof marked !== "undefined"
-      ? marked.parse(textarea.value || "")
-      : `<pre>${textarea.value}</pre>`;
+    renderPreview();
   });
 
-  // Track edits
+  // Track edits — keep preview pane in sync if split view is active
   textarea.addEventListener("input", () => {
     edits[activeFile] = textarea.value;
     saveBtn.disabled = false;
     setStatus("Unsaved changes", "var(--accent2)");
+    if (!panesEl.classList.contains("edit-only")) renderPreview();
   });
 
   // Save active section file
@@ -921,6 +952,11 @@ async function renderAiSummaryTab(paper) {
 
 // ── Wire overlay controls ─────────────────────────────────────────────────────
 document.addEventListener("DOMContentLoaded", () => {
+  // Configure marked once with options valid for v17+ (use() replaces deprecated
+  // second-arg options passing that was removed in v9+).
+  if (window.marked?.use) {
+    window.marked.use({ breaks: true, gfm: true });
+  }
   document.querySelectorAll(".pp-tab-btn").forEach(btn =>
     btn.addEventListener("click", () => {
       switchTab(btn.dataset.tab);

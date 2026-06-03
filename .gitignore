@@ -27,3 +27,25 @@ app-icon2/app-icon2.002.png
 app-icon2/app-icon2.003.png
 CLAUDE.md
 graphify-out/*
+
+# Secrets / local config
+.env
+.env.*
+
+# SQLite runtime databases
+*.db
+*.db-shm
+*.db-wal
+
+# Python artifacts (HF sidecar venv)
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+
+# KaTeX vendored files — regenerate with: node scripts/copy-katex.js
+src/libs/katex.min.css
+src/libs/katex.min.js
+src/libs/auto-render.min.js
+src/libs/fonts/
