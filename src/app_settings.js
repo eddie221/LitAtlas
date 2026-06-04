@@ -368,10 +368,13 @@ function _wireApiTab(body, cfg, dirs) {
     urlTestBtn.disabled = true;
     _showStatus(urlStatus, "Testing connection…", "");
     try {
-      const apiKey = body.querySelector("#app-cfg-openai-key")?.value.trim() ?? cfg.openai_api_key ?? "";
-      const res = await invoke("test_api_endpoint", { url, apiKey });
+      // Save the URL so check_api_connection reads the same config as AI mode does.
+      cfg.api_base_url = url;
+      await _saveConfig(cfg);
+      if (urlClearBtn) urlClearBtn.disabled = false;
+      const res = await invoke("check_api_connection");
       if (res?.ok) {
-        _showStatus(urlStatus, `✓ ${res.message}`, "ok");
+        _showStatus(urlStatus, `✓ Connected (${res.provider ?? "ok"})`, "ok");
       } else {
         _showStatus(urlStatus, `✗ ${res?.error ?? "Connection failed"}`, "err");
       }

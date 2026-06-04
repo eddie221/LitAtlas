@@ -10,12 +10,15 @@ pub struct ApiKeys {
     /// Custom base URL for OpenAI-compatible APIs (e.g. Ollama, LM Studio).
     /// Empty = use the default OpenAI endpoint.
     pub base_url:  String,
+    /// Model name to use with the custom endpoint (e.g. "nomic-embed-text").
+    /// Required when base_url is set. Set by the user in App Settings → API.
+    pub model:     String,
     /// Pooling strategy sent in embedding requests (e.g. "last", "mean", "cls").
     /// Empty = omit the field (OpenAI default).
     pub pooling:   String,
 }
 
-const OPENAI_DEFAULT_BASE: &str = "https://api.openai.com/v1";
+pub const OPENAI_DEFAULT_BASE: &str = "https://api.openai.com/v1";
 
 impl ApiKeys {
     pub fn load(data_dir: &std::path::Path) -> Self {
@@ -27,6 +30,7 @@ impl ApiKeys {
             openai:    cfg["openai_api_key"].as_str().unwrap_or("").to_string(),
             anthropic: cfg["anthropic_api_key"].as_str().unwrap_or("").to_string(),
             base_url:  cfg["api_base_url"].as_str().unwrap_or("").trim_end_matches('/').to_string(),
+            model:     cfg["api_model"].as_str().unwrap_or("").trim().to_string(),
             pooling:   cfg["api_pooling"].as_str().unwrap_or("").to_string(),
         }
     }
@@ -48,18 +52,16 @@ impl ApiKeys {
 /// When a custom base URL is configured, bare model names (no provider prefix) are
 /// forwarded directly to the custom endpoint as OpenAI-compatible requests.
 pub async fn embed(keys: &ApiKeys, model_id: &str, text: &str) -> Result<Vec<f32>, String> {
-    // Custom endpoint takes priority — always fetch the live model name from the
-    // server so the request matches whatever is actually loaded, regardless of
-    // what is stored in the similarity config (which may have an "openai:" prefix
-    // or a stale model name from a previous session).
     if !keys.base_url.is_empty() {
-        let actual = match list_models(&keys.openai, &keys.base_url).await {
-            Ok(ids) if !ids.is_empty() => ids[0].clone(),
-            Ok(_)  => return Err(format!("No models returned by {}", keys.base_url)),
-            Err(e) => return Err(e),
-        };
-        crate::logger::log_info("api::embed", &format!("model resolved from /v1/models: {actual}"));
-        return openai_embed(&keys.openai, &keys.base_url, &actual, text, &keys.pooling).await;
+        // Always derive the model from /v1/models when a custom endpoint is set.
+        // The saved model ID in similarity_config may be stale (different model
+        // loaded, or leftover prefix from the default OpenAI config).
+        let models = list_models(&keys.openai, &keys.base_url).await
+            .map_err(|e| format!("Could not list models from custom endpoint: {e}"))?;
+        let model = models.into_iter().next()
+            .ok_or_else(|| "No models available at the custom endpoint".to_string())?;
+        crate::logger::log_info("api::embed", &format!("using model: {model}"));
+        return openai_embed(&keys.openai, &keys.base_url, &model, text, &keys.pooling).await;
     }
     // No custom URL — route by provider prefix.
     if let Some((provider, model_name)) = model_id.split_once(':') {
@@ -71,17 +73,40 @@ pub async fn embed(keys: &ApiKeys, model_id: &str, text: &str) -> Result<Vec<f32
     Err(format!("Invalid model id '{model_id}' — expected 'provider:name' (e.g. 'openai:text-embedding-3-small')"))
 }
 
-/// Returns candidate URLs to try in order: the configured base first,
-/// then with `/v1` inserted if the base doesn't already end with it.
-/// This lets users enter a root URL (e.g. `http://localhost:8080`) and still
-/// reach `/v1/embeddings`, `/v1/chat/completions`, etc.
+/// Returns candidate URLs to try in order.
+/// When base_url already ends with /v1, returns one URL.
+/// Otherwise tries /v1/ first (standard for all OpenAI-compatible APIs),
+/// then the root path as fallback for non-standard servers.
 fn candidates(base_url: &str, path: &str) -> Vec<String> {
-    let mut v = vec![format!("{base_url}/{path}")];
-    if !base_url.ends_with("/v1") {
-        v.push(format!("{base_url}/v1/{path}"));
+    if base_url.ends_with("/v1") {
+        vec![format!("{base_url}/{path}")]
+    } else {
+        vec![
+            format!("{base_url}/v1/{path}"),
+            format!("{base_url}/api/{path}"),
+        ]
     }
-    v
 }
+
+/// Truncate a string to `max` chars for log previews.
+fn trunc(s: &str, max: usize) -> &str {
+    let end = s.char_indices().nth(max).map(|(i, _)| i).unwrap_or(s.len());
+    &s[..end]
+}
+
+/// Returns true when a non-2xx body looks like the server is still loading its model.
+/// LM Studio and llama.cpp both return 500 with "loading" or "model" in the body
+/// during the cold-start window.
+fn looks_like_loading(status: u16, body: &str) -> bool {
+    if status != 500 && status != 503 { return false; }
+    let b = body.to_lowercase();
+    b.contains("loading") || b.contains("initializ") || b.contains("not ready")
+        || b.contains("model") && (b.contains("load") || b.contains("start"))
+        || body.is_empty() // bare 500 with no body is also typical of cold-start
+}
+
+const RETRY_MAX: u32     = 4;
+const RETRY_DELAY_MS: u64 = 3_000;
 
 pub async fn openai_embed(api_key: &str, base_url: &str, model: &str, text: &str, pooling: &str) -> Result<Vec<f32>, String> {
     // Require a key only for the default OpenAI endpoint; local servers may be keyless.
@@ -98,46 +123,58 @@ pub async fn openai_embed(api_key: &str, base_url: &str, model: &str, text: &str
     let mut last_err = String::new();
 
     crate::logger::log_info("api::embed", &format!(
-        "POST embeddings model={model} pooling={:?} chars={} urls={:?}",
+        "POST embeddings url={} model={model} pooling={} input_chars={} input_preview={:?}",
+        urls.first().map(String::as_str).unwrap_or("?"),
         if pooling.is_empty() { "(default)" } else { pooling },
-        text.len(), urls,
+        text.len(),
+        trunc(text, 120),
     ));
 
-    for url in &urls {
-        let req = client.post(url).json(&payload);
-        let req = if !api_key.is_empty() { req.bearer_auth(api_key) } else { req };
-        let resp = req.send().await.map_err(|e| format!("Request error: {e}"))?;
+    'url: for url in &urls {
+        for attempt in 0..=RETRY_MAX {
+            let req = client.post(url).json(&payload);
+            let req = if !api_key.is_empty() { req.bearer_auth(api_key) } else { req };
+            let resp = req.send().await.map_err(|e| format!("Request error: {e}"))?;
+            let status = resp.status();
 
-        let status = resp.status();
-        if status.as_u16() == 404 {
-            last_err = format!("404 Not Found at {url}");
-            crate::logger::log_info("api::embed", &format!("404 at {url} — trying next"));
-            continue; // try next candidate
+            if status.as_u16() == 404 {
+                last_err = format!("404 Not Found at {url}");
+                crate::logger::log_info("api::embed", &format!("404 at {url} — trying next"));
+                continue 'url;
+            }
+            if !status.is_success() {
+                let body = resp.text().await.unwrap_or_default();
+                // Retry on cold-start 500/503 (model still loading).
+                if looks_like_loading(status.as_u16(), &body) && attempt < RETRY_MAX {
+                    crate::logger::log_info("api::embed", &format!(
+                        "server not ready ({status}) attempt {}/{RETRY_MAX} — retrying in {RETRY_DELAY_MS}ms",
+                        attempt + 1
+                    ));
+                    tokio::time::sleep(std::time::Duration::from_millis(RETRY_DELAY_MS)).await;
+                    continue;
+                }
+                let err = if body.contains("Pooling type") && body.contains("none") {
+                    "Embedding not supported: the loaded model is a generative/chat model \
+                     with no pooling layer. Use a dedicated embedding model instead \
+                     (e.g. nomic-embed-text, mxbai-embed-large, bge-small-en).".to_string()
+                } else {
+                    format!("Embedding API {status}: {body}")
+                };
+                crate::logger::log_error("api::embed", &err);
+                return Err(err);
+            }
+            crate::logger::log_info("api::embed", &format!("{status} OK from {url}"));
+            let v: serde_json::Value = resp.json().await
+                .map_err(|e| format!("Response parse error: {e}"))?;
+            return v["data"][0]["embedding"]
+                .as_array()
+                .ok_or_else(|| "Missing embedding in response".to_string())?
+                .iter()
+                .map(|x| x.as_f64()
+                    .map(|f| f as f32)
+                    .ok_or_else(|| "Non-numeric value in embedding".to_string()))
+                .collect();
         }
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            // llama.cpp returns this when a generative model is loaded without pooling.
-            let err = if body.contains("Pooling type") && body.contains("none") {
-                "Embedding not supported: the loaded model is a generative/chat model \
-                 with no pooling layer. Use a dedicated embedding model instead \
-                 (e.g. nomic-embed-text, mxbai-embed-large, bge-small-en).".to_string()
-            } else {
-                format!("Embedding API {status}: {body}")
-            };
-            crate::logger::log_error("api::embed", &err);
-            return Err(err);
-        }
-        crate::logger::log_info("api::embed", &format!("{status} OK from {url}"));
-        let v: serde_json::Value = resp.json().await
-            .map_err(|e| format!("Response parse error: {e}"))?;
-        return v["data"][0]["embedding"]
-            .as_array()
-            .ok_or_else(|| "Missing embedding in response".to_string())?
-            .iter()
-            .map(|x| x.as_f64()
-                .map(|f| f as f32)
-                .ok_or_else(|| "Non-numeric value in embedding".to_string()))
-            .collect();
     }
     crate::logger::log_error("api::embed", &last_err);
     Err(last_err)
@@ -151,15 +188,18 @@ pub async fn generate(
     user:       &str,
     max_tokens: u32,
 ) -> Result<String, String> {
-    // Custom endpoint — always use it, fetch live model name from /v1/models.
+    // Custom endpoint — use configured model or fetch first available from /v1/models.
     if !keys.base_url.is_empty() {
-        let actual = match list_models(&keys.openai, &keys.base_url).await {
-            Ok(ids) if !ids.is_empty() => ids[0].clone(),
-            Ok(_)  => return Err(format!("No models returned by {}", keys.base_url)),
-            Err(e) => return Err(e),
+        let model = if !keys.model.is_empty() {
+            keys.model.clone()
+        } else {
+            let models = list_models(&keys.openai, &keys.base_url).await
+                .map_err(|e| format!("No model configured and could not list models: {e}"))?;
+            models.into_iter().next()
+                .ok_or_else(|| "No models available at the custom endpoint".to_string())?
         };
-        crate::logger::log_info("api::generate", &format!("model resolved from /v1/models: {actual}"));
-        return openai_generate(&keys.openai, &keys.base_url, &actual, system, user, max_tokens).await;
+        crate::logger::log_info("api::generate", &format!("using model: {model}"));
+        return openai_generate(&keys.openai, &keys.base_url, &model, system, user, max_tokens).await;
     }
     if !keys.anthropic.is_empty() {
         return anthropic_generate(
@@ -184,7 +224,10 @@ async fn anthropic_generate(
     max_tokens: u32,
 ) -> Result<String, String> {
     crate::logger::log_info("api::generate", &format!(
-        "POST anthropic/messages model={model} max_tokens={max_tokens}"
+        "POST https://api.anthropic.com/v1/messages model={model} max_tokens={max_tokens} \
+         system_chars={} system_preview={:?} user_chars={} user_preview={:?}",
+        system.len(), trunc(system, 120),
+        user.len(),   trunc(user, 120),
     ));
     let client = reqwest::Client::new();
     let resp = client
@@ -238,66 +281,109 @@ async fn openai_generate(
     let mut last_err = String::new();
 
     crate::logger::log_info("api::generate", &format!(
-        "POST chat/completions model={model} max_tokens={max_tokens} urls={urls:?}"
+        "POST chat/completions url={} model={model} max_tokens={max_tokens} \
+         system_chars={} system_preview={:?} user_chars={} user_preview={:?}",
+        urls.first().map(String::as_str).unwrap_or("?"),
+        system.len(), trunc(system, 120),
+        user.len(),   trunc(user, 120),
     ));
 
-    for url in &urls {
-        let req = client.post(url).json(&payload);
-        let req = if !api_key.is_empty() { req.bearer_auth(api_key) } else { req };
-        let resp = req.send().await.map_err(|e| format!("Chat request error: {e}"))?;
+    'url: for url in &urls {
+        for attempt in 0..=RETRY_MAX {
+            let req = client.post(url).json(&payload);
+            let req = if !api_key.is_empty() { req.bearer_auth(api_key) } else { req };
+            let resp = req.send().await.map_err(|e| format!("Chat request error: {e}"))?;
 
-        let status = resp.status();
-        if status.as_u16() == 404 {
-            last_err = format!("404 Not Found at {url}");
-            crate::logger::log_info("api::generate", &format!("404 at {url} — trying next"));
-            continue;
+            let status = resp.status();
+            if status.as_u16() == 404 {
+                last_err = format!("404 Not Found at {url}");
+                crate::logger::log_info("api::generate", &format!("404 at {url} — trying next"));
+                continue 'url;
+            }
+            if !status.is_success() {
+                let body = resp.text().await.unwrap_or_default();
+                if looks_like_loading(status.as_u16(), &body) && attempt < RETRY_MAX {
+                    crate::logger::log_info("api::generate", &format!(
+                        "server not ready ({status}) attempt {}/{RETRY_MAX} — retrying in {RETRY_DELAY_MS}ms",
+                        attempt + 1
+                    ));
+                    tokio::time::sleep(std::time::Duration::from_millis(RETRY_DELAY_MS)).await;
+                    continue;
+                }
+                let err = format!("Chat API {status}: {body}");
+                crate::logger::log_error("api::generate", &err);
+                return Err(err);
+            }
+            crate::logger::log_info("api::generate", &format!("{status} OK from {url}"));
+            let v: serde_json::Value = resp.json().await
+                .map_err(|e| format!("Chat response parse error: {e}"))?;
+            return v["choices"][0]["message"]["content"]
+                .as_str()
+                .map(String::from)
+                .ok_or_else(|| "Missing content in chat response".to_string());
         }
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            let err  = format!("Chat API {status}: {body}");
-            crate::logger::log_error("api::generate", &err);
-            return Err(err);
-        }
-        crate::logger::log_info("api::generate", &format!("{status} OK from {url}"));
-        let v: serde_json::Value = resp.json().await
-            .map_err(|e| format!("Chat response parse error: {e}"))?;
-        return v["choices"][0]["message"]["content"]
-            .as_str()
-            .map(String::from)
-            .ok_or_else(|| "Missing content in chat response".to_string());
     }
     crate::logger::log_error("api::generate", &last_err);
     Err(last_err)
 }
 
-/// Verify that an API endpoint is reachable and the key (if any) is accepted.
-/// Tries {base_url}/models, then {base_url}/v1/models, then {base_url}/health.
-pub async fn openai_check(api_key: &str, base_url: &str) -> Result<(), String> {
+/// Verify the Anthropic API key is accepted by posting a minimal messages request.
+pub async fn anthropic_check(api_key: &str) -> Result<(), String> {
     let client = reqwest::Client::new();
-    let urls   = candidates(base_url, "models");
-
-    for url in &urls {
-        let req  = client.get(url);
-        let req  = if !api_key.is_empty() { req.bearer_auth(api_key) } else { req };
-        let resp = req.send().await.map_err(|e| format!("Network error: {e}"))?;
-
-        if resp.status().is_success() { return Ok(()); }
-
-        if resp.status() == 401 || resp.status() == 403 {
-            let status = resp.status().as_u16();
-            let body   = resp.text().await.unwrap_or_default();
-            let msg    = serde_json::from_str::<serde_json::Value>(&body)
-                .ok()
-                .and_then(|v| v["error"]["message"].as_str().map(String::from))
-                .unwrap_or_else(|| format!("HTTP {status}"));
-            return Err(msg);
-        }
-        // 404 → try next candidate
+    let resp = client
+        .post("https://api.anthropic.com/v1/messages")
+        .header("x-api-key", api_key)
+        .header("anthropic-version", "2023-06-01")
+        .json(&serde_json::json!({
+            "model": "claude-haiku-4-5-20251001",
+            "max_tokens": 1,
+            "messages": [{ "role": "user", "content": "hi" }],
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("Network error reaching Anthropic: {e}"))?;
+    let status = resp.status();
+    // 200 or any 4xx other than 401/403 means the key was accepted (e.g. 529 overload)
+    if status.is_success() || (status.is_client_error() && status != 401 && status != 403) {
+        return Ok(());
     }
+    let body = resp.text().await.unwrap_or_default();
+    let msg  = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| v["error"]["message"].as_str().map(String::from))
+        .unwrap_or_else(|| format!("HTTP {status}"));
+    Err(msg)
+}
 
-    // Final fallback: /health (llama.cpp root URL)
-    if let Ok(resp) = client.get(format!("{base_url}/health")).send().await {
-        if resp.status().is_success() { return Ok(()); }
+/// Verify that an API endpoint is reachable by querying /models.
+///
+/// Uses candidates() so a base_url already ending in /v1 (e.g. http://host:1234/v1)
+/// produces only one URL (http://host:1234/v1/models) rather than the double /v1/v1/models.
+pub async fn openai_check(api_key: &str, base_url: &str) -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    for url in candidates(base_url, "models") {
+        let req = client.get(&url);
+        let req = if !api_key.is_empty() { req.bearer_auth(api_key) } else { req };
+        if let Ok(resp) = req.send().await {
+            let s = resp.status();
+            if s.is_success() {
+                crate::logger::log_info("api::check", &format!("models OK at {url}"));
+                return Ok(());
+            }
+            if s == 401 || s == 403 {
+                let body = resp.text().await.unwrap_or_default();
+                let msg  = serde_json::from_str::<serde_json::Value>(&body)
+                    .ok()
+                    .and_then(|v| v["error"]["message"].as_str().map(String::from))
+                    .unwrap_or_else(|| format!("HTTP {s}"));
+                return Err(msg);
+            }
+            // 404 → try next candidate
+        }
     }
 
     Err("Could not reach the server. Check the URL and that the server is running.".into())
@@ -305,11 +391,11 @@ pub async fn openai_check(api_key: &str, base_url: &str) -> Result<(), String> {
 
 /// Probe an API endpoint and return a human-readable status string.
 ///
-/// Probe order (stops at first success):
-///   1. GET {url}/models  — with bearer auth  (OpenAI / keyed servers)
-///   2. GET {url}/models  — no auth           (llama.cpp at /v1 base)
-///   3. GET {url}/health  — no auth           (llama.cpp at root base)
-///   4. GET {url}/v1/models — no auth         (llama.cpp when user omits /v1)
+/// Probe order (stops at first success — /health is tried first to avoid triggering model loading):
+///   1. GET {url}/health      — liveness check, no model load (LM Studio, llama.cpp)
+///   2. GET {url}/v1/health   — same with /v1 prefix
+///   3. GET {url}/models      — OpenAI-compatible fallback (cloud APIs that have no /health)
+///   4. GET {url}/v1/models   — same, for servers where user omitted /v1
 pub async fn test_endpoint(url: &str, api_key: &str) -> Result<String, String> {
     let base = url.trim_end_matches('/');
     let client = reqwest::Client::builder()
@@ -317,7 +403,29 @@ pub async fn test_endpoint(url: &str, api_key: &str) -> Result<String, String> {
         .build()
         .map_err(|e| e.to_string())?;
 
-    // Helper: extract up to 3 model IDs from an OpenAI-format /models response.
+    // Probe /health — does not trigger model loading.
+    // Strip /v1 to reach the server root (LM Studio health is at root, not /v1/health).
+    let root = base.strip_suffix("/v1").unwrap_or(base);
+    let mut health_urls = vec![
+        format!("{root}/health"),
+        format!("{base}/health"),
+        format!("{base}/v1/health"),
+    ];
+    health_urls.dedup();
+    for health_url in &health_urls {
+        if let Ok(resp) = client.get(health_url).send().await {
+            let s = resp.status();
+            if s.is_success() {
+                return Ok(format!("Server healthy · {health_url}"));
+            }
+            if s == 401 || s == 403 {
+                return Err(format!("Unauthorized at {health_url}"));
+            }
+            // 404 → endpoint absent, try next
+        }
+    }
+
+    // Helper: extract model IDs from an OpenAI-format /models response.
     fn model_summary(body: &str) -> String {
         let names: Vec<String> = serde_json::from_str::<serde_json::Value>(body)
             .ok()
@@ -327,50 +435,27 @@ pub async fn test_endpoint(url: &str, api_key: &str) -> Result<String, String> {
             .filter_map(|m| m["id"].as_str().map(String::from))
             .take(3)
             .collect();
-        if names.is_empty() { "models listed".into() }
-        else { names.join(", ") }
+        if names.is_empty() { "connected".into() } else { names.join(", ") }
     }
 
-    // Probe 1: /models with auth
-    if !api_key.is_empty() {
-        if let Ok(resp) = client.get(format!("{base}/models")).bearer_auth(api_key).send().await {
-            if resp.status().is_success() {
+    // Probe /models — fallback for cloud APIs (OpenAI, etc.) that have no /health.
+    for models_url in candidates(base, "models") {
+        let req = client.get(&models_url);
+        let req = if !api_key.is_empty() { req.bearer_auth(api_key) } else { req };
+        if let Ok(resp) = req.send().await {
+            let s = resp.status();
+            if s.is_success() {
                 let body = resp.text().await.unwrap_or_default();
                 return Ok(format!("Connected · {}", model_summary(&body)));
             }
-            // 401/403 → bad key; report the error rather than probing further.
-            if resp.status() == 401 || resp.status() == 403 {
-                let status = resp.status().as_u16();
-                let body   = resp.text().await.unwrap_or_default();
-                let msg    = serde_json::from_str::<serde_json::Value>(&body)
+            if s == 401 || s == 403 {
+                let body = resp.text().await.unwrap_or_default();
+                let msg  = serde_json::from_str::<serde_json::Value>(&body)
                     .ok()
                     .and_then(|v| v["error"]["message"].as_str().map(String::from))
-                    .unwrap_or_else(|| format!("HTTP {status}"));
+                    .unwrap_or_else(|| format!("HTTP {s}"));
                 return Err(msg);
             }
-        }
-    }
-
-    // Probe 2: /models without auth (llama.cpp with /v1 in the URL)
-    if let Ok(resp) = client.get(format!("{base}/models")).send().await {
-        if resp.status().is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Ok(format!("Connected · {}", model_summary(&body)));
-        }
-    }
-
-    // Probe 3: /health (llama.cpp when user gives root URL)
-    if let Ok(resp) = client.get(format!("{base}/health")).send().await {
-        if resp.status().is_success() {
-            return Ok("Server healthy (llama.cpp — add /v1 to the URL to use OpenAI-compatible endpoints)".into());
-        }
-    }
-
-    // Probe 4: /v1/models (user gave root URL, server has /v1 prefix)
-    if let Ok(resp) = client.get(format!("{base}/v1/models")).send().await {
-        if resp.status().is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Ok(format!("Connected · {} (tip: append /v1 to your URL)", model_summary(&body)));
         }
     }
 
@@ -442,7 +527,14 @@ pub async fn list_models(api_key: &str, base_url: &str) -> Result<Vec<String>, S
             crate::logger::log_error("api::list_models", &format!("{status} at {url}"));
             continue;
         }
-        let v: serde_json::Value = match resp.json().await {
+        let body = match resp.text().await {
+            Ok(b)  => b,
+            Err(e) => { crate::logger::log_error("api::list_models", &format!("read error: {e}")); continue }
+        };
+        crate::logger::log_info("api::list_models", &format!(
+            "{status} OK from {url} — raw: {}", trunc(&body, 500)
+        ));
+        let v: serde_json::Value = match serde_json::from_str(&body) {
             Ok(v)  => v,
             Err(e) => { crate::logger::log_error("api::list_models", &format!("parse error: {e}")); continue }
         };
@@ -451,7 +543,7 @@ pub async fn list_models(api_key: &str, base_url: &str) -> Result<Vec<String>, S
             .iter()
             .filter_map(|m| m["id"].as_str().map(String::from))
             .collect();
-        crate::logger::log_info("api::list_models", &format!("{status} OK from {url} — models: {ids:?}"));
+        crate::logger::log_info("api::list_models", &format!("models extracted: {ids:?}"));
         if !ids.is_empty() { return Ok(ids); }
     }
     let err = format!("Could not fetch model list from {base_url}");

@@ -101,7 +101,6 @@ export async function loadSimConfig() {
   } catch (e) {
     console.warn("[LitAtlas] Could not load similarity config:", e);
   }
-  console.log(_simConfig.strategy);
   _updateMethodBadge("js-cosine");
 }
 
@@ -330,12 +329,10 @@ export async function triggerEdgeRecompute() {
   if (_hfEnabled && _simConfig.strategy === "hf-embeddings") {
     // ── HF two-step recompute ──────────────────────────────────────────────
     const embCfg = {
-      model:   _simConfig.model   ?? "google/gemma-3-1b-it",
+      model:   _simConfig.model   ?? "",
       fields:  _simConfig.fields  ?? ["title", "abstract", "hashtags"],
       weights: _simConfig.weights ?? {},
     };
-    console.log("embCfg : ", embCfg);
-
     // papers array is used by both steps — includes updated_at for staleness check.
     const papers = getPapersCache().map(p => ({
       id: p.id, title: p.title, abstract: p.abstract, venue: p.venue, year: p.year,
@@ -370,7 +367,6 @@ export async function triggerEdgeRecompute() {
         max_edges: _simConfig.max_edges ?? 7,
       },
     });
-    console.log("edgeRes : ", edgeRes);
     const computed = edgeRes.edges ?? [];
     await invoke("replace_edges_by_source", { sourceType: "hf-embeddings", edges: computed });
   } else {
@@ -401,7 +397,7 @@ export async function switchEdgeStrategy(newStrategy) {
     const embDone = _waitForEmbeddingDone();
     const embStart = await invoke("hf_compute_all_embeddings", {
       config: {
-        model:      _simConfig.model   ?? "google/gemma-3-1b-it",
+        model:      _simConfig.model   ?? "",
         fields:     _ALL_EMBED_FIELDS,
         weights:    _simConfig.weights ?? {},
         skip_fresh: true,

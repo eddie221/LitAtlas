@@ -59,7 +59,7 @@ export const MAX_EDGES_PER_NODE   = 7;
 export function getDefaultConfig() {
   return {
     strategy:  "js-cosine",
-    model:     "gemma-4-E2B-it-Q4_K_M.gguf",
+    model:     "",
     fields:    ["title", "abstract", "hashtags", "venue", "notes", "year"],
     weights:   { hashtags: 1.0},
     threshold: SIMILARITY_THRESHOLD,
@@ -70,7 +70,7 @@ export function getDefaultConfig() {
 export function getEmbeddingConfig() {
   return {
     strategy:  "js-cosine",
-    model:     "gemma-4-E2B-it-Q4_K_M.gguf",
+    model:     "",
     fields:    ["title", "abstract", "hashtags", "venue", "notes", "year"],
     weights:   { hashtags: 1.0},
     threshold: SIMILARITY_THRESHOLD,

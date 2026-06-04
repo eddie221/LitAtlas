@@ -240,6 +240,58 @@ pub fn save_paper_md(
     Ok(())
 }
 
+/// Delete a single AI summary section file for a paper.
+#[tauri::command]
+pub fn delete_paper_md(
+    s:        State<'_, AppState>,
+    paper_id: i64,
+    filename: String,
+) -> CmdResult<()> {
+    logger::log_call("delete_paper_md");
+    if filename.contains('/') || filename.contains('\\') || filename.contains("..") {
+        return Err("Invalid filename".to_string());
+    }
+    let pdf_dir = s.pdfs_dir().join(paper_id.to_string());
+    let path    = pdf_dir.join(&filename);
+    if path.exists() {
+        std::fs::remove_file(&path)
+            .map_err(|e| format!("Failed to delete {filename}: {e}"))?;
+        rebuild_paper_md(&pdf_dir);
+        logger::log_info("delete_paper_md",
+            &format!("paper_id={paper_id} deleted {filename}"));
+    }
+    Ok(())
+}
+
+/// Re-run AI summary generation for a paper (Steps 1 & 2 of embed_pdf_in_background).
+/// Does not re-embed — only regenerates the MD section files.
+#[tauri::command]
+pub fn regenerate_paper_md(
+    app:      tauri::AppHandle,
+    s:        State<'_, AppState>,
+    paper_id: i64,
+) -> CmdResult<()> {
+    logger::log_call("regenerate_paper_md");
+    embed_pdf_in_background(app, paper_id, s.pdfs_dir(), s.data_dir.clone(), true);
+    Ok(())
+}
+
+/// Open the folder that holds a paper's PDF and AI summary files.
+#[tauri::command]
+pub fn open_paper_folder(s: State<'_, AppState>, paper_id: i64) -> CmdResult<()> {
+    logger::log_call("open_paper_folder");
+    let pdf_dir = s.pdfs_dir().join(paper_id.to_string());
+    std::fs::create_dir_all(&pdf_dir).ok();
+    let path = pdf_dir.to_string_lossy().to_string();
+    #[cfg(target_os = "macos")]
+    { std::process::Command::new("open").arg(&path).spawn().map_err(|e| e.to_string())?; }
+    #[cfg(target_os = "windows")]
+    { std::process::Command::new("explorer").arg(&path).spawn().map_err(|e| e.to_string())?; }
+    #[cfg(target_os = "linux")]
+    { std::process::Command::new("xdg-open").arg(&path).spawn().map_err(|e| e.to_string())?; }
+    Ok(())
+}
+
 // ── Authors ───────────────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -605,67 +657,6 @@ use tauri::Emitter;
 
 // ── Tauri commands ─────────────────────────────────────────────────────────────
 
-/// Returns { ready: bool, reason?: str }.
-/// Ready when at least one API key (OpenAI or Anthropic) is configured.
-#[tauri::command]
-pub fn hf_setup_status(s: State<'_, AppState>) -> CmdResult<serde_json::Value> {
-    logger::log_call("hf_setup_status");
-    let keys = crate::api_client::ApiKeys::load(&s.data_dir);
-    if keys.has_any() {
-        Ok(serde_json::json!({ "ready": true }))
-    } else {
-        Ok(serde_json::json!({
-            "ready":  false,
-            "reason": "No API key configured. Add an OpenAI or Anthropic key in App Settings → API.",
-        }))
-    }
-}
-
-/// No-op — there is no venv to set up; returns { ok: true } when an API key is present.
-#[tauri::command]
-pub fn hf_setup_venv(s: State<'_, AppState>, app: tauri::AppHandle) -> CmdResult<serde_json::Value> {
-    logger::log_call("hf_setup_venv");
-    let keys = crate::api_client::ApiKeys::load(&s.data_dir);
-    let _ = app.emit("venv://progress", serde_json::json!({
-        "step": "ready", "detail": "API key found — no setup required.", "done": true,
-    }));
-    if keys.has_any() {
-        Ok(serde_json::json!({ "ok": true }))
-    } else {
-        Err("No API key configured. Add an OpenAI or Anthropic key in App Settings.".to_string())
-    }
-}
-
-/// Returns the hardcoded list of supported API embedding models.
-#[tauri::command]
-pub fn hf_list_models(_app: tauri::AppHandle, _s: State<'_, AppState>) -> CmdResult<serde_json::Value> {
-    logger::log_call("hf_list_models");
-    Ok(serde_json::json!({
-        "models": [
-            {
-                "id":          "openai:text-embedding-3-small",
-                "label":       "OpenAI text-embedding-3-small",
-                "description": "Cloud embedding via OpenAI API. Requires OPENAI_API_KEY in App Settings.",
-                "size_mb":     0,
-                "gated":       false,
-                "type":        "api",
-            },
-            {
-                "id":          "openai:text-embedding-3-large",
-                "label":       "OpenAI text-embedding-3-large",
-                "description": "Higher-quality cloud embedding via OpenAI API. Requires OPENAI_API_KEY.",
-                "size_mb":     0,
-                "gated":       false,
-                "type":        "api",
-            },
-        ],
-        "fields": [
-            "title", "abstract", "hashtags", "notes",
-            "pdf", "md_summary", "md_methods", "md_experiment", "md_conclusion",
-        ],
-    }))
-}
-
 /// Check whether the API key for the given model's provider is configured.
 /// Returns { cached: bool, api: true }.
 #[tauri::command]
@@ -701,21 +692,35 @@ pub async fn test_api_endpoint(url: String, api_key: String) -> CmdResult<serde_
 }
 
 /// Test that the configured API endpoint is reachable.
+/// Priority mirrors embed() / generate(): custom base_url → Anthropic → OpenAI.
 /// Returns { ok: bool, provider: str, error?: str }.
 #[tauri::command]
 pub async fn check_api_connection(s: State<'_, AppState>) -> CmdResult<serde_json::Value> {
     logger::log_call("check_api_connection");
     let keys = crate::api_client::ApiKeys::load(&s.data_dir);
-    if !keys.has_any() {
-        return Ok(serde_json::json!({
-            "ok":    false,
-            "error": "No API key or endpoint configured. Add one in App Settings → API."
-        }));
+
+    if !keys.base_url.is_empty() {
+        return match crate::api_client::openai_check(&keys.openai, &keys.base_url).await {
+            Ok(())  => Ok(serde_json::json!({ "ok": true,  "provider": "custom" })),
+            Err(e)  => Ok(serde_json::json!({ "ok": false, "provider": "custom", "error": e })),
+        };
     }
-    match crate::api_client::openai_check(&keys.openai, keys.openai_base()).await {
-        Ok(()) => Ok(serde_json::json!({ "ok": true, "provider": "openai" })),
-        Err(e)  => Ok(serde_json::json!({ "ok": false, "provider": "openai", "error": e })),
+    if !keys.anthropic.is_empty() {
+        return match crate::api_client::anthropic_check(&keys.anthropic).await {
+            Ok(())  => Ok(serde_json::json!({ "ok": true,  "provider": "anthropic" })),
+            Err(e)  => Ok(serde_json::json!({ "ok": false, "provider": "anthropic", "error": e })),
+        };
     }
+    if !keys.openai.is_empty() {
+        return match crate::api_client::openai_check(&keys.openai, crate::api_client::OPENAI_DEFAULT_BASE).await {
+            Ok(())  => Ok(serde_json::json!({ "ok": true,  "provider": "openai" })),
+            Err(e)  => Ok(serde_json::json!({ "ok": false, "provider": "openai", "error": e })),
+        };
+    }
+    Ok(serde_json::json!({
+        "ok":    false,
+        "error": "No API key or endpoint configured. Add one in App Settings → API."
+    }))
 }
 
 /// Fetch the model list from the configured custom API endpoint.
@@ -732,18 +737,6 @@ pub async fn list_api_models(s: State<'_, AppState>) -> CmdResult<serde_json::Va
         Ok(ids) => Ok(serde_json::json!({ "ok": true, "models": ids })),
         Err(e)  => Ok(serde_json::json!({ "ok": false, "models": [], "error": e })),
     }
-}
-
-/// No-op for API models — no local download is needed.
-#[tauri::command]
-pub fn hf_download_model(
-    _app:     tauri::AppHandle,
-    _s:       State<'_, AppState>,
-    _model:   String,
-    _repo_id: String,
-) -> CmdResult<serde_json::Value> {
-    logger::log_call("hf_download_model");
-    Ok(serde_json::json!({ "done": true, "api": true }))
 }
 
 // ── Per-paper embedding cache ─────────────────────────────────────────────────
@@ -962,7 +955,7 @@ pub fn hf_get_paper_embedding(
 ) -> CmdResult<serde_json::Value> {
     logger::log_call("hf_get_paper_embedding");
     let path  = embedding_path_for_paper(&s, paper_id);
-    let model = config["model"].as_str().unwrap_or("google/gemma-3-1b-it");
+    let model = config["model"].as_str().unwrap_or("");
     let fields: Vec<String> = config["fields"]
         .as_array()
         .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
@@ -1292,7 +1285,7 @@ pub fn hf_compute_all_embeddings(
     config: serde_json::Value,
 ) -> CmdResult<serde_json::Value> {
     logger::log_call("hf_compute_all_embeddings");
-
+    println!("config : {:?}", config);
     let model = config["model"]
         .as_str()
         .unwrap_or("openai:text-embedding-3-small")
@@ -1435,7 +1428,7 @@ pub fn hf_compute_edges_from_cache(
     config: serde_json::Value,
 ) -> CmdResult<serde_json::Value> {
     logger::log_call("hf_compute_edges_from_cache");
-    let model = config["model"].as_str().unwrap_or("gemma-4-E2B-it-Q4_K_M.gguf");
+    let model = config["model"].as_str().unwrap_or("");
     logger::log_info("hf_compute_edges_from_cache", &format!("papers={} model={model}", papers.len()));
     let fields: Vec<String> = config["fields"]
         .as_array()
@@ -1619,5 +1612,90 @@ pub fn get_dirs(s: State<'_, AppState>) -> CmdResult<serde_json::Value> {
     logger::log_call("get_dirs");
     Ok(serde_json::json!({
         "data_dir":   s.data_dir.to_string_lossy(),
+    }))
+}
+
+/// Check per-paper AI readiness: embedding presence, PDF-field coverage, summary files.
+/// Returns a summary count plus per-paper detail for the current project.
+#[tauri::command]
+pub fn get_papers_ai_status(s: State<'_, AppState>) -> CmdResult<serde_json::Value> {
+    logger::log_call("get_papers_ai_status");
+    let pool         = s.pool();
+    let pdfs_dir     = s.pdfs_dir();
+    // Embeddings are stored at projects/<slug>/embeddings/<id>.json
+    let embeddings_dir = s.projects_dir.join(s.current_slug()).join("embeddings");
+
+    let rows: Vec<(i64, String)> = tauri::async_runtime::block_on(async {
+        sqlx::query_as("SELECT id, title FROM papers ORDER BY id")
+            .fetch_all(&pool).await
+    }).map_err(|e| e.to_string())?;
+
+    let mut papers = Vec::with_capacity(rows.len());
+    let (mut n_emb, mut n_pdf_emb, mut n_summary) = (0usize, 0usize, 0usize);
+
+    for (id, title) in &rows {
+        // ── Embedding cache ───────────────────────────────────────────────────
+        // Primary location: projects/<slug>/embeddings/<id>.json
+        let emb_path = embeddings_dir.join(format!("{id}.json"));
+        let (has_embedding, has_pdf_embedding) = if emb_path.exists() {
+            let has_pdf = std::fs::read_to_string(&emb_path)
+                .ok()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                .map(|v| {
+                    // New format: { "models": { "<model>": { "field_vectors": { "pdf": [...] } } } }
+                    // Old format: { "model": "...", "field_vectors": { "pdf": [...] } }
+                    let field_vectors = if let Some(models) = v["models"].as_object() {
+                        models.values()
+                            .find_map(|entry| entry.get("field_vectors").cloned())
+                    } else {
+                        v.get("field_vectors").cloned()
+                    };
+                    field_vectors
+                        .and_then(|fv| fv["pdf"].as_array().map(|a| !a.is_empty()))
+                        .unwrap_or(false)
+                })
+                .unwrap_or(false);
+            (true, has_pdf)
+        } else {
+            (false, false)
+        };
+
+        // ── AI summary section files ──────────────────────────────────────────
+        // Section .md files live alongside the PDF: projects/<slug>/pdfs/<id>/
+        let pdf_dir = pdfs_dir.join(id.to_string());
+        let has_summary = pdf_dir.exists() && std::fs::read_dir(&pdf_dir)
+            .into_iter().flatten().flatten()
+            .any(|e| {
+                let name = e.file_name().to_string_lossy().to_string();
+                name.ends_with(".md")
+                    && name != "paper.md"
+                    && name != "PDF_TEXT.md"
+            });
+
+        if has_embedding     { n_emb     += 1; }
+        if has_pdf_embedding { n_pdf_emb += 1; }
+        if has_summary       { n_summary += 1; }
+
+        papers.push(serde_json::json!({
+            "id":                id,
+            "title":             title,
+            "has_embedding":     has_embedding,
+            "has_pdf_embedding": has_pdf_embedding,
+            "has_summary":       has_summary,
+        }));
+    }
+
+    let total = rows.len();
+    Ok(serde_json::json!({
+        "papers": papers,
+        "summary": {
+            "total":                 total,
+            "has_embedding":         n_emb,
+            "has_pdf_embedding":     n_pdf_emb,
+            "has_summary":           n_summary,
+            "missing_embedding":     total - n_emb,
+            "missing_pdf_embedding": total - n_pdf_emb,
+            "missing_summary":       total - n_summary,
+        }
     }))
 }

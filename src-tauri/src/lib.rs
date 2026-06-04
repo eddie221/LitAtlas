@@ -183,24 +183,25 @@ pub fn run() {
             delete_pdf_file,
             // AI Summary (paper.md)
             read_paper_md, save_paper_md,
+            delete_paper_md, regenerate_paper_md, open_paper_folder,
             // Projects
             list_projects, create_project, rename_project,
             delete_project, switch_project, get_current_project,
             // API-based similarity
-            hf_list_models,
-            hf_check_model, hf_download_model,
+            hf_check_model,
             check_api_connection,
             test_api_endpoint,
             list_api_models,
             hf_get_paper_embedding, hf_compute_all_embeddings,
             hf_compute_edges_from_cache,
-            hf_setup_status, hf_setup_venv,
             // Similarity config persistence
             get_similarity_config, save_similarity_config,
             // App config
             get_app_config, save_app_config,
             // Filesystem utilities
             open_folder, get_dirs,
+            // AI status check
+            get_papers_ai_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running LitAtlas");

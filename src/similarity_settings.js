@@ -25,8 +25,6 @@ const invoke = (
   window.__TAURI__?.tauri?.invoke ??
   null
 );
-const tauriListen = window.__TAURI__?.event?.listen ?? null;
-
 // ── Known fields (must match Python AVAILABLE_FIELDS) ─────────────────────────
 const FIELDS = [
   { key: "title",    label: "Title",        defaultWeight: 1.0 },
@@ -182,25 +180,6 @@ function buildHTML(cfg, models, isHF, hfOk) {
       </div>`;
   }).join("");
 
-  // checkbox available
-  // const fieldRows = FIELDS.map(f => {
-  //   const w     = weights[f.key] ?? f.defaultWeight;
-  //   const check = selFields.has(f.key) ? "checked" : "";
-  //   return `
-  //     <div class="sim-field-row" data-field="${f.key}">
-  //       <label class="sim-field-label">
-  //         <input type="checkbox" class="sim-field-check" data-field="${f.key}" ${check}>
-  //         <span>${f.label}</span>
-  //       </label>
-  //       <div class="sim-weight-wrap ${!selFields.has(f.key) ? "disabled" : ""}">
-  //         <input type="range" class="sim-weight-range" data-field="${f.key}"
-  //                min="0.0" max="1" step="0.01" value="${w}"
-  //                disabled >
-  //         <span class="sim-weight-val" data-field="${f.key}">${w.toFixed(1)}</span>
-  //       </div>
-  //     </div>`;
-  // }).join("");
-
   return `
     <!-- Strategy toggle -->
     <div class="sim-section">
@@ -271,7 +250,6 @@ function buildHTML(cfg, models, isHF, hfOk) {
       </div>
       <div class="sim-recompute-hint">
         Recomputing replaces all edges with the new similarity scores.
-        AI mode requires the embedding model to be downloaded first.
       </div>
     </div>`;
 }
@@ -336,161 +314,22 @@ async function _refreshDownloadUI(body, modelId, models) {
     return;
   }
 
-  // ── Local GGUF model ─────────────────────────────────────────────────────
-  area.innerHTML = `<div class="sim-dl-checking">Checking local cache…</div>`;
-
-  const cached = await _checkModelCached(modelId);
-
-  if (cached === true) {
-    area.innerHTML = `
-      <div class="sim-dl-row">
-        <span class="sim-dl-badge sim-dl-ok">✓ Downloaded</span>
-        <span class="sim-dl-hint">Model is available locally</span>
-      </div>`;
-    if (recomputeBtn) recomputeBtn.disabled = false;
-    return;
-  }
-
-  if (cached === null) {
-    // Sidecar not yet running — can't tell
-    area.innerHTML = `
-      <div class="sim-dl-row">
-        <span class="sim-dl-badge sim-dl-unknown">? Status unknown</span>
-        <span class="sim-dl-hint">Start the engine first to check</span>
-      </div>`;
-    if (recomputeBtn) recomputeBtn.disabled = false;
-    return;
-  }
-
-  // Not downloaded — show download button + gated model notice if applicable
-  const model   = models.find(m => m.id === modelId) ?? { size_mb: "?" };
-  const gatedNote = model.gated
-    ? `<div class="sim-dl-gated-note">
-         <i class="bi bi-lock"></i>
-         Gated model — requires a HuggingFace API token.
-         Set your token in <strong>App Settings → HuggingFace Token</strong>
-         and accept the model license on huggingface.co before downloading.
-       </div>`
-    : "";
   area.innerHTML = `
     <div class="sim-dl-row">
-      <span class="sim-dl-badge sim-dl-needed">↓ Not downloaded</span>
-      <span class="sim-dl-hint">~${model.size_mb} MB required</span>
-    </div>
-    ${gatedNote}
-    <button id="sim-dl-btn" class="btn sim-dl-btn">
-      <i class="bi bi-cloud-download"></i> Download Model (${model.size_mb} MB)
-    </button>`;
-  if (recomputeBtn) recomputeBtn.disabled = true;
-
-  area.querySelector("#sim-dl-btn")?.addEventListener("click", () =>
-    _startDownload(body, modelId, models)
-  );
-}
-
-// Selectors for every interactive control inside the settings panel.
-const _LOCKABLE = [
-  ".sim-strat-btn", "#sim-model-select",
-  "#sim-save-btn", "#sim-recompute-btn",
-  ".sim-field-check", ".sim-weight-range",
-  "#sim-thr-range", "#sim-max-range",
-];
-
-function _lockPanel(panel) {
-  _LOCKABLE.forEach(sel =>
-    panel.querySelectorAll(sel).forEach(el => { el.disabled = true; })
-  );
-  // Block backdrop click and close button so the panel can't be dismissed.
-  panel.querySelector && (panel._closeBtn = panel.querySelector("#sim-settings-close") ??
-    document.getElementById("sim-settings-close"));
-  if (panel._closeBtn) panel._closeBtn.disabled = true;
-  const backdrop = document.getElementById("sim-settings-backdrop");
-  if (backdrop) backdrop.style.pointerEvents = "none";
-}
-
-function _unlockPanel(panel) {
-  _LOCKABLE.forEach(sel =>
-    panel.querySelectorAll(sel).forEach(el => { el.disabled = false; })
-  );
-  if (panel._closeBtn) panel._closeBtn.disabled = false;
-  const backdrop = document.getElementById("sim-settings-backdrop");
-  if (backdrop) backdrop.style.pointerEvents = "";
-}
-
-async function _startDownload(body, modelId, models) {
-  const area         = body.querySelector("#sim-dl-area");
-  const recomputeBtn = body.querySelector("#sim-recompute-btn");
-  const panel        = body.closest("#sim-settings-panel") ?? body.parentElement;
-  if (!area || !invoke) return;
-
-  // Show a minimal status badge and lock every other control.
-  area.innerHTML = `
-    <div class="sim-dl-row">
-      <span class="sim-dl-badge sim-dl-active">⬇ Downloading…</span>
-      <span class="sim-dl-hint">This may take a few minutes</span>
+      <span class="sim-dl-badge sim-dl-unknown">? Status unknown</span>
+      <span class="sim-dl-hint">Model type not recognised</span>
     </div>`;
-  _lockPanel(panel);
-
-  const unlisteners = [];
-  const _cleanup = () => { unlisteners.forEach(fn => fn?.()); unlisteners.length = 0; };
-
-  const _finish = (successHtml) => {
-    _cleanup();
-    _unlockPanel(panel);
-    area.innerHTML = successHtml;
-  };
-
-  const _showError = (msg) => {
-    _finish(`
-      <div class="sim-dl-row">
-        <span class="sim-dl-badge sim-dl-err">✗ Download failed</span>
-      </div>
-      <div class="sim-dl-errmsg">${String(msg).slice(0, 300)}</div>
-      <button id="sim-dl-retry" class="btn" style="margin-top:8px;font-size:.6rem">
-        Retry
-      </button>`);
-    area.querySelector("#sim-dl-retry")?.addEventListener("click", () =>
-      _startDownload(body, modelId, models)
-    );
-  };
-
-  if (tauriListen) {
-    // Completion event emitted by the Rust background thread when done.
-    unlisteners.push(await tauriListen("venv://model-download-done", ({ payload }) => {
-      if (payload?.model !== modelId) return; // ignore events for other models
-      if (payload?.ok) {
-        _cacheStatus[modelId] = true;
-        _finish(`
-          <div class="sim-dl-row">
-            <span class="sim-dl-badge sim-dl-ok">✓ Downloaded</span>
-            <span class="sim-dl-hint">Model ready — click Recompute Graph to apply</span>
-          </div>`);
-        if (recomputeBtn) recomputeBtn.disabled = false;
-      } else {
-        _showError(payload?.error ?? "Unknown error");
-      }
-    }));
-  }
-
-  // Kick off the download — returns immediately ({ ok: true, background: true }).
-  // Errors here mean the sidecar couldn't start at all.
-  try {
-    const modelMeta = models.find(m => m.id === modelId) ?? {};
-    const repoId    = modelMeta.repo_id ?? "";
-    await invoke("hf_download_model", { model: modelId, repoId });
-  } catch (e) {
-    _showError(e);
-  }
+  if (recomputeBtn) recomputeBtn.disabled = false;
 }
 
-function _showApiErrorDialog(msg) {
+function _showDialog(title, msg) {
   const backdrop = document.getElementById("pg-dialog-backdrop");
   const titleEl  = document.getElementById("pg-dialog-title");
   const msgEl    = document.getElementById("pg-dialog-message");
   const okBtn    = document.getElementById("pg-dialog-ok");
   const cancelBtn= document.getElementById("pg-dialog-cancel");
   if (!backdrop || !okBtn) return;
-  if (titleEl)  titleEl.textContent  = "API Connection Failed";
+  if (titleEl)  titleEl.textContent  = title;
   if (msgEl)    msgEl.textContent    = msg;
   if (cancelBtn) cancelBtn.style.display = "none";
   backdrop.classList.add("open");
@@ -500,6 +339,29 @@ function _showApiErrorDialog(msg) {
     okBtn.removeEventListener("click", close);
   }
   okBtn.addEventListener("click", close);
+}
+
+function _showApiErrorDialog(msg) {
+  _showDialog("API Connection Failed", msg);
+}
+
+async function _showAiStatusNotice() {
+  let status;
+  try { status = await invoke("get_papers_ai_status"); } catch { return; }
+  const s = status?.summary;
+  if (!s || s.total === 0) return;
+  // Only notify if something is missing
+  if (s.missing_embedding === 0 && s.missing_summary === 0) return;
+  const lines = [
+    `AI mode is active. Status for ${s.total} paper(s):`,
+    "",
+    `  Embeddings:      ${s.has_embedding} / ${s.total} ready`,
+    `  PDF embeddings:  ${s.has_pdf_embedding} / ${s.total} ready`,
+    `  AI summaries:    ${s.has_summary} / ${s.total} ready`,
+    "",
+    "Run \"Recompute\" to generate missing embeddings and summaries.",
+  ];
+  _showDialog("AI Mode — Paper Status", lines.join("\n"));
 }
 
 function wireEvents(panel, initialCfg, models, hfOk) {
@@ -541,6 +403,9 @@ function wireEvents(panel, initialCfg, models, hfOk) {
       }
       await _saveSimConfig(cfg);
       await _switchStrategy(cfg.strategy);
+      if (cfg.strategy === "hf-embeddings") {
+        await _showAiStatusNotice();
+      }
     });
   });
 

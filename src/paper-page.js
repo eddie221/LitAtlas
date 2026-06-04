@@ -36,17 +36,41 @@ const invoke = (
  */
 async function _triggerPaperEmbedding(paperId) {
   const cfg = window.LitAtlas?.getSimConfig?.() ?? {};
-  // Only bother if HF strategy is in use — no-op for js-cosine
   if (cfg.strategy !== "hf-embeddings") return;
-  // Always embed ALL available fields so the cache is complete regardless of
-  // which fields the user currently has selected.  This prevents the pre-warm
-  // from finding only a subset missing and appearing to "only compute abstract."
   const config = {
     model:   cfg.model   ?? "google/gemma-3-1b-it",
     fields:  ["title", "abstract", "hashtags", "venue", "notes", "year", "pdf"],
     weights: cfg.weights ?? {},
   };
-  await invoke("hf_compute_paper_embedding", { paperId, config });
+  await invoke("hf_get_paper_embedding", { paperId, config });
+}
+
+// After a PDF upload in AI mode, check API reachability and alert if unavailable.
+async function _checkAndNotifyEmbedding(paperId) {
+  const cfg = window.LitAtlas?.getSimConfig?.() ?? {};
+  if (cfg.strategy !== "hf-embeddings") return;
+  try {
+    const res = await invoke("check_api_connection");
+    if (res?.ok) {
+      // API is up — trigger embedding silently
+      _triggerPaperEmbedding(paperId).catch(e =>
+        console.warn("[PaperPage] background embedding failed:", e)
+      );
+    } else {
+      const err = res?.error ?? "API check failed";
+      console.warn("[PaperPage] API not reachable after PDF upload:", err);
+      // Defer the alert slightly so the PDF success status is visible first
+      setTimeout(() => pgAlert(
+        "PDF saved successfully.\n\n" +
+        "AI embedding could not be queued because the API is not reachable:\n" +
+        err + "\n\n" +
+        "The embedding will be computed automatically next time you run Recompute.",
+        "AI Embedding Unavailable"
+      ), 600);
+    }
+  } catch (e) {
+    console.warn("[PaperPage] check_api_connection threw:", e);
+  }
 }
 
 // ── Custom dialog helpers ─────────────────────────────────────────────────────
@@ -681,12 +705,10 @@ async function handlePdfPick(file, paper, dropzone, viewer, iframe, nameEl, stat
       statusEl.style.color = "var(--accent)";
     }
 
-    // Fire-and-forget: pre-compute and cache the embedding for this paper now
-    // that we know its storage directory exists.  This runs in the background
-    // and does not block the PDF display.  Errors are logged only.
-    _triggerPaperEmbedding(paper.id).catch(e =>
-      console.warn("[PaperPage] background embedding failed:", e)
-    );
+    // If AI mode is active, verify the API is reachable so the user knows
+    // whether the PDF will get an embedding.  Do this in the background so
+    // it never blocks the PDF display.
+    _checkAndNotifyEmbedding(paper.id);
   } catch (err) {
     console.error("[PaperPage] store_pdf_bytes failed:", err);
     // Last-resort fallback: just remember the original filename so the
@@ -841,10 +863,23 @@ async function renderAiSummaryTab(paper) {
   container.innerHTML = `
     <div class="pp-ai-section-tabs">${tabsHtml}</div>
     <div class="pp-ai-summary-toolbar">
-      <span id="pp-ai-summary-status" class="pp-ai-summary-status"></span>
-      <button class="pp-notes-view-btn" id="pp-ai-view-edit">Edit</button>
-      <button class="pp-notes-view-btn active" id="pp-ai-view-preview">Preview</button>
-      <button class="btn pp-ai-save-btn" id="pp-ai-save-btn" disabled>Save</button>
+      <div class="pp-ai-toolbar-left">
+        <button class="pp-ai-icon-btn" id="pp-ai-open-folder" title="Open folder">
+          <i class="bi bi-folder2-open"></i>
+        </button>
+        <button class="pp-ai-icon-btn" id="pp-ai-regen-btn" title="Regenerate all sections">
+          <i class="bi bi-arrow-clockwise"></i>
+        </button>
+        <button class="pp-ai-icon-btn pp-ai-delete-btn" id="pp-ai-delete-btn" title="Delete this section">
+          <i class="bi bi-trash3"></i>
+        </button>
+      </div>
+      <div class="pp-ai-toolbar-right">
+        <span id="pp-ai-summary-status" class="pp-ai-summary-status"></span>
+        <button class="pp-notes-view-btn" id="pp-ai-view-edit">Edit</button>
+        <button class="pp-notes-view-btn active" id="pp-ai-view-preview">Preview</button>
+        <button class="btn pp-ai-save-btn" id="pp-ai-save-btn" disabled>Save</button>
+      </div>
     </div>
     <div id="pp-ai-summary-panes" class="pp-notes-panes preview-only">
       <textarea id="pp-ai-textarea" style="font-family:monospace;font-size:0.85rem"></textarea>
@@ -855,9 +890,12 @@ async function renderAiSummaryTab(paper) {
   const preview   = container.querySelector("#pp-ai-preview");
   const panesEl   = container.querySelector("#pp-ai-summary-panes");
   const statusEl  = container.querySelector("#pp-ai-summary-status");
-  const saveBtn   = container.querySelector("#pp-ai-save-btn");
-  const editBtn   = container.querySelector("#pp-ai-view-edit");
-  const previewBtn= container.querySelector("#pp-ai-view-preview");
+  const saveBtn      = container.querySelector("#pp-ai-save-btn");
+  const editBtn      = container.querySelector("#pp-ai-view-edit");
+  const previewBtn   = container.querySelector("#pp-ai-view-preview");
+  const openFolderBtn= container.querySelector("#pp-ai-open-folder");
+  const regenBtn     = container.querySelector("#pp-ai-regen-btn");
+  const deleteBtn    = container.querySelector("#pp-ai-delete-btn");
 
   function setStatus(msg, color) {
     statusEl.textContent = msg;
@@ -942,6 +980,49 @@ async function renderAiSummaryTab(paper) {
       setStatus("✓ Saved — re-embedding in background", "var(--accent)");
     } catch (e) {
       saveBtn.disabled = false;
+      setStatus(`✗ ${e}`, "var(--accent3)");
+    }
+  });
+
+  // Open folder
+  openFolderBtn.addEventListener("click", () => {
+    invoke("open_paper_folder", { paperId: paper.id }).catch(e =>
+      setStatus(`✗ ${e}`, "var(--accent3)")
+    );
+  });
+
+  // Regenerate all sections
+  regenBtn.addEventListener("click", async () => {
+    if (!await pgConfirm(
+      "Regenerate all AI summary sections from the PDF?\n\nExisting section files will be overwritten.",
+      "Regenerate Sections"
+    )) return;
+    regenBtn.disabled = true;
+    setStatus("Regenerating… (this may take a moment)", "var(--text-secondary)");
+    try {
+      await invoke("regenerate_paper_md", { paperId: paper.id });
+      setStatus("Regenerating in background — reload this tab when done.", "var(--accent)");
+    } catch (e) {
+      setStatus(`✗ ${e}`, "var(--accent3)");
+    } finally {
+      regenBtn.disabled = false;
+    }
+  });
+
+  // Delete active section file
+  deleteBtn.addEventListener("click", async () => {
+    if (!await pgConfirm(
+      `Delete "${activeFile}"?\n\nThis cannot be undone.`,
+      "Delete Section"
+    )) return;
+    deleteBtn.disabled = true;
+    setStatus("Deleting…", "var(--text-secondary)");
+    try {
+      await invoke("delete_paper_md", { paperId: paper.id, filename: activeFile });
+      // Re-render the whole tab so the deleted section tab disappears
+      await renderAiSummaryTab(paper);
+    } catch (e) {
+      deleteBtn.disabled = false;
       setStatus(`✗ ${e}`, "var(--accent3)");
     }
   });
