@@ -149,10 +149,8 @@ fn remove_pdf_field_from_cache(cache: &mut serde_json::Value) {
 
 // ── AI Summary (section .md files) ───────────────────────────────────────────
 
-/// Read all per-section .md files for a paper.
-/// Returns {filename → content} for every *.md file in the PDF directory
-/// except the combined paper.md.  Falls back to {"paper.md": content} when
-/// only the legacy combined file exists (no individual section files).
+/// Read the AI_SUMMARY.md and PDF_TEXT.md for a paper.
+/// Returns a map of filename → content for each file that exists.
 #[tauri::command]
 pub fn read_paper_md(
     s:        State<'_, AppState>,
@@ -162,27 +160,11 @@ pub fn read_paper_md(
     let pdf_dir = s.pdfs_dir().join(paper_id.to_string());
     let mut files: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
-    if !pdf_dir.exists() {
-        return Ok(files);
-    }
-    if let Ok(rd) = std::fs::read_dir(&pdf_dir) {
-        for entry in rd.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("md") { continue; }
-            let name = path.file_name()
-                .unwrap_or_default().to_string_lossy().to_string();
-            if name == "paper.md" || name == "PDF_TEXT.md" { continue; }
+    for name in &["AI_SUMMARY.md", "PDF_TEXT.md"] {
+        let path = pdf_dir.join(name);
+        if path.exists() {
             if let Ok(content) = std::fs::read_to_string(&path) {
-                files.insert(name, content);
-            }
-        }
-    }
-    // Fallback: if no individual section files, return legacy paper.md.
-    if files.is_empty() {
-        let md_path = pdf_dir.join("paper.md");
-        if md_path.exists() {
-            if let Ok(content) = std::fs::read_to_string(&md_path) {
-                files.insert("paper.md".to_string(), content);
+                files.insert(name.to_string(), content);
             }
         }
     }
@@ -191,26 +173,7 @@ pub fn read_paper_md(
     Ok(files)
 }
 
-/// Rebuild the combined paper.md from all individual section files.
-fn rebuild_paper_md(pdf_dir: &std::path::Path) {
-    let mut entries: Vec<_> = std::fs::read_dir(pdf_dir)
-        .into_iter().flatten().flatten()
-        .filter(|e| {
-            e.path().extension().and_then(|x| x.to_str()) == Some("md")
-                && e.file_name().to_string_lossy() != "paper.md"
-        })
-        .collect();
-    entries.sort_by_key(|e| e.file_name());
-    let combined: String = entries.iter()
-        .filter_map(|e| std::fs::read_to_string(e.path()).ok())
-        .filter(|c| !c.trim().is_empty())
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    let _ = std::fs::write(pdf_dir.join("paper.md"), combined);
-}
-
-/// Persist user edits to a named section .md file and trigger re-embedding.
-/// Also rebuilds the combined paper.md so downstream embedding stays in sync.
+/// Persist user edits to PDF_TEXT.md and trigger re-embedding.
 #[tauri::command]
 pub fn save_paper_md(
     app:      tauri::AppHandle,
@@ -232,7 +195,6 @@ pub fn save_paper_md(
     }
     std::fs::write(pdf_dir.join(&filename), &content)
         .map_err(|e| format!("Failed to write {filename}: {e}"))?;
-    rebuild_paper_md(&pdf_dir);
     logger::log_info("save_paper_md",
         &format!("paper_id={paper_id} saved {filename} ({} bytes), triggering re-embed",
             content.len()));
@@ -256,15 +218,14 @@ pub fn delete_paper_md(
     if path.exists() {
         std::fs::remove_file(&path)
             .map_err(|e| format!("Failed to delete {filename}: {e}"))?;
-        rebuild_paper_md(&pdf_dir);
         logger::log_info("delete_paper_md",
             &format!("paper_id={paper_id} deleted {filename}"));
     }
     Ok(())
 }
 
-/// Re-run AI summary generation for a paper (Steps 1 & 2 of embed_pdf_in_background).
-/// Does not re-embed — only regenerates the MD section files.
+/// Re-run PDF-to-markdown conversion for a paper, refreshing PDF_TEXT.md.
+/// Does not re-embed.
 #[tauri::command]
 pub fn regenerate_paper_md(
     app:      tauri::AppHandle,
@@ -739,6 +700,25 @@ pub async fn list_api_models(s: State<'_, AppState>) -> CmdResult<serde_json::Va
     }
 }
 
+/// Check whether a model ID is present in the /v1/models list of the configured endpoint.
+/// Returns { ok: bool, available: bool, models: [str], error?: str }.
+#[tauri::command]
+pub async fn validate_model(s: State<'_, AppState>, model: String) -> CmdResult<serde_json::Value> {
+    logger::log_call("validate_model");
+    let keys = crate::api_client::ApiKeys::load(&s.data_dir);
+    if keys.base_url.is_empty() {
+        return Ok(serde_json::json!({ "ok": false, "available": false, "models": [],
+            "error": "No custom endpoint configured" }));
+    }
+    match crate::api_client::list_models(&keys.openai, &keys.base_url).await {
+        Ok(models) => {
+            let available = models.contains(&model);
+            Ok(serde_json::json!({ "ok": true, "available": available, "models": models }))
+        }
+        Err(e) => Ok(serde_json::json!({ "ok": false, "available": false, "models": [], "error": e })),
+    }
+}
+
 // ── Per-paper embedding cache ─────────────────────────────────────────────────
 //
 // Embeddings are stored as JSON next to the PDF:
@@ -976,31 +956,6 @@ pub fn hf_get_paper_embedding(
     Ok(serde_json::json!({ "hit": false }))
 }
 
-// ── MD generation helpers ─────────────────────────────────────────────────────
-
-fn parse_md_sections(text: &str) -> Vec<(String, String)> {
-    let mut sections: Vec<(String, String)> = Vec::new();
-    let mut current_file: Option<String> = None;
-    let mut current_lines: Vec<&str>    = Vec::new();
-    for line in text.lines() {
-        if let Some(fname) = line.strip_prefix("FILE: ") {
-            if let Some(file) = current_file.take() {
-                let body = current_lines.join("\n").trim().to_string();
-                if !body.is_empty() { sections.push((file, body)); }
-                current_lines.clear();
-            }
-            current_file = Some(fname.trim().to_string());
-        } else if current_file.is_some() {
-            current_lines.push(line);
-        }
-    }
-    if let Some(file) = current_file {
-        let body = current_lines.join("\n").trim().to_string();
-        if !body.is_empty() { sections.push((file, body)); }
-    }
-    sections
-}
-
 /// Read the text that should be embedded for a given field from a paper.
 fn field_text(
     field:   &str,
@@ -1018,147 +973,28 @@ fn field_text(
             if t.is_empty() { None } else { Some(t) }
         }
         "notes" => paper.notes.clone().filter(|n| !n.is_empty()),
-        "pdf"   => paper.pdf_path.as_deref()
-            .filter(|p| !p.is_empty())
-            .and_then(|p| crate::api_client::extract_pdf_text(p).ok()),
-        _ if field.starts_with("md_") => {
-            let suffix = &field[3..];
-            let uppercase = suffix.to_uppercase();
-            // Try UPPERCASE.md first, then suffix.md.
-            std::fs::read_to_string(pdf_dir.join(format!("{uppercase}.md"))).ok()
-                .or_else(|| std::fs::read_to_string(pdf_dir.join(format!("{suffix}.md"))).ok())
+        "pdf" => {
+            // Prefer the AI-generated summary (more distilled for semantic similarity).
+            let ai_path = pdf_dir.join("AI_SUMMARY.md");
+            if ai_path.exists() {
+                if let Ok(t) = std::fs::read_to_string(&ai_path) {
+                    if !t.trim().is_empty() { return Some(t); }
+                }
+            }
+            std::fs::read_to_string(pdf_dir.join("PDF_TEXT.md"))
+                .ok()
+                .filter(|s| !s.trim().is_empty())
         }
         _ => None,
     }
 }
 
-/// Generate per-section MD files for a paper using the best available API.
-/// Writes Overview.md, Motivation.md, Contributions.md, Method.md,
-/// Experiments.md, Limitations.md, Takeaways.md into `pdf_dir`.
-fn generate_paper_md(
-    paper:   &crate::db::PaperFull,
-    pdf_dir: &std::path::Path,
-    keys:    &crate::api_client::ApiKeys,
-) {
-    let pdf_text = paper.pdf_path.as_deref()
-        .filter(|p| !p.is_empty())
-        .and_then(|p| crate::api_client::extract_pdf_text(p).ok())
-        .unwrap_or_default();
-
-    let system = "You are an expert research assistant.\n\
-        Read the provided PDF and generate a paper summary.\n\n\
-        IMPORTANT OUTPUT FORMAT:\n\n\
-        Your entire response MUST consist of a sequence of files.\n\n\
-        Each file MUST begin with:\n\n\
-        FILE: <filename>\n\n\
-        Rules:\n\
-        1. Output only file contents.\n\
-        2. Do not wrap files in code blocks.\n\
-        3. Do not add explanations before or after the files.\n\
-        4. Every file must start with exactly: FILE: <filename>\n\
-        5. Use Markdown formatting inside each file.\n\
-        6. Use only information explicitly stated in the PDF.\n\
-        7. If information is missing, write: Not specified in the paper.";
-
-    let user = format!(
-        "PDF content:\n{pdf}\n\n\
-         Generate the following files:\n\n\
-         FILE: Overview.md\n\
-         Contents:\n\
-         - Title\n\
-         - Authors\n\
-         - Venue\n\
-         - Year\n\
-         - Abstract-style summary (300-500 words)\n\n\
-         FILE: Motivation.md\n\
-         Contents:\n\
-         - Problem statement\n\
-         - Research gap\n\
-         - Limitations of prior work\n\
-         - Motivation\n\
-         - Key observations\n\n\
-         FILE: Contributions.md\n\
-         Contents:\n\
-         - Complete list of contributions\n\
-         - Detailed explanation of each contribution\n\
-         - Novelty compared with prior work\n\n\
-         FILE: Method.md\n\
-         Contents:\n\
-         - Overall framework\n\
-         - Architecture\n\
-         - Mathematical formulations\n\
-         - Loss functions\n\
-         - Algorithms\n\
-         - Training procedure\n\
-         - Hyperparameters\n\
-         - Implementation details\n\n\
-         FILE: Experiments.md\n\
-         Contents:\n\
-         # Experimental Setup\n\
-         ## Datasets\n\
-         For every dataset: Name, Purpose, Number of samples (if provided), Task\n\
-         ## Evaluation Metrics\n\
-         ## Baselines\n\
-         ## Tested Models\n\
-         # Main Results\n\
-         For EVERY table and figure containing quantitative results:\n\
-         - Experiment name, Dataset, Metrics, Compared methods,\n\
-           Exact numerical results, Authors conclusions\n\
-         Include all reported performance numbers.\n\
-         # Ablation Studies\n\
-         For every ablation: Component changed, Settings, Results, Conclusions\n\
-         # Qualitative Results\n\
-         # Analysis\n\n\
-         FILE: Limitations.md\n\
-         Contents:\n\
-         - Limitations explicitly mentioned by the authors\n\
-         - Failure cases\n\
-         - Future work\n\n\
-         FILE: Takeaways.md\n\
-         Contents:\n\
-         - 5-10 key findings\n\
-         - Important insights\n\
-         - Practical implications\n\n\
-         Reminder:\n\
-         - Do not infer information.\n\
-         - Do not use external knowledge.\n\
-         - Report exact numbers whenever available.\n\
-         - Preserve equations and notation when useful.",
-        pdf = pdf_text,
-    );
-
-    let max_tokens = tauri::async_runtime::block_on(
-        crate::api_client::get_max_output_tokens(keys)
-    );
-    logger::log_info("generate_paper_md",
-        &format!("paper_id={} max_tokens={max_tokens}", paper.id));
-
-    let response = match tauri::async_runtime::block_on(
-        crate::api_client::generate(keys, system, &user, max_tokens)
-    ) {
-        Ok(r)  => r,
-        Err(e) => { logger::log_error("generate_paper_md", &e); return; }
-    };
-
-    let _ = std::fs::create_dir_all(pdf_dir);
-    for (filename, content) in parse_md_sections(&response) {
-        let _ = std::fs::write(pdf_dir.join(&filename), &content);
-    }
-    rebuild_paper_md(pdf_dir);
-    logger::log_info("generate_paper_md",
-        &format!("paper_id={} MD written to {}", paper.id, pdf_dir.display()));
-}
-
-// All PDF-related field keys that carry per-paper content from the paper.md.
-const PDF_EMBED_FIELDS: &[&str] = &[
-    "pdf", "md_summary", "md_motivation", "md_contribution",
-    "md_method", "md_methods", "md_experiment", "md_conclusion",
-];
+const PDF_EMBED_FIELDS: &[&str] = &["pdf"];
 
 /// Embed a paper's fields in the background using cloud APIs.
 ///
-/// * `generate_md` = true  — generate paper.md sections first (fresh upload flow).
-/// * `generate_md` = false — skip generation, re-embed from existing .md files (edit flow).
+/// * `generate_md` = true  — convert PDF to PDF_TEXT.md first (fresh upload flow).
+/// * `generate_md` = false — skip conversion, re-embed from existing PDF_TEXT.md (edit flow).
 fn embed_pdf_in_background(
     app:         tauri::AppHandle,
     paper_id:    i64,
@@ -1197,42 +1033,109 @@ fn embed_pdf_in_background(
 
         let pdf_dir = pdfs_dir.join(paper_id.to_string());
 
-        // Step 1 — extract raw PDF text and store as PDF_TEXT.md (fresh upload only).
-        // Runs regardless of API availability so the text is always persisted.
+        // Step 1 — convert PDF to Markdown via markitdown → PDF_TEXT.md (fresh upload / regen).
         if generate_md {
             if let Some(pdf_path) = paper.pdf_path.as_deref().filter(|p| !p.is_empty()) {
-                match crate::api_client::extract_pdf_text(pdf_path) {
+                let _ = app.emit("summary://progress", serde_json::json!({
+                    "status": "starting", "paper_id": paper_id, "title": &paper.title
+                }));
+                match crate::api_client::convert_pdf_to_markdown(pdf_path, &data_dir) {
                     Ok(text) if !text.trim().is_empty() => {
-                        let content = format!("# PDF Text\n\n{text}");
-                        let out = pdf_dir.join("PDF_TEXT.md");
-                        match std::fs::write(&out, &content) {
-                            Ok(_) => {
-                                rebuild_paper_md(&pdf_dir);
-                                logger::log_info("embed_pdf_in_background",
-                                    &format!("paper_id={paper_id} PDF_TEXT.md written ({} chars)", text.len()));
-                            }
-                            Err(e) => logger::log_error("embed_pdf_in_background",
-                                &format!("paper_id={paper_id} write PDF_TEXT.md: {e}")),
+                        if let Err(e) = std::fs::write(pdf_dir.join("PDF_TEXT.md"), &text) {
+                            logger::log_error("embed_pdf_in_background",
+                                &format!("paper_id={paper_id} write PDF_TEXT.md: {e}"));
+                            let _ = app.emit("summary://progress", serde_json::json!({
+                                "status": "error", "paper_id": paper_id, "error": e.to_string()
+                            }));
+                            return;
                         }
+                        logger::log_info("embed_pdf_in_background",
+                            &format!("paper_id={paper_id} PDF_TEXT.md written ({} chars)", text.len()));
                     }
-                    Ok(_)  => logger::log_info("embed_pdf_in_background",
-                        &format!("paper_id={paper_id} PDF text extraction returned empty")),
-                    Err(e) => logger::log_error("embed_pdf_in_background",
-                        &format!("paper_id={paper_id} PDF text extraction failed: {e}")),
+                    Ok(_) => {
+                        logger::log_info("embed_pdf_in_background",
+                            &format!("paper_id={paper_id} PDF text extraction returned empty"));
+                    }
+                    Err(e) => {
+                        logger::log_error("embed_pdf_in_background",
+                            &format!("paper_id={paper_id} PDF text extraction failed: {e}"));
+                        let _ = app.emit("summary://progress", serde_json::json!({
+                            "status": "error", "paper_id": paper_id, "error": e.to_string()
+                        }));
+                        return;
+                    }
                 }
             }
         }
 
-        // Step 2 — generate AI summary sections (fresh upload + API available).
-        if generate_md && keys.has_any() {
-            logger::log_info("embed_pdf_in_background",
-                &format!("paper_id={paper_id} generating MD"));
-            generate_paper_md(&paper, &pdf_dir, &keys);
+        // Step 2 — generate AI summary: PDF_TEXT.md → summary model → AI_SUMMARY.md.
+        // Runs whenever the API is configured (regardless of embedding strategy).
+        let pdf_text_path = pdf_dir.join("PDF_TEXT.md");
+        if keys.has_any() && pdf_text_path.exists() {
+            if let Ok(pdf_text) = std::fs::read_to_string(&pdf_text_path) {
+                if !pdf_text.trim().is_empty() {
+                    let _ = app.emit("summary://progress", serde_json::json!({
+                        "status": "summarizing", "paper_id": paper_id, "title": &paper.title
+                    }));
+                    let system = "You are an expert research scientist. \
+                        Analyze the following academic paper and produce a detailed structured summary \
+                        with these sections:\n\
+                        \n\
+                        ## Motivation\n\
+                        What problem does this paper address? Why is it important?\n\
+                        \n\
+                        ## Contributions\n\
+                        List the key contributions of this paper.\n\
+                        \n\
+                        ## Method\n\
+                        Explain the proposed approach, architecture, or algorithm in detail.\n\
+                        \n\
+                        ## Experiments\n\
+                        - **Datasets**: List all datasets used.\n\
+                        - **Baselines / Compared Methods**: List all methods compared against.\n\
+                        - **Experimental Settings**: Describe evaluation metrics, training setup, and \
+                        any important implementation details.\n\
+                        - **Results**: Summarize the main quantitative and qualitative findings.\n\
+                        \n\
+                        Preserve as much detail as possible. Do not omit numbers, dataset names, \
+                        or method names.";
+                    let max_tokens = tauri::async_runtime::block_on(
+                        crate::api_client::get_max_output_tokens(&keys)
+                    );
+                    match tauri::async_runtime::block_on(
+                        crate::api_client::generate(&keys, system, &pdf_text, max_tokens)
+                    ) {
+                        Ok(summary) if !summary.trim().is_empty() => {
+                            if let Err(e) = std::fs::write(pdf_dir.join("AI_SUMMARY.md"), &summary) {
+                                logger::log_error("embed_pdf_in_background",
+                                    &format!("paper_id={paper_id} write AI_SUMMARY.md: {e}"));
+                            } else {
+                                logger::log_info("embed_pdf_in_background",
+                                    &format!("paper_id={paper_id} AI_SUMMARY.md written ({} chars)", summary.len()));
+                            }
+                        }
+                        Ok(_) => {
+                            logger::log_info("embed_pdf_in_background",
+                                &format!("paper_id={paper_id} summary generation returned empty"));
+                        }
+                        Err(e) => {
+                            logger::log_error("embed_pdf_in_background",
+                                &format!("paper_id={paper_id} summary generation failed: {e}"));
+                            // Non-fatal — proceed to embedding with raw PDF text.
+                        }
+                    }
+                }
+            }
         }
 
-        // Step 2 — embed fields (only when HF strategy is active).
-        if sim_cfg["strategy"].as_str() != Some("hf-embeddings") { return; }
-        if !keys.has_any() { return; }
+        // Step 3 — embed AI_SUMMARY.md (or PDF_TEXT.md as fallback) via the embedding model.
+        // Only runs when the HF-embeddings strategy is active.
+        if sim_cfg["strategy"].as_str() != Some("hf-embeddings") || !keys.has_any() {
+            let _ = app.emit("summary://progress", serde_json::json!({
+                "status": "done", "paper_id": paper_id, "title": &paper.title
+            }));
+            return;
+        }
 
         let has_pdf = paper.pdf_path.as_deref().map(|p| !p.is_empty()).unwrap_or(false);
 
@@ -1269,6 +1172,10 @@ fn embed_pdf_in_background(
         let _ = write_merged_embedding(&emb_path, &model, &fv, &written_at);
         logger::log_info("embed_pdf_in_background",
             &format!("paper_id={paper_id} embeddings written"));
+
+        let _ = app.emit("summary://progress", serde_json::json!({
+            "status": "done", "paper_id": paper_id, "title": &paper.title
+        }));
     });
 }
 
@@ -1660,17 +1567,10 @@ pub fn get_papers_ai_status(s: State<'_, AppState>) -> CmdResult<serde_json::Val
             (false, false)
         };
 
-        // ── AI summary section files ──────────────────────────────────────────
-        // Section .md files live alongside the PDF: projects/<slug>/pdfs/<id>/
+        // ── AI_SUMMARY.md or PDF_TEXT.md ─────────────────────────────────────
         let pdf_dir = pdfs_dir.join(id.to_string());
-        let has_summary = pdf_dir.exists() && std::fs::read_dir(&pdf_dir)
-            .into_iter().flatten().flatten()
-            .any(|e| {
-                let name = e.file_name().to_string_lossy().to_string();
-                name.ends_with(".md")
-                    && name != "paper.md"
-                    && name != "PDF_TEXT.md"
-            });
+        let has_summary = pdf_dir.join("AI_SUMMARY.md").exists()
+            || pdf_dir.join("PDF_TEXT.md").exists();
 
         if has_embedding     { n_emb     += 1; }
         if has_pdf_embedding { n_pdf_emb += 1; }

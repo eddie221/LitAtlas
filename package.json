@@ -6,7 +6,7 @@
     "tauri": "tauri",
     "dev": "tauri dev",
     "build": "tauri build",
-    "prepare": "node scripts/copy-katex.js"
+    "prepare": "node scripts/copy-katex.js && node scripts/setup-python.js"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0"

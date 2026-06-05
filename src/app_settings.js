@@ -167,22 +167,6 @@ function _buildApiTab(cfg, dirs) {
                 ${!cfg.api_base_url ? "disabled" : ""}>Reset to Default</button>
       </div>
       <div id="app-cfg-api-base-url-status" class="app-cfg-status"></div>
-      <div class="app-cfg-hint" style="margin-top:10px">
-        Embedding Pooling — how token vectors are combined into one embedding.
-        Required for generative models (e.g. llama.cpp with a chat model).
-        Leave blank for dedicated embedding models.
-      </div>
-      <div class="app-cfg-script-row" style="gap:8px">
-        <select id="app-cfg-api-pooling" class="app-cfg-input" style="flex:0 0 auto;width:auto">
-          <option value=""    ${!cfg.api_pooling              ? "selected" : ""}>(default)</option>
-          <option value="last"  ${ cfg.api_pooling==="last"   ? "selected" : ""}>last</option>
-          <option value="mean"  ${ cfg.api_pooling==="mean"   ? "selected" : ""}>mean</option>
-          <option value="cls"   ${ cfg.api_pooling==="cls"    ? "selected" : ""}>cls</option>
-          <option value="none"  ${ cfg.api_pooling==="none"   ? "selected" : ""}>none</option>
-        </select>
-        <button id="app-cfg-api-pooling-save" class="btn btn-new-paper">Save</button>
-      </div>
-      <div id="app-cfg-api-pooling-status" class="app-cfg-status"></div>
     </div>
 
     <div class="app-cfg-section">
@@ -208,6 +192,55 @@ function _buildApiTab(cfg, dirs) {
                 ${!cfg.anthropic_api_key ? "disabled" : ""}>Clear</button>
       </div>
       <div id="app-cfg-anthropic-key-status" class="app-cfg-status"></div>
+    </div>
+
+    <div class="app-cfg-section">
+      <div class="app-cfg-section-title">Summary Max Tokens</div>
+      <div class="app-cfg-hint">
+        Maximum output tokens for AI summary generation. Leave blank to use the
+        provider default (16 384 for Anthropic, 16 384 for OpenAI).
+      </div>
+      <div class="app-cfg-script-row" style="gap:8px">
+        <input id="app-cfg-summary-max-tokens" class="app-cfg-input"
+               type="number" min="256" max="131072" step="256"
+               placeholder="16384"
+               value="${cfg.summary_max_tokens ?? ""}"
+               style="width:120px;flex:0 0 auto">
+        <button id="app-cfg-summary-max-tokens-save" class="btn btn-new-paper">Save</button>
+        <button id="app-cfg-summary-max-tokens-clear" class="btn app-cfg-reset-btn"
+                ${!cfg.summary_max_tokens ? "disabled" : ""}>Reset to Default</button>
+      </div>
+      <div id="app-cfg-summary-max-tokens-status" class="app-cfg-status"></div>
+    </div>
+
+    <div class="app-cfg-section" id="app-cfg-model-section"
+         style="${cfg.api_base_url ? "" : "display:none"}">
+      <div class="app-cfg-section-title">Model Selection</div>
+      <div class="app-cfg-hint">
+        Choose which models from your endpoint to use for embedding and summary.
+      </div>
+      <div class="app-cfg-script-actions" style="margin-bottom:8px">
+        <button id="app-cfg-fetch-models" class="btn">Fetch Models</button>
+        <span id="app-cfg-fetch-models-status" class="app-cfg-status" style="margin-left:8px"></span>
+      </div>
+      <div class="app-cfg-row" style="flex-direction:column;gap:8px">
+        <div class="app-cfg-row" style="gap:8px;align-items:center">
+          <label style="min-width:130px;font-size:0.8rem;color:var(--text-secondary)">Embedding Model</label>
+          <select id="app-cfg-embedding-model" class="app-cfg-input" style="flex:1">
+            <option value="">— fetch models first —</option>
+          </select>
+        </div>
+        <div class="app-cfg-row" style="gap:8px;align-items:center">
+          <label style="min-width:130px;font-size:0.8rem;color:var(--text-secondary)">Summary Model</label>
+          <select id="app-cfg-summary-model" class="app-cfg-input" style="flex:1">
+            <option value="">— fetch models first —</option>
+          </select>
+        </div>
+      </div>
+      <div class="app-cfg-script-actions" style="margin-top:8px">
+        <button id="app-cfg-save-models" class="btn btn-new-paper" disabled>Save Model Selection</button>
+      </div>
+      <div id="app-cfg-model-status" class="app-cfg-status"></div>
     </div>
 
     <div class="app-cfg-section">
@@ -359,6 +392,8 @@ function _wireApiTab(body, cfg, dirs) {
       await _saveConfig(cfg);
       _showStatus(urlStatus, "✓ URL saved — takes effect on next action", "ok");
       if (urlClearBtn) urlClearBtn.disabled = !val;
+      const modelSection = body.querySelector("#app-cfg-model-section");
+      if (modelSection) modelSection.style.display = val ? "" : "none";
     } catch (e) { _showStatus(urlStatus, `✗ ${e}`, "err"); }
   });
 
@@ -395,16 +430,28 @@ function _wireApiTab(body, cfg, dirs) {
     } catch (e) { _showStatus(urlStatus, `✗ ${e}`, "err"); }
   });
 
-  // Embedding pooling
-  const poolingSel    = body.querySelector("#app-cfg-api-pooling");
-  const poolingSave   = body.querySelector("#app-cfg-api-pooling-save");
-  const poolingStatus = body.querySelector("#app-cfg-api-pooling-status");
-  poolingSave?.addEventListener("click", async () => {
-    cfg.api_pooling = poolingSel?.value || null;
+  // Summary max tokens
+  const maxTokInput  = body.querySelector("#app-cfg-summary-max-tokens");
+  const maxTokSave   = body.querySelector("#app-cfg-summary-max-tokens-save");
+  const maxTokClear  = body.querySelector("#app-cfg-summary-max-tokens-clear");
+  const maxTokStatus = body.querySelector("#app-cfg-summary-max-tokens-status");
+  maxTokSave?.addEventListener("click", async () => {
+    const val = parseInt(maxTokInput?.value ?? "", 10);
+    cfg.summary_max_tokens = Number.isFinite(val) && val > 0 ? val : null;
     try {
       await _saveConfig(cfg);
-      _showStatus(poolingStatus, "✓ Pooling saved", "ok");
-    } catch (e) { _showStatus(poolingStatus, `✗ ${e}`, "err"); }
+      _showStatus(maxTokStatus, "✓ Saved — takes effect on next summary generation", "ok");
+      if (maxTokClear) maxTokClear.disabled = !cfg.summary_max_tokens;
+    } catch (e) { _showStatus(maxTokStatus, `✗ ${e}`, "err"); }
+  });
+  maxTokClear?.addEventListener("click", async () => {
+    if (maxTokInput) maxTokInput.value = "";
+    cfg.summary_max_tokens = null;
+    try {
+      await _saveConfig(cfg);
+      _showStatus(maxTokStatus, "✓ Reset to provider default", "ok");
+      if (maxTokClear) maxTokClear.disabled = true;
+    } catch (e) { _showStatus(maxTokStatus, `✗ ${e}`, "err"); }
   });
 
   body.querySelector("#app-cfg-data-dir-open")?.addEventListener("click", async () => {
@@ -412,6 +459,74 @@ function _wireApiTab(body, cfg, dirs) {
     if (!path || !invoke) return;
     try { await invoke("open_folder", { path }); } catch (_) {}
   });
+
+  _wireModelSection(body, cfg);
+}
+
+function _wireModelSection(body, cfg) {
+  const section       = body.querySelector("#app-cfg-model-section");
+  const fetchBtn      = body.querySelector("#app-cfg-fetch-models");
+  const fetchStatus   = body.querySelector("#app-cfg-fetch-models-status");
+  const embSelect     = body.querySelector("#app-cfg-embedding-model");
+  const sumSelect     = body.querySelector("#app-cfg-summary-model");
+  const saveBtn       = body.querySelector("#app-cfg-save-models");
+  const modelStatus   = body.querySelector("#app-cfg-model-status");
+  if (!section || !invoke) return;
+
+  function _populateSelect(sel, models, saved) {
+    sel.innerHTML = models.map(m =>
+      `<option value="${_esc(m)}"${m === saved ? " selected" : ""}>${_esc(m)}</option>`
+    ).join("");
+    if (saveBtn) saveBtn.disabled = false;
+  }
+
+  async function _fetchAndPopulate() {
+    fetchStatus.textContent = "Fetching…";
+    fetchStatus.className = "app-cfg-status";
+    try {
+      const res = await invoke("list_api_models");
+      if (!res?.ok || !res.models?.length) {
+        fetchStatus.textContent = `✗ ${res?.error ?? "No models returned"}`;
+        fetchStatus.className = "app-cfg-status err";
+        return;
+      }
+      const models = res.models;
+      _populateSelect(embSelect, models, cfg.embedding_model ?? "");
+      _populateSelect(sumSelect, models, cfg.summary_model   ?? "");
+      fetchStatus.textContent = `${models.length} model${models.length !== 1 ? "s" : ""} loaded`;
+      fetchStatus.className = "app-cfg-status ok";
+
+      // Warn if saved models are no longer in the list
+      const warnings = [];
+      if (cfg.embedding_model && !models.includes(cfg.embedding_model))
+        warnings.push(`Embedding model "${cfg.embedding_model}" not found`);
+      if (cfg.summary_model && !models.includes(cfg.summary_model))
+        warnings.push(`Summary model "${cfg.summary_model}" not found`);
+      if (warnings.length)
+        _showStatus(modelStatus, `⚠ ${warnings.join("; ")} — please re-select`, "err");
+    } catch (e) {
+      fetchStatus.textContent = `✗ ${e}`;
+      fetchStatus.className = "app-cfg-status err";
+    }
+  }
+
+  fetchBtn?.addEventListener("click", _fetchAndPopulate);
+
+  saveBtn?.addEventListener("click", async () => {
+    cfg.embedding_model = embSelect?.value ?? "";
+    cfg.summary_model   = sumSelect?.value ?? "";
+    try {
+      await _saveConfig(cfg);
+      _showStatus(modelStatus, "✓ Model selection saved", "ok");
+    } catch (e) {
+      _showStatus(modelStatus, `✗ ${e}`, "err");
+    }
+  });
+
+  // Auto-fetch on open if endpoint is already configured and models were previously saved.
+  if (cfg.api_base_url && (cfg.embedding_model || cfg.summary_model)) {
+    _fetchAndPopulate();
+  }
 }
 
 // ── Utility ───────────────────────────────────────────────────────────────────

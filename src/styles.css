@@ -1401,6 +1401,41 @@
       padding-top: 12px;
     }
 /* ── Custom confirm / alert dialog ─────────────────────────────────────────── */
+/* ── Status bar ────────────────────────────────────────────────────────────── */
+#status-bar {
+  position: fixed;
+  bottom: 0; left: 0; right: 0;
+  height: 26px;
+  z-index: 9000;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 12px;
+  background: var(--bg-panel, #13151c);
+  border-top: 1px solid var(--border, #2a2d3a);
+  font-size: 0.72rem;
+  color: var(--text-secondary, #8b90a0);
+  transform: translateY(100%);
+  transition: transform 0.18s ease;
+  pointer-events: none;
+}
+#status-bar.visible { transform: translateY(0); }
+#status-bar.error   { color: #e06c75; }
+
+#status-bar-icon {
+  display: inline-block;
+  width: 10px; height: 10px;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+#status-bar.error   #status-bar-icon,
+#status-bar.done    #status-bar-icon { border: none; }
+
+@keyframes sb-spin { to { transform: rotate(360deg); } }
+#status-bar.loading #status-bar-icon { animation: sb-spin 0.8s linear infinite; }
+
 #pg-dialog-backdrop {
   display: none;
   position: fixed;

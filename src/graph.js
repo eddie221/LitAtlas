@@ -269,6 +269,34 @@ if (tauriListen) {
       _embedDoneResolve = _embedDoneReject = null;
     }
   });
+
+  // ── PDF summary progress (markitdown / pdf_extract) ──
+  let _sbTimer = null;
+  const _sbEl  = () => document.getElementById("status-bar");
+  const _sbMsg = () => document.getElementById("status-bar-msg");
+  function _sbShow(state, text) {
+    const bar = _sbEl();
+    if (!bar) return;
+    clearTimeout(_sbTimer);
+    bar.className = `visible ${state}`;
+    _sbMsg().textContent = text;
+    if (state === "done" || state === "error") {
+      _sbTimer = setTimeout(() => { bar.className = ""; }, 3000);
+    }
+  }
+
+  tauriListen("summary://progress", ({ payload }) => {
+    const title = payload?.title ? `"${payload.title}"` : "paper";
+    if (payload?.status === "starting") {
+      _sbShow("loading", `Processing PDF for ${title}…`);
+    } else if (payload?.status === "summarizing") {
+      _sbShow("loading", `Generating AI summary for ${title}…`);
+    } else if (payload?.status === "done") {
+      _sbShow("done", `PDF processed for ${title}`);
+    } else if (payload?.status === "error") {
+      _sbShow("error", `PDF processing failed — ${payload?.error ?? "unknown error"}`);
+    }
+  });
 }
 
 // Returns a promise that resolves when embedding://progress { done } fires,

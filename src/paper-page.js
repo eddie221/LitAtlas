@@ -292,7 +292,7 @@ function renderInfoTab(paper) {
   const attrRows = (paper.attributes ?? [])
     .filter(a => a.key !== "abstract")
     .sort((a, b) => a.order - b.order)
-    .map((a, i) => `
+    .map((a) => `
       <tr data-key="${esc(a.key)}" data-order="${a.order}">
         <td><input class="pp-input attr-key-input" value="${esc(a.key)}" style="width:100%"></td>
         <td><input class="pp-input attr-val-input" value="${esc(a.value)}" style="width:100%"></td>
@@ -742,12 +742,6 @@ function showPdfFromPath(path, viewer, dropzone, nameEl, statusEl) {
   }
 }
 
-function showPdfViewerShell(viewer, dropzone, nameEl, filename) {
-  dropzone.style.display = "none";
-  viewer.style.display   = "flex";
-  if (nameEl) nameEl.textContent = filename;
-}
-
 function showPdfInFrame(name, viewer, dropzone, nameEl) {
   dropzone.style.display = "none"; viewer.style.display = "flex";
   if (nameEl) nameEl.textContent = name;
@@ -991,20 +985,43 @@ async function renderAiSummaryTab(paper) {
     );
   });
 
-  // Regenerate all sections
+  // Re-extract PDF via markitdown
   regenBtn.addEventListener("click", async () => {
-    if (!await pgConfirm(
-      "Regenerate all AI summary sections from the PDF?\n\nExisting section files will be overwritten.",
-      "Regenerate Sections"
-    )) return;
     regenBtn.disabled = true;
-    setStatus("Regenerating… (this may take a moment)", "var(--text-secondary)");
+    setStatus("Extracting PDF…", "var(--text-secondary)");
+
+    const tauriListen = window.__TAURI__?.event?.listen;
+    let unlisten = null;
+    if (tauriListen) {
+      unlisten = await tauriListen("summary://progress", async ({ payload }) => {
+        if (payload?.paper_id !== paper.id) return;
+        if (payload?.status === "starting") {
+          setStatus("Extracting PDF…", "var(--text-secondary)");
+        } else if (payload?.status === "summarizing") {
+          setStatus("Generating AI summary…", "var(--text-secondary)");
+        } else if (payload?.status === "done") {
+          unlisten?.();
+          unlisten = null;
+          await renderAiSummaryTab(paper);
+          regenBtn.disabled = false;
+        } else if (payload?.status === "error") {
+          unlisten?.();
+          unlisten = null;
+          setStatus(`✗ ${payload?.error ?? "unknown error"}`, "var(--accent3)");
+          regenBtn.disabled = false;
+        }
+      });
+    }
+
     try {
       await invoke("regenerate_paper_md", { paperId: paper.id });
-      setStatus("Regenerating in background — reload this tab when done.", "var(--accent)");
+      if (!tauriListen) {
+        setStatus("Processing in background — will refresh when done.", "var(--accent)");
+        regenBtn.disabled = false;
+      }
     } catch (e) {
+      unlisten?.();
       setStatus(`✗ ${e}`, "var(--accent3)");
-    } finally {
       regenBtn.disabled = false;
     }
   });

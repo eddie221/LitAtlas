@@ -8,7 +8,7 @@ mod api_client;
 use commands::*;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use sqlx::SqlitePool;
 
 // ── AppState ──────────────────────────────────────────────────────────────────
@@ -32,6 +32,14 @@ impl AppState {
     }
     pub fn projects_json(&self) -> PathBuf {
         self.data_dir.join("projects.json")
+    }
+}
+
+impl Drop for AppState {
+    fn drop(&mut self) {
+        logger::log_call("app::shutdown");
+        let pool = self.pool.lock().unwrap().clone();
+        tauri::async_runtime::block_on(pool.close());
     }
 }
 
@@ -116,6 +124,93 @@ pub fn open_project(projects_dir: &PathBuf, slug: &str) -> SqlitePool {
     pool
 }
 
+// ── Python environment setup ──────────────────────────────────────────────────
+
+/// Ensures `<data_dir>/.venv/bin/markitdown` exists.
+/// If the venv is missing, creates it and installs markitdown in a background
+/// thread so the app is not blocked at launch. Progress is reported via the
+/// "summary://progress" event so the status bar can display it.
+fn ensure_python_env(app: tauri::AppHandle, data_dir: std::path::PathBuf) {
+    #[cfg(target_os = "windows")]
+    let (bin, markitdown_name) = ("Scripts", "markitdown.exe");
+    #[cfg(not(target_os = "windows"))]
+    let (bin, markitdown_name) = ("bin", "markitdown");
+
+    let venv_dir   = data_dir.join(".venv");
+    let markitdown = venv_dir.join(bin).join(markitdown_name);
+
+    if markitdown.exists() {
+        logger::log_info("python_env", "markitdown found, skipping setup");
+        return;
+    }
+
+    std::thread::spawn(move || {
+        logger::log_info("python_env", "markitdown not found, setting up venv");
+        let _ = app.emit("summary://progress", serde_json::json!({
+            "status": "starting", "title": "Setting up Python environment…"
+        }));
+
+        // Create venv
+        let python = if std::process::Command::new("python3")
+            .arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+        { "python3" } else { "python" };
+
+        let venv_str = venv_dir.to_string_lossy().to_string();
+        let out = std::process::Command::new(python)
+            .args(["-m", "venv", &venv_str])
+            .output();
+
+        match out {
+            Err(e) => {
+                let msg = format!("venv creation failed: {e}");
+                logger::log_error("python_env", &msg);
+                let _ = app.emit("summary://progress", serde_json::json!({
+                    "status": "error", "error": msg
+                }));
+                return;
+            }
+            Ok(o) if !o.status.success() => {
+                let msg = String::from_utf8_lossy(&o.stderr).trim().to_string();
+                logger::log_error("python_env", &format!("venv creation failed: {msg}"));
+                let _ = app.emit("summary://progress", serde_json::json!({
+                    "status": "error", "error": format!("venv creation failed: {msg}")
+                }));
+                return;
+            }
+            _ => {}
+        }
+
+        // Install markitdown into the venv
+        let pip = venv_dir.join(bin).join("pip");
+        let out = std::process::Command::new(&pip)
+            .args(["install", "markitdown[all]"])
+            .output();
+
+        match out {
+            Err(e) => {
+                let msg = format!("pip install markitdown failed: {e}");
+                logger::log_error("python_env", &msg);
+                let _ = app.emit("summary://progress", serde_json::json!({
+                    "status": "error", "error": msg
+                }));
+            }
+            Ok(o) if !o.status.success() => {
+                let msg = String::from_utf8_lossy(&o.stderr).trim().to_string();
+                logger::log_error("python_env", &format!("pip install failed: {msg}"));
+                let _ = app.emit("summary://progress", serde_json::json!({
+                    "status": "error", "error": format!("pip install markitdown failed: {msg}")
+                }));
+            }
+            Ok(_) => {
+                logger::log_info("python_env", "markitdown installed successfully");
+                let _ = app.emit("summary://progress", serde_json::json!({
+                    "status": "done", "title": "Python environment ready"
+                }));
+            }
+        }
+    });
+}
+
 // ── Boot ──────────────────────────────────────────────────────────────────────
 
 pub fn run() {
@@ -160,8 +255,10 @@ pub fn run() {
                 pool:         Mutex::new(pool),
                 projects_dir,
                 current_slug: Mutex::new(first_slug),
-                data_dir,
+                data_dir:     data_dir.clone(),
             });
+
+            ensure_python_env(app.handle().clone(), data_dir);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -194,6 +291,7 @@ pub fn run() {
             list_api_models,
             hf_get_paper_embedding, hf_compute_all_embeddings,
             hf_compute_edges_from_cache,
+            validate_model,
             // Similarity config persistence
             get_similarity_config, save_similarity_config,
             // App config

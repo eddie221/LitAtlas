@@ -79,26 +79,6 @@ pub fn log_error(fn_name: &str, message: &str) {
     write_entry("ERROR", fn_name, message);
 }
 
-/// Convenience: log entry + any `Err` produced by `f`, then return the result.
-///
-/// ```rust
-/// logger::traced("my_fn", || {
-///     do_something()?;
-///     Ok(result)
-/// })
-/// ```
-pub fn traced<T, F>(fn_name: &str, f: F) -> Result<T, String>
-where
-    F: FnOnce() -> Result<T, String>,
-{
-    log_call(fn_name);
-    let result = f();
-    if let Err(ref e) = result {
-        log_error(fn_name, e);
-    }
-    result
-}
-
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
 fn write_entry(level: &str, fn_name: &str, message: &str) {

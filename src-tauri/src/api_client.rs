@@ -10,12 +10,14 @@ pub struct ApiKeys {
     /// Custom base URL for OpenAI-compatible APIs (e.g. Ollama, LM Studio).
     /// Empty = use the default OpenAI endpoint.
     pub base_url:  String,
-    /// Model name to use with the custom endpoint (e.g. "nomic-embed-text").
-    /// Required when base_url is set. Set by the user in App Settings → API.
-    pub model:     String,
-    /// Pooling strategy sent in embedding requests (e.g. "last", "mean", "cls").
-    /// Empty = omit the field (OpenAI default).
-    pub pooling:   String,
+    /// Embedding model selected by the user from /v1/models (e.g. "nomic-embed-text").
+    /// Empty = use first model returned by the endpoint.
+    pub embedding_model: String,
+    /// Summary / chat model selected by the user from /v1/models (e.g. "llama3.2").
+    /// Empty = use first model returned by the endpoint.
+    pub summary_model: String,
+    /// User-configured max output tokens for summary generation. None = use per-provider default.
+    pub summary_max_tokens: Option<u32>,
 }
 
 pub const OPENAI_DEFAULT_BASE: &str = "https://api.openai.com/v1";
@@ -27,11 +29,12 @@ impl ApiKeys {
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_else(|| serde_json::json!({}));
         Self {
-            openai:    cfg["openai_api_key"].as_str().unwrap_or("").to_string(),
-            anthropic: cfg["anthropic_api_key"].as_str().unwrap_or("").to_string(),
-            base_url:  cfg["api_base_url"].as_str().unwrap_or("").trim_end_matches('/').to_string(),
-            model:     cfg["api_model"].as_str().unwrap_or("").trim().to_string(),
-            pooling:   cfg["api_pooling"].as_str().unwrap_or("").to_string(),
+            openai:          cfg["openai_api_key"].as_str().unwrap_or("").to_string(),
+            anthropic:       cfg["anthropic_api_key"].as_str().unwrap_or("").to_string(),
+            base_url:        cfg["api_base_url"].as_str().unwrap_or("").trim_end_matches('/').to_string(),
+            embedding_model: cfg["embedding_model"].as_str().unwrap_or("").trim().to_string(),
+            summary_model:   cfg["summary_model"].as_str().unwrap_or("").trim().to_string(),
+            summary_max_tokens: cfg["summary_max_tokens"].as_u64().map(|v| v as u32),
         }
     }
 
@@ -41,10 +44,6 @@ impl ApiKeys {
         !self.openai.is_empty() || !self.anthropic.is_empty() || !self.base_url.is_empty()
     }
 
-    /// Returns the effective base URL (custom or OpenAI default).
-    pub fn openai_base(&self) -> &str {
-        if self.base_url.is_empty() { OPENAI_DEFAULT_BASE } else { &self.base_url }
-    }
 }
 
 /// Compute an embedding vector via an API model.
@@ -53,20 +52,27 @@ impl ApiKeys {
 /// forwarded directly to the custom endpoint as OpenAI-compatible requests.
 pub async fn embed(keys: &ApiKeys, model_id: &str, text: &str) -> Result<Vec<f32>, String> {
     if !keys.base_url.is_empty() {
-        // Always derive the model from /v1/models when a custom endpoint is set.
-        // The saved model ID in similarity_config may be stale (different model
-        // loaded, or leftover prefix from the default OpenAI config).
         let models = list_models(&keys.openai, &keys.base_url).await
             .map_err(|e| format!("Could not list models from custom endpoint: {e}"))?;
-        let model = models.into_iter().next()
-            .ok_or_else(|| "No models available at the custom endpoint".to_string())?;
+        let model = if !keys.embedding_model.is_empty() {
+            if !models.contains(&keys.embedding_model) {
+                return Err(format!(
+                    "Embedding model '{}' is no longer available. Update it in App Settings → API.",
+                    keys.embedding_model
+                ));
+            }
+            keys.embedding_model.clone()
+        } else {
+            models.into_iter().next()
+                .ok_or_else(|| "No models available at the custom endpoint".to_string())?
+        };
         crate::logger::log_info("api::embed", &format!("using model: {model}"));
-        return openai_embed(&keys.openai, &keys.base_url, &model, text, &keys.pooling).await;
+        return openai_embed(&keys.openai, &keys.base_url, &model, text).await;
     }
     // No custom URL — route by provider prefix.
     if let Some((provider, model_name)) = model_id.split_once(':') {
         return match provider {
-            "openai" => openai_embed(&keys.openai, OPENAI_DEFAULT_BASE, model_name, text, &keys.pooling).await,
+            "openai" => openai_embed(&keys.openai, OPENAI_DEFAULT_BASE, model_name, text).await,
             other    => Err(format!("Unsupported embedding provider: {other}")),
         };
     }
@@ -108,24 +114,19 @@ fn looks_like_loading(status: u16, body: &str) -> bool {
 const RETRY_MAX: u32     = 4;
 const RETRY_DELAY_MS: u64 = 3_000;
 
-pub async fn openai_embed(api_key: &str, base_url: &str, model: &str, text: &str, pooling: &str) -> Result<Vec<f32>, String> {
+pub async fn openai_embed(api_key: &str, base_url: &str, model: &str, text: &str) -> Result<Vec<f32>, String> {
     // Require a key only for the default OpenAI endpoint; local servers may be keyless.
     if api_key.is_empty() && base_url == OPENAI_DEFAULT_BASE {
         return Err("No OpenAI API key configured".to_string());
     }
     let client  = reqwest::Client::new();
-    let mut payload = serde_json::json!({ "input": text, "model": model });
-    if !pooling.is_empty() {
-        payload["pooling_type"] = serde_json::json!(pooling);
-    }
-    let payload = payload;
+    let payload = serde_json::json!({ "input": text, "model": model });
     let urls    = candidates(base_url, "embeddings");
     let mut last_err = String::new();
 
     crate::logger::log_info("api::embed", &format!(
-        "POST embeddings url={} model={model} pooling={} input_chars={} input_preview={:?}",
+        "POST embeddings url={} model={model} input_chars={} input_preview={:?}",
         urls.first().map(String::as_str).unwrap_or("?"),
-        if pooling.is_empty() { "(default)" } else { pooling },
         text.len(),
         trunc(text, 120),
     ));
@@ -188,10 +189,18 @@ pub async fn generate(
     user:       &str,
     max_tokens: u32,
 ) -> Result<String, String> {
-    // Custom endpoint — use configured model or fetch first available from /v1/models.
+    // Custom endpoint — use configured summary model or fetch first available from /v1/models.
     if !keys.base_url.is_empty() {
-        let model = if !keys.model.is_empty() {
-            keys.model.clone()
+        let model = if !keys.summary_model.is_empty() {
+            let models = list_models(&keys.openai, &keys.base_url).await
+                .map_err(|e| format!("Could not list models from custom endpoint: {e}"))?;
+            if !models.contains(&keys.summary_model) {
+                return Err(format!(
+                    "Summary model '{}' is no longer available. Update it in App Settings → API.",
+                    keys.summary_model
+                ));
+            }
+            keys.summary_model.clone()
         } else {
             let models = list_models(&keys.openai, &keys.base_url).await
                 .map_err(|e| format!("No model configured and could not list models: {e}"))?;
@@ -203,7 +212,7 @@ pub async fn generate(
     }
     if !keys.anthropic.is_empty() {
         return anthropic_generate(
-            &keys.anthropic, "claude-haiku-4-5-20251001",
+            &keys.anthropic, "claude-sonnet-4-6",
             system, user, max_tokens,
         ).await;
     }
@@ -469,8 +478,11 @@ pub async fn test_endpoint(url: &str, api_key: &str) -> Result<String, String> {
 /// * Anthropic key    — claude-haiku-4-5 hard limit is 8 192.
 /// * OpenAI default   — gpt-4o-mini hard limit is 16 384.
 pub async fn get_max_output_tokens(keys: &ApiKeys) -> u32 {
+    if let Some(n) = keys.summary_max_tokens.filter(|&n| n > 0) {
+        return n;
+    }
     if !keys.anthropic.is_empty() && keys.base_url.is_empty() {
-        return 8_192;
+        return 16_384;
     }
     if !keys.base_url.is_empty() {
         // Ask the server for the model's context_length.
@@ -551,7 +563,25 @@ pub async fn list_models(api_key: &str, base_url: &str) -> Result<Vec<String>, S
     Err(err)
 }
 
-/// Extract plain text from a PDF file using the pdf-extract crate.
-pub fn extract_pdf_text(path: &str) -> Result<String, String> {
-    pdf_extract::extract_text(path).map_err(|e| format!("PDF text extraction: {e}"))
+/// Convert a PDF to Markdown using the markitdown CLI.
+/// Looks for `.venv/bin/markitdown` inside `data_dir` (app data directory),
+/// then falls back to `markitdown` on the system PATH.
+pub fn convert_pdf_to_markdown(path: &str, data_dir: &std::path::Path) -> Result<String, String> {
+    let bin = find_markitdown_bin(data_dir);
+
+    let output = std::process::Command::new(&bin)
+        .arg(path)
+        .output()
+        .map_err(|e| format!("markitdown launch failed: {e}"))?;
+
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    String::from_utf8(output.stdout).map_err(|e| format!("markitdown output decode: {e}"))
+}
+
+fn find_markitdown_bin(data_dir: &std::path::Path) -> std::path::PathBuf {
+    let candidate = data_dir.join(".venv/bin/markitdown");
+    if candidate.exists() { return candidate; }
+    std::path::PathBuf::from("markitdown")
 }
