@@ -173,7 +173,8 @@
     .job-error i       { color: var(--accent3); }
     .job-waiting i     { color: var(--text-dim); }
     .job-info { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-    .job-title { color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .job-title { color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: flex; align-items: center; gap: 5px; }
+    .job-tag { font-size: 0.55rem; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-dim); border: 1px solid var(--border2); border-radius: 3px; padding: 1px 4px; flex-shrink: 0; }
     .job-msg   { color: var(--text-secondary); font-size: 0.65rem; }
     @keyframes job-spin { to { transform: rotate(360deg); } }
     .job-spinner {

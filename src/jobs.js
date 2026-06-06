@@ -6,13 +6,13 @@ const invoke      = window.__TAURI__?.core?.invoke;
 const tauriListen = window.__TAURI__?.event?.listen;
 
 // ── State ─────────────────────────────────────────────────────────────────────
-// { id, paperId, title, status: 'waiting'|'processing'|'done'|'error', message }
+// { id, paperId, title, command, status: 'waiting'|'processing'|'done'|'error', message }
 const _jobs = [];
 let _processing = false;
 
 // ── Public API ────────────────────────────────────────────────────────────────
-export function enqueueJob(paperId, title) {
-  const job = { id: Date.now() + Math.random(), paperId, title, status: "waiting", message: "" };
+export function enqueueJob(paperId, title, command = "embed_paper_pdf") {
+  const job = { id: Date.now() + Math.random(), paperId, title, command, status: "waiting", message: "" };
   _jobs.push(job);
   _showPanel();
   _render();
@@ -58,7 +58,7 @@ async function _processNext() {
       });
     }
 
-    await invoke("embed_paper_pdf", { paperId: next.paperId });
+    await invoke(next.command, { paperId: next.paperId });
     if (tauriListen) await jobDone;
     else { next.status = "done"; next.message = ""; }
 
@@ -123,8 +123,9 @@ function _render() {
                : j.status === "error"      ? `<i class="bi bi-x-circle-fill"></i>`
                :                             `<i class="bi bi-clock"></i>`;
     const title = j.title.length > 38 ? j.title.slice(0, 36) + "…" : j.title;
+    const tag   = j.command === "regenerate_paper_md" ? "Regen" : "PDF";
     const msg   = j.message ? `<div class="job-msg">${j.message}</div>` : "";
-    return `<div class="job-item ${cls}">${icon}<div class="job-info"><div class="job-title">${title}</div>${msg}</div></div>`;
+    return `<div class="job-item ${cls}">${icon}<div class="job-info"><div class="job-title"><span class="job-tag">${tag}</span>${title}</div>${msg}</div></div>`;
   }).join("");
 }
 

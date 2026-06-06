@@ -960,14 +960,16 @@ async function renderAiSummaryTab(paper) {
     );
   });
 
-  // Re-extract PDF via markitdown
+  // Re-extract PDF via markitdown — runs through the serial job queue.
   regenBtn.addEventListener("click", async () => {
     regenBtn.disabled = true;
-    setStatus("Extracting PDF…", "var(--text-secondary)");
+    setStatus("Queued…", "var(--text-secondary)");
 
+    // Listen for progress so the status text and tab refresh still work
+    // when this job is eventually dequeued and executed.
     const tauriListen = window.__TAURI__?.event?.listen;
-    let unlisten = null;
     if (tauriListen) {
+      let unlisten = null;
       unlisten = await tauriListen("summary://progress", async ({ payload }) => {
         if (payload?.paper_id !== paper.id) return;
         if (payload?.status === "starting") {
@@ -975,30 +977,19 @@ async function renderAiSummaryTab(paper) {
         } else if (payload?.status === "summarizing") {
           setStatus("Generating AI summary…", "var(--text-secondary)");
         } else if (payload?.status === "done") {
-          unlisten?.();
-          unlisten = null;
+          unlisten?.(); unlisten = null;
           await renderAiSummaryTab(paper);
-          regenBtn.disabled = false;
         } else if (payload?.status === "error") {
-          unlisten?.();
-          unlisten = null;
+          unlisten?.(); unlisten = null;
           setStatus(`✗ ${payload?.error ?? "unknown error"}`, "var(--accent3)");
           regenBtn.disabled = false;
         }
       });
-    }
-
-    try {
-      await invoke("regenerate_paper_md", { paperId: paper.id });
-      if (!tauriListen) {
-        setStatus("Processing in background — will refresh when done.", "var(--accent)");
-        regenBtn.disabled = false;
-      }
-    } catch (e) {
-      unlisten?.();
-      setStatus(`✗ ${e}`, "var(--accent3)");
+    } else {
       regenBtn.disabled = false;
     }
+
+    enqueueJob(paper.id, paper.title, "regenerate_paper_md");
   });
 
   // Delete active section file

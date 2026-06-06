@@ -84,12 +84,22 @@ pub async fn embed(keys: &ApiKeys, model_id: &str, text: &str) -> Result<Vec<f32
 /// Otherwise tries /v1/ first (standard for all OpenAI-compatible APIs),
 /// then the root path as fallback for non-standard servers.
 fn candidates(base_url: &str, path: &str) -> Vec<String> {
-    if base_url.ends_with("/v1") {
-        vec![format!("{base_url}/{path}")]
+    let raw = base_url.trim_end_matches('/');
+    // Prepend http:// if the user omitted the scheme (e.g. "127.0.0.1:1234").
+    let owned;
+    let base = if raw.starts_with("http://") || raw.starts_with("https://") {
+        raw
+    } else {
+        owned = format!("http://{raw}");
+        &owned
+    };
+    if base.ends_with("/v1") {
+        vec![format!("{base}/{path}")]
     } else {
         vec![
-            format!("{base_url}/v1/{path}"),
-            format!("{base_url}/api/{path}"),
+            format!("{base}/v1/{path}"),
+            format!("{base}/api/{path}"),
+            format!("{base}/{path}"),
         ]
     }
 }
@@ -374,10 +384,12 @@ pub async fn openai_check(api_key: &str, base_url: &str) -> Result<(), String> {
         .build()
         .map_err(|e| e.to_string())?;
 
+    let mut got_response = false;
     for url in candidates(base_url, "models") {
         let req = client.get(&url);
         let req = if !api_key.is_empty() { req.bearer_auth(api_key) } else { req };
         if let Ok(resp) = req.send().await {
+            got_response = true;
             let s = resp.status();
             if s.is_success() {
                 crate::logger::log_info("api::check", &format!("models OK at {url}"));
@@ -391,11 +403,15 @@ pub async fn openai_check(api_key: &str, base_url: &str) -> Result<(), String> {
                     .unwrap_or_else(|| format!("HTTP {s}"));
                 return Err(msg);
             }
-            // 404 → try next candidate
+            // non-success, non-auth → try next candidate
         }
     }
 
-    Err("Could not reach the server. Check the URL and that the server is running.".into())
+    if got_response {
+        Err("Server is reachable but no compatible /models endpoint found. Check your API URL format (e.g. http://localhost:1234/v1).".into())
+    } else {
+        Err("Could not reach the server. Check the URL and that the server is running.".into())
+    }
 }
 
 /// Probe an API endpoint and return a human-readable status string.
@@ -448,10 +464,12 @@ pub async fn test_endpoint(url: &str, api_key: &str) -> Result<String, String> {
     }
 
     // Probe /models — fallback for cloud APIs (OpenAI, etc.) that have no /health.
+    let mut got_response = false;
     for models_url in candidates(base, "models") {
         let req = client.get(&models_url);
         let req = if !api_key.is_empty() { req.bearer_auth(api_key) } else { req };
         if let Ok(resp) = req.send().await {
+            got_response = true;
             let s = resp.status();
             if s.is_success() {
                 let body = resp.text().await.unwrap_or_default();
@@ -468,7 +486,11 @@ pub async fn test_endpoint(url: &str, api_key: &str) -> Result<String, String> {
         }
     }
 
-    Err("Could not reach the server. Check the URL and that the server is running.".into())
+    if got_response {
+        Err("Server is reachable but no compatible /models endpoint found. Check your API URL format (e.g. http://localhost:1234/v1).".into())
+    } else {
+        Err("Could not reach the server. Check the URL and that the server is running.".into())
+    }
 }
 
 /// Return the maximum output tokens for the configured generation model.
