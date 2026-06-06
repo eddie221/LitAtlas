@@ -7,17 +7,19 @@ mod api_client;
 
 use commands::*;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{Emitter, Manager};
 use sqlx::SqlitePool;
 
 // ── AppState ──────────────────────────────────────────────────────────────────
 
 pub struct AppState {
-    pub pool:         Mutex<SqlitePool>,
-    pub projects_dir: PathBuf,
-    pub current_slug: Mutex<String>,
-    pub data_dir:     PathBuf,
+    pub pool:              Mutex<SqlitePool>,
+    pub projects_dir:      PathBuf,
+    pub current_slug:      Mutex<String>,
+    pub data_dir:          PathBuf,
+    pub python_env_ready:  Arc<AtomicBool>,
 }
 
 impl AppState {
@@ -126,34 +128,133 @@ pub fn open_project(projects_dir: &PathBuf, slug: &str) -> SqlitePool {
 
 // ── Python environment setup ──────────────────────────────────────────────────
 
-/// Ensures `<data_dir>/.venv/bin/markitdown` exists.
-/// If the venv is missing, creates it and installs markitdown in a background
-/// thread so the app is not blocked at launch. Progress is reported via the
-/// "summary://progress" event so the status bar can display it.
-fn ensure_python_env(app: tauri::AppHandle, data_dir: std::path::PathBuf) {
-    #[cfg(target_os = "windows")]
-    let (bin, markitdown_name) = ("Scripts", "markitdown.exe");
-    #[cfg(not(target_os = "windows"))]
-    let (bin, markitdown_name) = ("bin", "markitdown");
-
-    let venv_dir   = data_dir.join(".venv");
-    let markitdown = venv_dir.join(bin).join(markitdown_name);
-
-    if markitdown.exists() {
-        logger::log_info("python_env", "markitdown found, skipping setup");
-        return;
-    }
-
+/// Verifies that `<data_dir>/.venv/bin/markitdown` is functional on every launch.
+/// Runs in a background thread so startup is never blocked.
+/// If markitdown is missing or broken, recreates the venv (if absent) and
+/// reinstalls markitdown[all] via pip.
+fn ensure_python_env(
+    app: tauri::AppHandle,
+    data_dir: std::path::PathBuf,
+    ready_flag: Arc<AtomicBool>,
+) {
     std::thread::spawn(move || {
-        logger::log_info("python_env", "markitdown not found, setting up venv");
+        #[cfg(target_os = "windows")]
+        let (bin, markitdown_name) = ("Scripts", "markitdown.exe");
+        #[cfg(not(target_os = "windows"))]
+        let (bin, markitdown_name) = ("bin", "markitdown");
+
+        let venv_dir   = data_dir.join(".venv");
+        let markitdown = venv_dir.join(bin).join(markitdown_name);
+
+        // Verify markitdown is actually executable, not just present on disk.
+        let is_functional = std::process::Command::new(&markitdown)
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+
+        if is_functional {
+            logger::log_info("python_env", "markitdown verified OK");
+            ready_flag.store(true, Ordering::SeqCst);
+            let _ = app.emit("summary://progress", serde_json::json!({
+                "source": "python_env", "status": "ready"
+            }));
+            return;
+        }
+
+        logger::log_info("python_env", "markitdown not functional, setting up venv");
         let _ = app.emit("summary://progress", serde_json::json!({
-            "status": "starting", "title": "Setting up Python environment…"
+            "source": "python_env", "status": "starting", "title": "Setting up Python environment…"
         }));
 
-        // Create venv
-        let python = if std::process::Command::new("python3")
-            .arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
-        { "python3" } else { "python" };
+        // Find Python >= 3.12.
+        // Packaged apps on macOS/Windows have a restricted PATH, so also probe
+        // absolute paths for common Python install locations.
+        let python: String = {
+            #[cfg(target_os = "windows")]
+            let candidates: Vec<String> = [
+                "py", "python3.13", "python3.12", "python3", "python",
+            ].iter().map(|s| s.to_string()).collect();
+
+            #[cfg(target_os = "macos")]
+            let candidates: Vec<String> = {
+                let mut v: Vec<String> = Vec::new();
+                for minor in (12u8..=15).rev() {
+                    for prefix in &["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"] {
+                        v.push(format!("{prefix}/python3.{minor}"));
+                    }
+                    v.push(format!("python3.{minor}"));
+                }
+                for prefix in &["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"] {
+                    v.push(format!("{prefix}/python3"));
+                }
+                v.push("python3".to_string());
+                v
+            };
+
+            #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+            let candidates: Vec<String> = {
+                let mut v: Vec<String> = Vec::new();
+                for minor in (12u8..=15).rev() {
+                    v.push(format!("/usr/bin/python3.{minor}"));
+                    v.push(format!("/usr/local/bin/python3.{minor}"));
+                    v.push(format!("python3.{minor}"));
+                }
+                v.push("python3".to_string());
+                v
+            };
+
+            let found = candidates.iter().find(|py| {
+                std::process::Command::new(py.as_str())
+                    .arg("--version")
+                    .output()
+                    .ok()
+                    .and_then(|o| {
+                        if !o.status.success() { return None; }
+                        let raw = String::from_utf8_lossy(&o.stdout).to_string()
+                            + &String::from_utf8_lossy(&o.stderr);
+                        // "Python 3.13.5" → [3, 13, 5]
+                        let ver: Vec<u32> = raw.split_whitespace()
+                            .nth(1).unwrap_or("")
+                            .split('.')
+                            .filter_map(|x| x.parse().ok())
+                            .collect();
+                        if ver.len() >= 2 && (ver[0] > 3 || (ver[0] == 3 && ver[1] >= 12)) {
+                            Some(())
+                        } else {
+                            None
+                        }
+                    })
+                    .is_some()
+            });
+
+            match found {
+                Some(py) => py.clone(),
+                None => {
+                    let msg = "No suitable Python found (>= 3.12 required). \
+                               Install Python 3.12 or later and restart the app.";
+                    logger::log_error("python_env", msg);
+                    let _ = app.emit("summary://progress", serde_json::json!({
+                        "source": "python_env", "status": "error", "error": msg
+                    }));
+                    return;
+                }
+            }
+        };
+        logger::log_info("python_env", &format!("using {python} for venv"));
+
+        // Remove any existing stale venv (e.g. created with old Python 3.9)
+        // so it gets recreated with the newly found Python.
+        if venv_dir.exists() {
+            if let Err(e) = std::fs::remove_dir_all(&venv_dir) {
+                let msg = format!("failed to remove stale venv: {e}");
+                logger::log_error("python_env", &msg);
+                let _ = app.emit("summary://progress", serde_json::json!({
+                    "source": "python_env", "status": "error", "error": msg
+                }));
+                return;
+            }
+        }
 
         let venv_str = venv_dir.to_string_lossy().to_string();
         let out = std::process::Command::new(python)
@@ -165,7 +266,7 @@ fn ensure_python_env(app: tauri::AppHandle, data_dir: std::path::PathBuf) {
                 let msg = format!("venv creation failed: {e}");
                 logger::log_error("python_env", &msg);
                 let _ = app.emit("summary://progress", serde_json::json!({
-                    "status": "error", "error": msg
+                    "source": "python_env", "status": "error", "error": msg
                 }));
                 return;
             }
@@ -173,14 +274,14 @@ fn ensure_python_env(app: tauri::AppHandle, data_dir: std::path::PathBuf) {
                 let msg = String::from_utf8_lossy(&o.stderr).trim().to_string();
                 logger::log_error("python_env", &format!("venv creation failed: {msg}"));
                 let _ = app.emit("summary://progress", serde_json::json!({
-                    "status": "error", "error": format!("venv creation failed: {msg}")
+                    "source": "python_env", "status": "error", "error": format!("venv creation failed: {msg}")
                 }));
                 return;
             }
             _ => {}
         }
 
-        // Install markitdown into the venv
+        // Install or repair markitdown inside the venv.
         let pip = venv_dir.join(bin).join("pip");
         let out = std::process::Command::new(&pip)
             .args(["install", "markitdown[all]"])
@@ -198,13 +299,14 @@ fn ensure_python_env(app: tauri::AppHandle, data_dir: std::path::PathBuf) {
                 let msg = String::from_utf8_lossy(&o.stderr).trim().to_string();
                 logger::log_error("python_env", &format!("pip install failed: {msg}"));
                 let _ = app.emit("summary://progress", serde_json::json!({
-                    "status": "error", "error": format!("pip install markitdown failed: {msg}")
+                    "source": "python_env", "status": "error", "error": format!("pip install markitdown failed: {msg}")
                 }));
             }
             Ok(_) => {
                 logger::log_info("python_env", "markitdown installed successfully");
+                ready_flag.store(true, Ordering::SeqCst);
                 let _ = app.emit("summary://progress", serde_json::json!({
-                    "status": "done", "title": "Python environment ready"
+                    "source": "python_env", "status": "ready"
                 }));
             }
         }
@@ -250,15 +352,17 @@ pub fn run() {
                 .to_string();
 
             let pool = open_project(&projects_dir, &first_slug);
+            let python_env_ready = Arc::new(AtomicBool::new(false));
 
             app.manage(AppState {
-                pool:         Mutex::new(pool),
+                pool:             Mutex::new(pool),
                 projects_dir,
-                current_slug: Mutex::new(first_slug),
-                data_dir:     data_dir.clone(),
+                current_slug:     Mutex::new(first_slug),
+                data_dir:         data_dir.clone(),
+                python_env_ready: python_env_ready.clone(),
             });
 
-            ensure_python_env(app.handle().clone(), data_dir);
+            ensure_python_env(app.handle().clone(), data_dir, python_env_ready);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -277,7 +381,7 @@ pub fn run() {
             recompute_edges, append_edges, replace_edges_by_source,
             // PDF
             copy_pdf, get_pdf_url, store_pdf_bytes, read_pdf_bytes,
-            delete_pdf_file,
+            delete_pdf_file, embed_paper_pdf,
             // AI Summary (paper.md)
             read_paper_md, save_paper_md,
             delete_paper_md, regenerate_paper_md, open_paper_folder,
@@ -300,6 +404,8 @@ pub fn run() {
             open_folder, get_dirs,
             // AI status check
             get_papers_ai_status,
+            // Python env readiness gate
+            is_python_env_ready,
         ])
         .run(tauri::generate_context!())
         .expect("error while running LitAtlas");

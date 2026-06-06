@@ -387,7 +387,6 @@ pub async fn replace_edges_by_source(
 
 #[tauri::command]
 pub async fn store_pdf_bytes(
-    app:         tauri::AppHandle,
     s:           State<'_, AppState>,
     paper_id:    i64,
     filename:    String,
@@ -411,8 +410,16 @@ pub async fn store_pdf_bytes(
         .map_err(|e| format!("Failed to write PDF: {e}"))?;
     db::save_pdf_path(&s.pool(), paper_id, Some(&dest.to_string_lossy()))
         .await.map_err(map_log_err!("store_pdf_bytes"))?;
-    embed_pdf_in_background(app, paper_id, s.pdfs_dir(), s.data_dir.clone(), true);
+    // Embedding is triggered by the frontend job queue via embed_paper_pdf.
     Ok(dest.to_string_lossy().to_string())
+}
+
+/// Triggered by the frontend job queue — starts PDF extraction + AI summary + embedding
+/// for one paper. Runs asynchronously; progress is emitted via "summary://progress" events.
+#[tauri::command]
+pub fn embed_paper_pdf(app: tauri::AppHandle, s: State<'_, AppState>, paper_id: i64) {
+    logger::log_call("embed_paper_pdf");
+    embed_pdf_in_background(app, paper_id, s.pdfs_dir(), s.data_dir.clone(), true);
 }
 
 fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
@@ -1520,6 +1527,11 @@ pub fn get_dirs(s: State<'_, AppState>) -> CmdResult<serde_json::Value> {
     Ok(serde_json::json!({
         "data_dir":   s.data_dir.to_string_lossy(),
     }))
+}
+
+#[tauri::command]
+pub fn is_python_env_ready(s: State<'_, AppState>) -> bool {
+    s.python_env_ready.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 /// Check per-paper AI readiness: embedding presence, PDF-field coverage, summary files.

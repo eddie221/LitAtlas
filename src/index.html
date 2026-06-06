@@ -46,8 +46,19 @@
 
   <!-- ── SIDEBAR EDGE TOGGLE ── -->
   <button id="sidebar-edge-toggle" title="Collapse sidebar"><i class="bi bi-chevron-left"></i></button>
+  <!-- ── JOB QUEUE PANEL ── -->
+  <div id="job-panel">
+    <div id="job-panel-header">
+      <span>Processing Queue</span>
+      <button id="job-panel-close"><i class="bi bi-x"></i></button>
+    </div>
+    <div id="job-list"></div>
+  </div>
+
   <header id="header">
-    <h1>Lit<span>Atlas</span></h1>
+    <div id="header-left">
+      <h1>Lit<span>Atlas</span></h1>
+    </div>
 
     <!-- ── Search ── -->
     <div id="search-bar">
@@ -63,26 +74,24 @@
     <!-- ── Controls ── -->
     <div id="controls">
 
-      <!-- Layout segmented control -->
+      <!-- Primary action -->
+      <button class="btn ctrl-primary" id="btn-new-paper" title="Add a new paper"><i class="bi bi-plus"></i> Paper</button>
+
+      <div class="ctrl-divider"></div>
+
+      <!-- View controls: layout + zoom + reset -->
       <div class="ctrl-group ctrl-segmented" id="layout-toggle">
         <button class="seg-btn active" id="btn-force"  title="Force-directed layout">Force</button>
         <button class="seg-btn"        id="btn-radial" title="Radial layout">Radial</button>
       </div>
 
-      <div class="ctrl-divider"></div>
-
-      <!-- Graph actions -->
-      <button class="btn ctrl-action" id="btn-reset" title="Reset view"><i class="bi bi-arrow-counterclockwise"></i> Reset</button>
-      <button class="btn ctrl-primary" id="btn-new-paper" title="Add a new paper"><i class="bi bi-plus"></i> Paper</button>
-
-      <div class="ctrl-divider"></div>
-
-      <!-- Zoom inline -->
       <div class="ctrl-group ctrl-zoom">
         <button class="zoom-btn" id="zoom-out"  title="Zoom out"><i class="bi bi-dash"></i></button>
         <button class="zoom-btn" id="zoom-fit"  title="Fit graph">fit</button>
         <button class="zoom-btn" id="zoom-in"   title="Zoom in"><i class="bi bi-plus"></i></button>
       </div>
+
+      <button class="btn ctrl-action" id="btn-reset" title="Reset view"><i class="bi bi-arrow-counterclockwise"></i></button>
 
       <div class="ctrl-divider"></div>
 
@@ -92,8 +101,16 @@
         <span class="ctrl-icon-label">Similarity</span>
       </button>
       <button class="ctrl-icon-btn" id="btn-app-settings" title="App Settings">
-        <i class="bi bi-tag"></i>
+        <i class="bi bi-gear"></i>
         <span class="ctrl-icon-label">App</span>
+      </button>
+
+      <div class="ctrl-divider"></div>
+
+      <!-- Job queue notification -->
+      <button id="job-queue-btn" title="Processing jobs">
+        <i class="bi bi-list-task"></i>
+        <span id="job-queue-badge"></span>
       </button>
 
     </div>
@@ -376,10 +393,14 @@
   </div>
 
   <script src="similarity_settings.js" type="module" defer></script>
-<script src="app_settings.js" type="module" defer></script>
+  <script src="app_settings.js" type="module" defer></script>
   <script src="graph.js" type="module" defer></script>
   <script src="paper-page.js" type="module" defer></script>
-  <script src="projects.js" type="module" defer></script> 
+  <script src="projects.js" type="module" defer></script>
+  <script type="module" defer>
+    import { initJobPanel } from "./jobs.js";
+    document.addEventListener("DOMContentLoaded", initJobPanel);
+  </script> 
 
 
   <!-- ══════════════════════════════════════════════════

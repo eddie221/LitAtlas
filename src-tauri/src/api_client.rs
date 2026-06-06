@@ -572,7 +572,18 @@ pub fn convert_pdf_to_markdown(path: &str, data_dir: &std::path::Path) -> Result
     let output = std::process::Command::new(&bin)
         .arg(path)
         .output()
-        .map_err(|e| format!("markitdown launch failed: {e}"))?;
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                format!(
+                    "markitdown not found (looked at '{}').\n\
+                     The Python environment may still be setting up on first launch — \
+                     wait a moment and try again, or restart the app.",
+                    bin.display()
+                )
+            } else {
+                format!("markitdown launch failed: {e}")
+            }
+        })?;
 
     if !output.status.success() {
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
@@ -581,7 +592,17 @@ pub fn convert_pdf_to_markdown(path: &str, data_dir: &std::path::Path) -> Result
 }
 
 fn find_markitdown_bin(data_dir: &std::path::Path) -> std::path::PathBuf {
-    let candidate = data_dir.join(".venv/bin/markitdown");
+    #[cfg(target_os = "windows")]
+    let rel = ".venv/Scripts/markitdown.exe";
+    #[cfg(not(target_os = "windows"))]
+    let rel = ".venv/bin/markitdown";
+
+    let candidate = data_dir.join(rel);
     if candidate.exists() { return candidate; }
+
+    // Fall back to whatever is on PATH.
+    #[cfg(target_os = "windows")]
+    return std::path::PathBuf::from("markitdown.exe");
+    #[cfg(not(target_os = "windows"))]
     std::path::PathBuf::from("markitdown")
 }

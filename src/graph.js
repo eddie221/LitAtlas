@@ -286,6 +286,22 @@ if (tauriListen) {
   }
 
   tauriListen("summary://progress", ({ payload }) => {
+    if (payload?.source === "python_env") {
+      if (payload?.status === "starting") {
+        _showPythonSetupOverlay("Setting up Python environment…");
+        if (_pythonReadyResolve) { /* overlay already shown, keep waiting */ }
+      } else if (payload?.status === "ready") {
+        if (_pythonReadyResolve) { _pythonReadyResolve(); _pythonReadyResolve = null; }
+      } else if (payload?.status === "error") {
+        const msg = payload?.error ?? "Unknown error";
+        if (_pythonReadyResolve) {
+          _showPythonSetupOverlay(null, msg);
+        } else {
+          _sbShow("error", `Python env error — ${msg}`);
+        }
+      }
+      return;
+    }
     const title = payload?.title ? `"${payload.title}"` : "paper";
     if (payload?.status === "starting") {
       _sbShow("loading", `Processing PDF for ${title}…`);
@@ -297,6 +313,38 @@ if (tauriListen) {
       _sbShow("error", `PDF processing failed — ${payload?.error ?? "unknown error"}`);
     }
   });
+}
+
+// ── Python env gate ───────────────────────────────────────────────────────────
+let _pythonReadyResolve = null;
+
+function _showPythonSetupOverlay(msg, errorMsg) {
+  const el = _overlayEl();
+  if (!el) return;
+  if (errorMsg) {
+    el.innerHTML = `
+      <div class="pg-title">Paper<span>Graph</span></div>
+      <div class="pg-msg" style="color:#f87171">Python environment error</div>
+      <div class="pg-msg" style="font-size:0.85em;max-width:480px;text-align:center;opacity:0.8">${errorMsg}</div>`;
+  } else {
+    el.innerHTML = `
+      <div class="pg-title">Paper<span>Graph</span></div>
+      <div class="pg-msg">${msg ?? "Setting up Python environment…"}</div>
+      <div class="pg-msg" style="font-size:0.8em;opacity:0.6">This only happens once on first launch</div>
+      <div class="pg-spinner"></div>`;
+  }
+  el.classList.add("visible");
+}
+
+async function _waitForPythonEnv() {
+  // Subscribe to the event FIRST, then poll — eliminates the race where the
+  // env becomes ready between the poll returning false and the listener firing.
+  const ready = await invoke("is_python_env_ready");
+  if (ready) return;
+
+  // Not ready yet — show setup overlay and wait for the "ready" event.
+  _showPythonSetupOverlay("Setting up Python environment…");
+  await new Promise(resolve => { _pythonReadyResolve = resolve; });
 }
 
 // Returns a promise that resolves when embedding://progress { done } fires,
@@ -1532,7 +1580,7 @@ document.getElementById("npm-submit-btn").addEventListener("click", async () => 
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
 resizeCanvas();
-loadFromDB();
+(async () => { await _waitForPythonEnv(); await loadFromDB(); })();
 // ── Reload graph (called when project switches) ───────────────────────────────
 export async function reloadGraph() {
   deselectNode();

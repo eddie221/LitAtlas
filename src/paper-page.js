@@ -16,6 +16,7 @@ import { colorForPaper, groupForPaper } from "./constant.js";
 import { getPapersCache, getEdgesCache, setCurrentPaperCache, setCurrentConnectedCache, getCurrentPaperCache, state } from "./cache.js";
 import { triggerEdgeRecompute, deselectNode, selectNode, refreshPaper, recomputeEdgesForPaper, getConnected, attr, loadPdfIntoIframe } from "./graph.js";
 import { getTagVocab } from "./similarity.js";
+import { enqueueJob } from "./jobs.js";
 import { attachTagAutocomplete } from "./tag-autocomplete.js";
 
 const invoke = (
@@ -34,44 +35,6 @@ const invoke = (
  * The embedding is saved next to the PDF as embedding.json and will be used
  * automatically by hf_compute_similarity to skip re-encoding.
  */
-async function _triggerPaperEmbedding(paperId) {
-  const cfg = window.LitAtlas?.getSimConfig?.() ?? {};
-  if (cfg.strategy !== "hf-embeddings") return;
-  const config = {
-    model:   cfg.model   ?? "google/gemma-3-1b-it",
-    fields:  ["title", "abstract", "hashtags", "venue", "notes", "year", "pdf"],
-    weights: cfg.weights ?? {},
-  };
-  await invoke("hf_get_paper_embedding", { paperId, config });
-}
-
-// After a PDF upload in AI mode, check API reachability and alert if unavailable.
-async function _checkAndNotifyEmbedding(paperId) {
-  const cfg = window.LitAtlas?.getSimConfig?.() ?? {};
-  if (cfg.strategy !== "hf-embeddings") return;
-  try {
-    const res = await invoke("check_api_connection");
-    if (res?.ok) {
-      // API is up — trigger embedding silently
-      _triggerPaperEmbedding(paperId).catch(e =>
-        console.warn("[PaperPage] background embedding failed:", e)
-      );
-    } else {
-      const err = res?.error ?? "API check failed";
-      console.warn("[PaperPage] API not reachable after PDF upload:", err);
-      // Defer the alert slightly so the PDF success status is visible first
-      setTimeout(() => pgAlert(
-        "PDF saved successfully.\n\n" +
-        "AI embedding could not be queued because the API is not reachable:\n" +
-        err + "\n\n" +
-        "The embedding will be computed automatically next time you run Recompute.",
-        "AI Embedding Unavailable"
-      ), 600);
-    }
-  } catch (e) {
-    console.warn("[PaperPage] check_api_connection threw:", e);
-  }
-}
 
 // ── Custom dialog helpers ─────────────────────────────────────────────────────
 // Tauri v2 blocks window.confirm / window.alert (always returns false / no-op).
@@ -642,6 +605,10 @@ async function renderPdfTab(paper) {
       await invoke("save_pdf_path", { id: paper.id, path: null });
     }
 
+    // Clear pdf_path on both the closure variable and the cache entry.
+    // If refreshPaper() ran earlier it replaced the cache entry with a new
+    // object, so cached !== paper — both must be cleared.
+    paper.pdf_path = null;
     const cached = getPapersCache().find(p => p.id === paper.id);
     if (cached) cached.pdf_path = null;
     if (iframe.src.startsWith("blob:")) URL.revokeObjectURL(iframe.src);
@@ -654,11 +621,18 @@ async function renderPdfTab(paper) {
   if (paper.pdf_path) {
     showPdfFromPath(paper.pdf_path, viewer, dropzone, nameEl, statusEl);
     const filename = paper.pdf_path.split(/[/\\]/).pop();
-    await loadPdfIntoIframe(paper.id, iframe, (msg, color) => {
+    const loaded = await loadPdfIntoIframe(paper.id, iframe, (msg, color) => {
       if (!statusEl) return;
       if (msg === null) { statusEl.textContent = filename; statusEl.style.color = ""; }
       else              { statusEl.textContent = msg;      statusEl.style.color = color ?? ""; }
     });
+    // If the file is gone (deleted externally or path stale), fall back to dropzone.
+    if (!loaded) {
+      paper.pdf_path = null;
+      const c = getPapersCache().find(p => p.id === paper.id);
+      if (c) c.pdf_path = null;
+      showDropzone(dropzone, viewer);
+    }
   } else {
     showDropzone(dropzone, viewer);
   }
@@ -679,7 +653,6 @@ function readFileAsBase64(file) {
 }
 
 async function handlePdfPick(file, paper, dropzone, viewer, iframe, nameEl, statusEl) {
-  console.log("handlePDF ");
   if (statusEl) { statusEl.textContent = "Reading file…"; statusEl.style.color = "var(--text-secondary)"; }
   try {
     // Read the file bytes in JS — this works in all Tauri/browser environments
@@ -705,10 +678,9 @@ async function handlePdfPick(file, paper, dropzone, viewer, iframe, nameEl, stat
       statusEl.style.color = "var(--accent)";
     }
 
-    // If AI mode is active, verify the API is reachable so the user knows
-    // whether the PDF will get an embedding.  Do this in the background so
-    // it never blocks the PDF display.
-    _checkAndNotifyEmbedding(paper.id);
+    // Add to the serial job queue — extracts PDF text, generates AI summary,
+    // and computes embedding one paper at a time.
+    enqueueJob(paper.id, paper.title);
   } catch (err) {
     console.error("[PaperPage] store_pdf_bytes failed:", err);
     // Last-resort fallback: just remember the original filename so the
@@ -871,6 +843,7 @@ async function renderAiSummaryTab(paper) {
       <div class="pp-ai-toolbar-right">
         <span id="pp-ai-summary-status" class="pp-ai-summary-status"></span>
         <button class="pp-notes-view-btn" id="pp-ai-view-edit">Edit</button>
+        <button class="pp-notes-view-btn" id="pp-ai-view-split">Split</button>
         <button class="pp-notes-view-btn active" id="pp-ai-view-preview">Preview</button>
         <button class="btn pp-ai-save-btn" id="pp-ai-save-btn" disabled>Save</button>
       </div>
@@ -886,6 +859,7 @@ async function renderAiSummaryTab(paper) {
   const statusEl  = container.querySelector("#pp-ai-summary-status");
   const saveBtn      = container.querySelector("#pp-ai-save-btn");
   const editBtn      = container.querySelector("#pp-ai-view-edit");
+  const splitBtn     = container.querySelector("#pp-ai-view-split");
   const previewBtn   = container.querySelector("#pp-ai-view-preview");
   const openFolderBtn= container.querySelector("#pp-ai-open-folder");
   const regenBtn     = container.querySelector("#pp-ai-regen-btn");
@@ -942,15 +916,16 @@ async function renderAiSummaryTab(paper) {
   });
 
   // View mode toggle
-  editBtn.addEventListener("click", () => {
-    panesEl.className = "pp-notes-panes edit-only";
-    editBtn.classList.add("active"); previewBtn.classList.remove("active");
-  });
-  previewBtn.addEventListener("click", () => {
-    panesEl.className = "pp-notes-panes preview-only";
-    previewBtn.classList.add("active"); editBtn.classList.remove("active");
-    renderPreview();
-  });
+  function setViewMode(mode) {
+    panesEl.className = "pp-notes-panes" + (mode === "edit" ? " edit-only" : mode === "preview" ? " preview-only" : "");
+    editBtn.classList.toggle("active",    mode === "edit");
+    splitBtn.classList.toggle("active",   mode === "split");
+    previewBtn.classList.toggle("active", mode === "preview");
+    if (mode !== "edit") renderPreview();
+  }
+  editBtn.addEventListener("click",    () => setViewMode("edit"));
+  splitBtn.addEventListener("click",   () => setViewMode("split"));
+  previewBtn.addEventListener("click", () => setViewMode("preview"));
 
   // Track edits — keep preview pane in sync if split view is active
   textarea.addEventListener("input", () => {

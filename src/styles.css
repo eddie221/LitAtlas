@@ -95,22 +95,104 @@
       backdrop-filter: blur(14px);
       border-bottom: 1px solid var(--border);
     }
+    #header-left {
+      display: flex; align-items: center; gap: 8px;
+      flex-shrink: 0; margin-right: 16px;
+    }
     #header h1 {
       font-family: 'DM Serif Display', serif;
       font-size: 1.1rem;
       letter-spacing: -0.01em;
       flex-shrink: 0;
-      margin-right: 16px;
+      margin-right: 0;
     }
     #header h1 span { color: var(--accent); }
+
+    /* ── Job queue button ─────────────────────────────────────────────────── */
+    #job-queue-btn {
+      position: relative;
+      display: flex;
+      align-items: center; justify-content: center;
+      width: 28px; height: 28px;
+      border: 1px solid var(--border2);
+      border-radius: 6px;
+      background: var(--surface);
+      color: var(--text-secondary);
+      cursor: pointer; font-size: 0.85rem;
+      transition: background 0.15s, color 0.15s;
+    }
+    #job-queue-btn.has-jobs { display: flex; color: var(--accent2); }
+    #job-queue-btn:hover { background: var(--bg3); color: var(--text-primary); }
+    #job-queue-badge {
+      position: absolute; top: -5px; right: -5px;
+      min-width: 14px; height: 14px;
+      background: var(--accent2); color: #fff;
+      border-radius: 7px; font-size: 0.55rem;
+      display: flex; align-items: center; justify-content: center;
+      padding: 0 3px; font-weight: 700; line-height: 1;
+    }
+    #job-queue-badge:empty { display: none; }
+
+    /* ── Job panel ────────────────────────────────────────────────────────── */
+    #job-panel {
+      position: fixed;
+      top: 88px; right: 16px;
+      width: 300px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.45);
+      z-index: 200;
+      overflow: hidden;
+      display: none;
+      flex-direction: column;
+    }
+    #job-panel.visible { display: flex; }
+    #job-panel-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 8px 10px 8px 12px;
+      border-bottom: 1px solid var(--border);
+      font-size: 0.7rem; font-weight: 600;
+      color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.05em;
+    }
+    #job-panel-close {
+      background: none; border: none; color: var(--text-dim);
+      cursor: pointer; font-size: 0.9rem; padding: 2px 4px;
+      border-radius: 4px; line-height: 1;
+    }
+    #job-panel-close:hover { color: var(--text-primary); }
+    #job-list { display: flex; flex-direction: column; padding: 6px 0; max-height: 320px; overflow-y: auto; }
+    .job-item {
+      display: flex; align-items: flex-start; gap: 8px;
+      padding: 7px 12px; font-size: 0.72rem;
+    }
+    .job-item + .job-item { border-top: 1px solid var(--border); }
+    .job-item i, .job-spinner { font-size: 0.9rem; margin-top: 1px; flex-shrink: 0; }
+    .job-processing i, .job-spinner { color: var(--accent2); }
+    .job-done i        { color: var(--accent); }
+    .job-error i       { color: var(--accent3); }
+    .job-waiting i     { color: var(--text-dim); }
+    .job-info { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+    .job-title { color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .job-msg   { color: var(--text-secondary); font-size: 0.65rem; }
+    @keyframes job-spin { to { transform: rotate(360deg); } }
+    .job-spinner {
+      width: 0.9rem; height: 0.9rem;
+      border: 2px solid var(--border2);
+      border-top-color: var(--accent2);
+      border-radius: 50%;
+      animation: job-spin 0.7s linear infinite;
+      display: inline-block;
+    }
 
     /* ── Controls row ─────────────────────────────────────────────────────── */
     #controls {
       display: flex;
       align-items: center;
-      gap: 6px;
+      gap: 4px;
       margin-left: auto;   /* push to right edge */
     }
+
 
     /* thin vertical divider between groups */
     .ctrl-divider {
