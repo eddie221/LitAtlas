@@ -607,8 +607,9 @@ pub fn switch_project(s: State<'_, AppState>, slug: String) -> CmdResult<()> {
         return Err(format!("Project '{slug}' not found"));
     }
     let new_pool = crate::open_project(&s.projects_dir, &slug);
-    *s.pool.lock().unwrap()         = new_pool;
+    let old_pool = std::mem::replace(&mut *s.pool.lock().unwrap(), new_pool);
     *s.current_slug.lock().unwrap() = slug;
+    tauri::async_runtime::block_on(old_pool.close());
     Ok(())
 }
 
