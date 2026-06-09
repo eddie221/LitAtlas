@@ -17,6 +17,27 @@ export const TAG_COLORS = {
 // Populated at runtime by the color picker in the detail panel.
 export const nodeColorOverrides = {};
 
+// User-defined labels for distinct node colors: { "#rrggbb": "label" }
+// Populated at runtime from app_config.json and editable via the legend.
+export const colorLabels = {};
+
+// Default human-readable label for a color (tag name reverse-lookup), used
+// when the user has not set a custom label.
+export function defaultLabelForColor(hex) {
+  const norm = (hex ?? "").toLowerCase();
+  for (const [tag, c] of Object.entries(TAG_COLORS)) {
+    if (c.toLowerCase() === norm) {
+      return tag.replace(/-/g, " ").replace(/\b\w/g, ch => ch.toUpperCase());
+    }
+  }
+  return "Unnamed";
+}
+
+// Effective label for a color: user override → tag-based default → "Unnamed".
+export function labelForColor(hex) {
+  return colorLabels[hex] ?? defaultLabelForColor(hex);
+}
+
 // Preset palette offered in the color picker UI
 export const COLOR_PALETTE = [
   "#c8ff00", "#00d4ff", "#ff6b35", "#a855f7",

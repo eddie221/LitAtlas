@@ -583,29 +583,32 @@
       position: fixed;
       background: rgba(17,19,24,0.96); border: 1px solid var(--border);
       padding: 7px 11px; font-size: 0.68rem; pointer-events: none;
-      z-index: 200; max-width: 220px; transform: translate(12px,-50%); display: none;
+      z-index: 200;
+      width: max-content;
+      max-width: min(320px, 40vw);
+      transform: translate(12px,-50%); display: none;
     }
     #tooltip .t-title {
       font-family: 'DM Serif Display', serif; font-size: 0.82rem; margin-bottom: 2px;
+      white-space: normal; overflow-wrap: break-word; word-break: break-word;
+      line-height: 1.25;
     }
     #tooltip .t-year { color: var(--accent); font-size: 0.62rem; }
     #tooltip .t-tag {
       display: flex;
       flex-wrap: wrap;
       gap: 3px;
-      max-width: 220px;
-      max-height: 54px;
-      overflow-y: auto;
-      padding-top: 2px;
+      padding-top: 4px;
     }
 
     /* ═══════════════════════════════════════════════════════════
        LEGEND
     ═══════════════════════════════════════════════════════════ */
     #legend {
-      position: fixed; bottom: 16px; left: 56px;
+      position: fixed; bottom: 16px; left: 216px;
       background: rgba(10,12,16,0.88); backdrop-filter: blur(10px);
       border: 1px solid var(--border); padding: 12px 16px; z-index: 50;
+      max-height: 40vh; overflow-y: auto;
     }
     .legend-title {
       font-size: 0.58rem; letter-spacing: 0.12em;
@@ -615,8 +618,20 @@
       display: flex; align-items: center; gap: 7px;
       font-size: 0.65rem; color: var(--text-secondary); margin-bottom: 4px;
     }
+    .legend-item:last-child { margin-bottom: 0; }
     .legend-dot {
       width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0;
+    }
+    .legend-label-input {
+      background: transparent; border: 1px solid transparent;
+      color: var(--text-secondary); font: inherit; font-size: 0.65rem;
+      padding: 2px 4px; min-width: 80px; max-width: 160px;
+      border-radius: 2px;
+    }
+    .legend-label-input:hover { border-color: var(--border); }
+    .legend-label-input:focus {
+      outline: none; border-color: var(--accent); color: var(--text);
+      background: rgba(255,255,255,0.04);
     }
     
     /* ═══════════════════════════════════════════════════════════

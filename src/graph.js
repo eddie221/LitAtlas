@@ -18,7 +18,7 @@
  *     attributes: [{key,value,order}] }
  */
 
-import { colorForPaper, groupForPaper, nodeColorOverrides, COLOR_PALETTE } from "./constant.js";
+import { colorForPaper, groupForPaper, nodeColorOverrides, COLOR_PALETTE, TAG_COLORS, colorLabels, labelForColor } from "./constant.js";
 import { setPapersCache, getPapersCache, setEdgesCache, getEdgesCache, state, setCurrentPaperCache } from "./cache.js";
 import { openPaperPage, showDropzone } from "./paper-page.js";
 import { computeEdges, computeEdgesForNewPaper, getDefaultConfig, setTagVocab, getTagVocab } from "./similarity.js";
@@ -73,6 +73,8 @@ async function loadNodeColors() {
     const cfg = await invoke("get_app_config") ?? {};
     const saved = cfg.node_color_overrides ?? {};
     Object.assign(nodeColorOverrides, saved);
+    const savedLabels = cfg.color_labels ?? {};
+    Object.assign(colorLabels, savedLabels);
   } catch (e) {
     console.warn("[LitAtlas] Could not load node color overrides:", e);
   }
@@ -85,6 +87,16 @@ async function _saveNodeColors() {
     await invoke("save_app_config", { config: cfg });
   } catch (e) {
     console.warn("[LitAtlas] Could not save node color overrides:", e);
+  }
+}
+
+async function _saveColorLabels() {
+  try {
+    const cfg = await invoke("get_app_config") ?? {};
+    cfg.color_labels = { ...colorLabels };
+    await invoke("save_app_config", { config: cfg });
+  } catch (e) {
+    console.warn("[LitAtlas] Could not save color labels:", e);
   }
 }
 
@@ -625,7 +637,42 @@ function initGraph() {
   document.getElementById("stat-connections").textContent = getEdgesCache().length;
   document.getElementById("stat-topics").textContent      = uniqueTags.size;
 
+  renderLegend();
   loop();
+}
+
+// Build the on-canvas legend mapping each distinct *node color* in use
+// to an editable label. The set of colors comes from the effective color
+// of every paper (per-node override → tag color → fallback).
+function renderLegend() {
+  const host = document.getElementById("legend-items");
+  if (!host) return;
+  const papers = getPapersCache();
+  const colors = [...new Set(papers.map(p => colorForPaper(p).toLowerCase()))]
+    .sort();
+  if (colors.length === 0) {
+    document.getElementById("legend").style.display = "none";
+    return;
+  }
+  document.getElementById("legend").style.display = "";
+  host.innerHTML = colors.map(c => `
+    <div class="legend-item" data-color="${c}">
+      <span class="legend-dot" style="background:${c}"></span>
+      <input type="text" class="legend-label-input"
+             value="${(labelForColor(c) ?? "").replace(/"/g, "&quot;")}"
+             placeholder="Label" />
+    </div>
+  `).join("");
+
+  host.querySelectorAll(".legend-label-input").forEach(inp => {
+    const color = inp.closest(".legend-item").dataset.color;
+    inp.addEventListener("change", () => {
+      const v = inp.value.trim();
+      if (v) colorLabels[color] = v;
+      else delete colorLabels[color];
+      _saveColorLabels();
+    });
+  });
 }
 
 // ── UI font size (app-wide, stored in localStorage) ──────────────────────────
@@ -1036,8 +1083,19 @@ canvas.addEventListener("mousemove", e => {
       ? (n.hashtags).map(t => `<span class="tag-chip tag-chip-sm">${t}</span>`).join("")
       : "";
     tt.style.display     = "block";
-    tt.style.left        = (e.clientX + 14) + "px";
-    tt.style.top         = e.clientY + "px";
+    // Edge-aware positioning: flip horizontally near right edge, clamp vertically.
+    // Measure after display:block so size reflects current content.
+    const rect = tt.getBoundingClientRect();
+    const margin = 8;
+    const flipRight = (e.clientX + 14 + rect.width) > (window.innerWidth - margin);
+    const left = flipRight
+      ? Math.max(margin, e.clientX - 14 - rect.width)
+      : (e.clientX + 14);
+    let top = e.clientY - rect.height / 2;
+    top = Math.max(margin, Math.min(top, window.innerHeight - rect.height - margin));
+    tt.style.transform = "none";
+    tt.style.left      = left + "px";
+    tt.style.top       = top + "px";
     edgeTt.style.display = "none";
 
   } else if (state.hoveredEdge) {
@@ -1178,6 +1236,7 @@ export function selectNode(node) {
     // Update detail-tag accent colour
     document.getElementById("detail-tag").style.color = hex;
     _saveNodeColors();
+    renderLegend();
   }
 
   function resetColor() {
@@ -1189,6 +1248,7 @@ export function selectNode(node) {
       s.classList.toggle("active", s.dataset.color === def));
     document.getElementById("detail-tag").style.color = "";
     _saveNodeColors();
+    renderLegend();
   }
 
   // Clone all three interactive elements to shed every stale listener.
@@ -1567,6 +1627,7 @@ document.getElementById("npm-submit-btn").addEventListener("click", async () => 
 
     document.getElementById("stat-papers").textContent      = getPapersCache().length;
     document.getElementById("stat-connections").textContent = getEdgesCache().length;
+    renderLegend();
 
     statusEl.textContent = `✓ "${title}" added — ${newEdges.length} edges`;
     statusEl.style.color = "var(--accent)";
