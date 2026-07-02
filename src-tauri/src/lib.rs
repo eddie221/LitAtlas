@@ -4,6 +4,7 @@ mod db;
 mod commands;
 mod logger;
 mod api_client;
+mod arxiv;
 
 use commands::*;
 use std::path::PathBuf;
@@ -128,10 +129,10 @@ pub fn open_project(projects_dir: &PathBuf, slug: &str) -> SqlitePool {
 
 // ── Python environment setup ──────────────────────────────────────────────────
 
-/// Verifies that `<data_dir>/.venv/bin/markitdown` is functional on every launch.
+/// Verifies that `<data_dir>/.venv/bin/marker_single` is functional on every launch.
 /// Runs in a background thread so startup is never blocked.
-/// If markitdown is missing or broken, recreates the venv (if absent) and
-/// reinstalls markitdown[all] via pip.
+/// If marker is missing or broken, recreates the venv (if absent) and
+/// reinstalls marker-pdf via pip.
 fn ensure_python_env(
     app: tauri::AppHandle,
     data_dir: std::path::PathBuf,
@@ -139,22 +140,22 @@ fn ensure_python_env(
 ) {
     std::thread::spawn(move || {
         #[cfg(target_os = "windows")]
-        let (bin, markitdown_name) = ("Scripts", "markitdown.exe");
+        let (bin, marker_name) = ("Scripts", "marker_single.exe");
         #[cfg(not(target_os = "windows"))]
-        let (bin, markitdown_name) = ("bin", "markitdown");
+        let (bin, marker_name) = ("bin", "marker_single");
 
-        let venv_dir   = data_dir.join(".venv");
-        let markitdown = venv_dir.join(bin).join(markitdown_name);
+        let venv_dir = data_dir.join(".venv");
+        let marker   = venv_dir.join(bin).join(marker_name);
 
-        // Verify markitdown is actually executable, not just present on disk.
-        let is_functional = std::process::Command::new(&markitdown)
-            .arg("--version")
+        // Verify marker_single is actually executable, not just present on disk.
+        let is_functional = std::process::Command::new(&marker)
+            .arg("--help")
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false);
 
         if is_functional {
-            logger::log_info("python_env", "markitdown verified OK");
+            logger::log_info("python_env", "marker verified OK");
             ready_flag.store(true, Ordering::SeqCst);
             let _ = app.emit("summary://progress", serde_json::json!({
                 "source": "python_env", "status": "ready"
@@ -162,28 +163,35 @@ fn ensure_python_env(
             return;
         }
 
-        logger::log_info("python_env", "markitdown not functional, setting up venv");
+        logger::log_info("python_env", "marker not functional, setting up venv");
         let _ = app.emit("summary://progress", serde_json::json!({
             "source": "python_env", "status": "starting", "title": "Setting up Python environment…"
         }));
 
-        // Find Python >= 3.12.
+        // Find a marker-compatible Python (>= 3.10). Prefer 3.12 first because it
+        // has the best binary-wheel coverage for marker-pdf's deps (Pillow, torch).
+        // Picking 3.14/3.15 often forces a Pillow source build, which fails without
+        // system libjpeg/zlib headers.
         // Packaged apps on macOS/Windows have a restricted PATH, so also probe
         // absolute paths for common Python install locations.
+        let minors: [u8; 4] = [12, 13, 11, 10];
         let python: String = {
             #[cfg(target_os = "windows")]
-            let candidates: Vec<String> = [
-                "py", "python3.13", "python3.12", "python3", "python",
-            ].iter().map(|s| s.to_string()).collect();
+            let candidates: Vec<String> = {
+                let mut v: Vec<String> = Vec::new();
+                for m in minors { v.push(format!("python3.{m}")); }
+                v.extend(["py".into(), "python3".into(), "python".into()]);
+                v
+            };
 
             #[cfg(target_os = "macos")]
             let candidates: Vec<String> = {
                 let mut v: Vec<String> = Vec::new();
-                for minor in (12u8..=15).rev() {
+                for m in minors {
                     for prefix in &["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"] {
-                        v.push(format!("{prefix}/python3.{minor}"));
+                        v.push(format!("{prefix}/python3.{m}"));
                     }
-                    v.push(format!("python3.{minor}"));
+                    v.push(format!("python3.{m}"));
                 }
                 for prefix in &["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"] {
                     v.push(format!("{prefix}/python3"));
@@ -195,10 +203,10 @@ fn ensure_python_env(
             #[cfg(not(any(target_os = "windows", target_os = "macos")))]
             let candidates: Vec<String> = {
                 let mut v: Vec<String> = Vec::new();
-                for minor in (12u8..=15).rev() {
-                    v.push(format!("/usr/bin/python3.{minor}"));
-                    v.push(format!("/usr/local/bin/python3.{minor}"));
-                    v.push(format!("python3.{minor}"));
+                for m in minors {
+                    v.push(format!("/usr/bin/python3.{m}"));
+                    v.push(format!("/usr/local/bin/python3.{m}"));
+                    v.push(format!("python3.{m}"));
                 }
                 v.push("python3".to_string());
                 v
@@ -219,7 +227,7 @@ fn ensure_python_env(
                             .split('.')
                             .filter_map(|x| x.parse().ok())
                             .collect();
-                        if ver.len() >= 2 && (ver[0] > 3 || (ver[0] == 3 && ver[1] >= 12)) {
+                        if ver.len() >= 2 && (ver[0] > 3 || (ver[0] == 3 && ver[1] >= 10)) {
                             Some(())
                         } else {
                             None
@@ -231,8 +239,8 @@ fn ensure_python_env(
             match found {
                 Some(py) => py.clone(),
                 None => {
-                    let msg = "No suitable Python found (>= 3.12 required). \
-                               Install Python 3.12 or later and restart the app.";
+                    let msg = "No suitable Python found (>= 3.10 required, 3.12 preferred). \
+                               Install Python 3.12 and restart the app.";
                     logger::log_error("python_env", msg);
                     let _ = app.emit("summary://progress", serde_json::json!({
                         "source": "python_env", "status": "error", "error": msg
@@ -281,15 +289,22 @@ fn ensure_python_env(
             _ => {}
         }
 
-        // Install or repair markitdown inside the venv.
+        // Upgrade pip first — older pip in a fresh venv can fail to discover
+        // current wheel tags (e.g. Pillow's cp312 manylinux2_28 wheels), forcing
+        // a source build that needs libjpeg/zlib headers.
         let pip = venv_dir.join(bin).join("pip");
+        let _ = std::process::Command::new(&pip)
+            .args(["install", "--upgrade", "pip"])
+            .output();
+
+        // Install or repair marker inside the venv.
         let out = std::process::Command::new(&pip)
-            .args(["install", "markitdown[all]"])
+            .args(["install", "marker-pdf"])
             .output();
 
         match out {
             Err(e) => {
-                let msg = format!("pip install markitdown failed: {e}");
+                let msg = format!("pip install marker-pdf failed: {e}");
                 logger::log_error("python_env", &msg);
                 let _ = app.emit("summary://progress", serde_json::json!({
                     "status": "error", "error": msg
@@ -299,11 +314,11 @@ fn ensure_python_env(
                 let msg = String::from_utf8_lossy(&o.stderr).trim().to_string();
                 logger::log_error("python_env", &format!("pip install failed: {msg}"));
                 let _ = app.emit("summary://progress", serde_json::json!({
-                    "source": "python_env", "status": "error", "error": format!("pip install markitdown failed: {msg}")
+                    "source": "python_env", "status": "error", "error": format!("pip install marker-pdf failed: {msg}")
                 }));
             }
             Ok(_) => {
-                logger::log_info("python_env", "markitdown installed successfully");
+                logger::log_info("python_env", "marker installed successfully");
                 ready_flag.store(true, Ordering::SeqCst);
                 let _ = app.emit("summary://progress", serde_json::json!({
                     "source": "python_env", "status": "ready"
@@ -406,6 +421,8 @@ pub fn run() {
             get_papers_ai_status,
             // Python env readiness gate
             is_python_env_ready,
+            // arXiv discovery
+            arxiv_fetch, arxiv_download_pdf, arxiv_score_abstract,
         ])
         .run(tauri::generate_context!())
         .expect("error while running LitAtlas");

@@ -125,27 +125,52 @@ function _buildApiTab(cfg, dirs) {
 
   return `
     <div class="app-cfg-section">
-      <div class="app-cfg-section-title">OpenAI API Key</div>
-      <div class="app-cfg-hint">
+      <div class="app-cfg-section-title">API Keys</div>
+      <div class="app-cfg-hint" id="app-cfg-api-key-hint">
         Used for embedding models (<code>text-embedding-3-small/large</code>)
         and GPT-4o-mini for AI summary generation.
         Generate a key at <code>platform.openai.com/api-keys</code>.
       </div>
-      <div class="app-cfg-script-row">
-        <input id="app-cfg-openai-key" class="app-cfg-input"
+      <div class="app-cfg-script-row" style="gap:8px">
+        <select id="app-cfg-api-key-provider" class="app-cfg-input"
+                style="width:130px;flex:0 0 auto">
+          <option value="openai">OpenAI</option>
+          <option value="anthropic">Anthropic</option>
+        </select>
+        <input id="app-cfg-api-key" class="app-cfg-input"
                type="password" placeholder="sk-…"
                value="${_esc(cfg.openai_api_key ?? "")}" autocomplete="off" spellcheck="false">
-        <button id="app-cfg-openai-key-show" class="btn" title="Show / hide key"
+        <button id="app-cfg-api-key-show" class="btn" title="Show / hide key"
                 style="flex-shrink:0">
           <i class="bi bi-eye"></i>
         </button>
       </div>
       <div class="app-cfg-script-actions">
-        <button id="app-cfg-openai-key-save" class="btn btn-new-paper">Save Key</button>
-        <button id="app-cfg-openai-key-clear" class="btn app-cfg-reset-btn"
+        <button id="app-cfg-api-key-save" class="btn btn-new-paper">Save Key</button>
+        <button id="app-cfg-api-key-clear" class="btn app-cfg-reset-btn"
                 ${!cfg.openai_api_key ? "disabled" : ""}>Clear</button>
       </div>
-      <div id="app-cfg-openai-key-status" class="app-cfg-status"></div>
+      <div id="app-cfg-api-key-status" class="app-cfg-status"></div>
+    </div>
+
+    <div class="app-cfg-section">
+      <div class="app-cfg-section-title">PDF Extraction Device</div>
+      <div class="app-cfg-hint">
+        Hardware used by marker for PDF→Markdown conversion.
+        <b>Auto</b> picks MPS on Apple Silicon, CUDA if an NVIDIA GPU is detected,
+        otherwise CPU. Change only if auto-detection misbehaves.
+      </div>
+      <div class="app-cfg-script-row" style="gap:8px">
+        <select id="app-cfg-pdf-device" class="app-cfg-input" style="width:220px;flex:0 0 auto">
+          ${["auto","mps","cuda","cpu"].map(v => {
+            const cur = (cfg.pdf_extract_device ?? "auto");
+            const label = { auto:"Auto-detect", mps:"MPS (Apple Silicon)", cuda:"CUDA (NVIDIA)", cpu:"CPU" }[v];
+            return `<option value="${v}"${v===cur?" selected":""}>${label}</option>`;
+          }).join("")}
+        </select>
+        <button id="app-cfg-pdf-device-save" class="btn btn-new-paper">Save</button>
+      </div>
+      <div id="app-cfg-pdf-device-status" class="app-cfg-status"></div>
     </div>
 
     <div class="app-cfg-section">
@@ -167,31 +192,6 @@ function _buildApiTab(cfg, dirs) {
                 ${!cfg.api_base_url ? "disabled" : ""}>Reset to Default</button>
       </div>
       <div id="app-cfg-api-base-url-status" class="app-cfg-status"></div>
-    </div>
-
-    <div class="app-cfg-section">
-      <div class="app-cfg-section-title">Anthropic API Key</div>
-      <div class="app-cfg-hint">
-        Used for AI summary generation via Claude (preferred over OpenAI for generation).
-        Anthropic does not offer a public embedding API — similarity scoring
-        always uses OpenAI embeddings.
-        Generate a key at <code>console.anthropic.com/settings/keys</code>.
-      </div>
-      <div class="app-cfg-script-row">
-        <input id="app-cfg-anthropic-key" class="app-cfg-input"
-               type="password" placeholder="sk-ant-…"
-               value="${_esc(cfg.anthropic_api_key ?? "")}" autocomplete="off" spellcheck="false">
-        <button id="app-cfg-anthropic-key-show" class="btn" title="Show / hide key"
-                style="flex-shrink:0">
-          <i class="bi bi-eye"></i>
-        </button>
-      </div>
-      <div class="app-cfg-script-actions">
-        <button id="app-cfg-anthropic-key-save" class="btn btn-new-paper">Save Key</button>
-        <button id="app-cfg-anthropic-key-clear" class="btn app-cfg-reset-btn"
-                ${!cfg.anthropic_api_key ? "disabled" : ""}>Clear</button>
-      </div>
-      <div id="app-cfg-anthropic-key-status" class="app-cfg-status"></div>
     </div>
 
     <div class="app-cfg-section">
@@ -340,12 +340,50 @@ function _wireDisplayTab(body) {
 
 // ── API tab events ────────────────────────────────────────────────────────────
 
-function _wireApiKeyField(body, cfg, idPrefix, cfgKey) {
-  const input    = body.querySelector(`#app-cfg-${idPrefix}`);
-  const showBtn  = body.querySelector(`#app-cfg-${idPrefix}-show`);
-  const saveBtn  = body.querySelector(`#app-cfg-${idPrefix}-save`);
-  const clearBtn = body.querySelector(`#app-cfg-${idPrefix}-clear`);
-  const statusEl = body.querySelector(`#app-cfg-${idPrefix}-status`);
+const _API_KEY_PROVIDERS = {
+  openai: {
+    cfgKey: "openai_api_key",
+    placeholder: "sk-…",
+    hint: `Used for embedding models (<code>text-embedding-3-small/large</code>)
+      and GPT-4o-mini for AI summary generation.
+      Generate a key at <code>platform.openai.com/api-keys</code>.`,
+  },
+  anthropic: {
+    cfgKey: "anthropic_api_key",
+    placeholder: "sk-ant-…",
+    hint: `Used for AI summary generation via Claude (preferred over OpenAI for generation).
+      Anthropic does not offer a public embedding API — similarity scoring
+      always uses OpenAI embeddings.
+      Generate a key at <code>console.anthropic.com/settings/keys</code>.`,
+  },
+};
+
+function _wireApiKeySection(body, cfg) {
+  const providerSel = body.querySelector("#app-cfg-api-key-provider");
+  const input       = body.querySelector("#app-cfg-api-key");
+  const showBtn     = body.querySelector("#app-cfg-api-key-show");
+  const saveBtn     = body.querySelector("#app-cfg-api-key-save");
+  const clearBtn    = body.querySelector("#app-cfg-api-key-clear");
+  const statusEl    = body.querySelector("#app-cfg-api-key-status");
+  const hintEl      = body.querySelector("#app-cfg-api-key-hint");
+
+  const currentCfgKey = () => _API_KEY_PROVIDERS[providerSel?.value]?.cfgKey;
+
+  function _syncToProvider() {
+    const meta = _API_KEY_PROVIDERS[providerSel.value];
+    if (!meta) return;
+    if (input) {
+      input.value = cfg[meta.cfgKey] ?? "";
+      input.placeholder = meta.placeholder;
+      input.type = "password";
+    }
+    if (showBtn) showBtn.innerHTML = '<i class="bi bi-eye"></i>';
+    if (hintEl) hintEl.innerHTML = meta.hint;
+    if (clearBtn) clearBtn.disabled = !cfg[meta.cfgKey];
+    if (statusEl) { statusEl.textContent = ""; statusEl.className = "app-cfg-status"; }
+  }
+
+  providerSel?.addEventListener("change", _syncToProvider);
 
   showBtn?.addEventListener("click", () => {
     const hidden = input?.type === "password";
@@ -354,7 +392,10 @@ function _wireApiKeyField(body, cfg, idPrefix, cfgKey) {
       ? '<i class="bi bi-eye-slash"></i>'
       : '<i class="bi bi-eye"></i>';
   });
+
   saveBtn?.addEventListener("click", async () => {
+    const cfgKey = currentCfgKey();
+    if (!cfgKey) return;
     const val = input?.value.trim() ?? "";
     cfg[cfgKey] = val || null;
     try {
@@ -363,7 +404,10 @@ function _wireApiKeyField(body, cfg, idPrefix, cfgKey) {
       if (clearBtn) clearBtn.disabled = !val;
     } catch (e) { _showStatus(statusEl, `✗ ${e}`, "err"); }
   });
+
   clearBtn?.addEventListener("click", async () => {
+    const cfgKey = currentCfgKey();
+    if (!cfgKey) return;
     if (input) input.value = "";
     cfg[cfgKey] = null;
     try {
@@ -375,8 +419,19 @@ function _wireApiKeyField(body, cfg, idPrefix, cfgKey) {
 }
 
 function _wireApiTab(body, cfg, dirs) {
-  _wireApiKeyField(body, cfg, "openai-key",    "openai_api_key");
-  _wireApiKeyField(body, cfg, "anthropic-key", "anthropic_api_key");
+  _wireApiKeySection(body, cfg);
+
+  // PDF extraction device
+  const pdfDevSel    = body.querySelector("#app-cfg-pdf-device");
+  const pdfDevSave   = body.querySelector("#app-cfg-pdf-device-save");
+  const pdfDevStatus = body.querySelector("#app-cfg-pdf-device-status");
+  pdfDevSave?.addEventListener("click", async () => {
+    cfg.pdf_extract_device = pdfDevSel?.value || "auto";
+    try {
+      await _saveConfig(cfg);
+      _showStatus(pdfDevStatus, "✓ Device saved — applies to next PDF extraction", "ok");
+    } catch (e) { _showStatus(pdfDevStatus, `✗ ${e}`, "err"); }
+  });
 
   // Model API Endpoint URL
   const urlInput    = body.querySelector("#app-cfg-api-base-url");

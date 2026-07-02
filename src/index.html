@@ -44,8 +44,117 @@
     <button id="project-new-btn"><i class="bi bi-plus"></i> New Project</button>
   </aside>
 
+  <!-- ── arXiv pseudo-node popover ── -->
+  <div id="arxiv-popover" class="arxiv-popover">
+    <div class="arxiv-pop-header">
+      <span id="arxiv-pop-tag">arXiv preview</span>
+      <button id="arxiv-pop-close" class="btn"><i class="bi bi-x"></i></button>
+    </div>
+    <div id="arxiv-pop-title" class="arxiv-pop-title"></div>
+    <div id="arxiv-pop-meta"  class="arxiv-pop-meta"></div>
+    <div id="arxiv-pop-summary" class="arxiv-pop-summary"></div>
+    <div class="arxiv-pop-actions">
+      <button id="arxiv-pop-import" class="btn btn-new-paper">Import</button>
+      <a id="arxiv-pop-link" href="#" target="_blank" class="btn">Open on arXiv</a>
+    </div>
+    <div id="arxiv-pop-status" class="arxiv-modal-status"></div>
+  </div>
+
+  <!-- ── Date picker (standalone, centered popup) ── -->
+  <div id="arxiv-cal-backdrop" class="arxiv-cal-backdrop"></div>
+  <div id="arxiv-cal-popover" class="arxiv-cal-popover">
+    <div class="arxiv-cal-header">
+      <button id="arxiv-cal-prev" class="btn arxiv-cal-nav" type="button">‹</button>
+      <span id="arxiv-cal-title" class="arxiv-cal-title"></span>
+      <button id="arxiv-cal-next" class="btn arxiv-cal-nav" type="button">›</button>
+      <button id="arxiv-cal-close" class="btn arxiv-cal-nav" type="button" title="Close">×</button>
+    </div>
+    <div class="arxiv-cal-dow">
+      <span>Su</span><span>Mo</span><span>Tu</span><span>We</span><span>Th</span><span>Fr</span><span>Sa</span>
+    </div>
+    <div id="arxiv-cal-grid" class="arxiv-cal-grid"></div>
+  </div>
+
+  <!-- ── arXiv Discover modal ── -->
+  <div id="arxiv-modal-backdrop" class="arxiv-modal-backdrop"></div>
+  <div id="arxiv-modal" class="arxiv-modal">
+    <div class="arxiv-modal-header">
+      <span>arXiv Discover</span>
+      <button id="arxiv-modal-close" class="btn"><i class="bi bi-x"></i></button>
+    </div>
+    <div class="arxiv-modal-body">
+      <div class="arxiv-toolbar">
+        <label class="arxiv-field arxiv-field-grow">
+          <span>Category</span>
+          <select id="arxiv-category">
+            <optgroup label="Computer Science">
+              <option value="cs.AI">cs.AI — Artificial Intelligence</option>
+              <option value="cs.CL">cs.CL — Computation and Language</option>
+              <option value="cs.CV">cs.CV — Computer Vision</option>
+              <option value="cs.LG" selected>cs.LG — Machine Learning</option>
+              <option value="cs.NE">cs.NE — Neural &amp; Evolutionary Computing</option>
+              <option value="cs.RO">cs.RO — Robotics</option>
+              <option value="cs.IR">cs.IR — Information Retrieval</option>
+              <option value="cs.HC">cs.HC — Human-Computer Interaction</option>
+              <option value="cs.DB">cs.DB — Databases</option>
+              <option value="cs.DC">cs.DC — Distributed Computing</option>
+            </optgroup>
+            <optgroup label="Statistics &amp; Math">
+              <option value="stat.ML">stat.ML — Machine Learning</option>
+              <option value="math.OC">math.OC — Optimization</option>
+            </optgroup>
+            <optgroup label="Engineering">
+              <option value="eess.IV">eess.IV — Image &amp; Video Processing</option>
+              <option value="eess.SP">eess.SP — Signal Processing</option>
+            </optgroup>
+            <optgroup label="Biology">
+              <option value="q-bio.NC">q-bio.NC — Neurons &amp; Cognition</option>
+            </optgroup>
+          </select>
+        </label>
+        <div class="arxiv-field arxiv-field-date">
+          <span>Date</span>
+          <button id="arxiv-date-btn" type="button" class="arxiv-date-btn">Pick a date</button>
+          <input id="arxiv-date" type="hidden" />
+        </div>
+        <label class="arxiv-field arxiv-field-num">
+          <span>Per page</span>
+          <input id="arxiv-max" type="number" min="1" max="200" value="30" />
+        </label>
+        <button id="arxiv-fetch-btn" class="btn btn-new-paper arxiv-fetch-btn">Fetch</button>
+      </div>
+      <div class="arxiv-modal-actions arxiv-secondary-actions">
+        <button id="arxiv-prev-btn"    class="btn" disabled>← Prev page</button>
+        <button id="arxiv-next-btn"    class="btn" disabled>Next page →</button>
+        <span   id="arxiv-page-label"  class="arxiv-page-label"></span>
+        <button id="arxiv-add-all-btn" class="btn" disabled>Add all to graph</button>
+        <button id="arxiv-clear-btn"   class="btn">Clear pseudo nodes</button>
+      </div>
+
+      <div id="arxiv-modal-status" class="arxiv-modal-status"></div>
+      <div id="arxiv-results-list" class="arxiv-results-list"></div>
+    </div>
+  </div>
+
   <!-- ── SIDEBAR EDGE TOGGLE ── -->
   <button id="sidebar-edge-toggle" title="Collapse sidebar"><i class="bi bi-chevron-left"></i></button>
+
+  <!-- ── RIGHT TOOLBAR ── -->
+  <aside id="right-toolbar">
+    <div id="right-toolbar-header">
+      <span class="proj-sidebar-title">Tools</span>
+    </div>
+    <button class="right-tool-btn" id="btn-arxiv-discover" title="Discover arXiv papers">
+      <i class="bi bi-search"></i><span class="right-tool-label">arXiv Discover</span>
+    </button>
+    <button class="right-tool-btn" id="btn-sim-settings" title="Similarity Settings">
+      <i class="bi bi-sliders"></i><span class="right-tool-label">Similarity</span>
+    </button>
+    <button class="right-tool-btn" id="btn-app-settings" title="App Settings">
+      <i class="bi bi-gear"></i><span class="right-tool-label">App Settings</span>
+    </button>
+  </aside>
+  <button id="right-toolbar-toggle" title="Collapse right toolbar"><i class="bi bi-chevron-right"></i></button>
   <!-- ── JOB QUEUE PANEL ── -->
   <div id="job-panel">
     <div id="job-panel-header">
@@ -92,18 +201,6 @@
       </div>
 
       <button class="btn ctrl-action" id="btn-reset" title="Reset view"><i class="bi bi-arrow-counterclockwise"></i></button>
-
-      <div class="ctrl-divider"></div>
-
-      <!-- Settings icon buttons -->
-      <button class="ctrl-icon-btn" id="btn-sim-settings" title="Similarity Settings">
-        <i class="bi bi-sliders"></i>
-        <span class="ctrl-icon-label">Similarity</span>
-      </button>
-      <button class="ctrl-icon-btn" id="btn-app-settings" title="App Settings">
-        <i class="bi bi-gear"></i>
-        <span class="ctrl-icon-label">App</span>
-      </button>
 
       <div class="ctrl-divider"></div>
 
@@ -403,10 +500,27 @@
   <script src="graph.js" type="module" defer></script>
   <script src="paper-page.js" type="module" defer></script>
   <script src="projects.js" type="module" defer></script>
+  <script src="arxiv.js"    type="module" defer></script>
   <script type="module" defer>
     import { initJobPanel } from "./jobs.js";
-    document.addEventListener("DOMContentLoaded", initJobPanel);
-  </script> 
+    document.addEventListener("DOMContentLoaded", () => {
+      initJobPanel();
+
+      // Right toolbar collapse toggle.
+      const toolbar = document.getElementById("right-toolbar");
+      const toggle  = document.getElementById("right-toolbar-toggle");
+      let rightOpen = true;
+      toggle?.addEventListener("click", () => {
+        rightOpen = !rightOpen;
+        toolbar?.classList.toggle("collapsed", !rightOpen);
+        document.body.classList.toggle("right-collapsed", !rightOpen);
+        toggle.innerHTML = rightOpen
+          ? '<i class="bi bi-chevron-right"></i>'
+          : '<i class="bi bi-chevron-left"></i>';
+        toggle.title = rightOpen ? "Collapse right toolbar" : "Expand right toolbar";
+      });
+    });
+  </script>
 
 
   <!-- ══════════════════════════════════════════════════

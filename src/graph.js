@@ -19,7 +19,7 @@
  */
 
 import { colorForPaper, groupForPaper, nodeColorOverrides, COLOR_PALETTE, TAG_COLORS, colorLabels, labelForColor } from "./constant.js";
-import { setPapersCache, getPapersCache, setEdgesCache, getEdgesCache, state, setCurrentPaperCache } from "./cache.js";
+import { setPapersCache, getPapersCache, setEdgesCache, getEdgesCache, state, setCurrentPaperCache, getPseudoPapers, getPseudoEdges } from "./cache.js";
 import { openPaperPage, showDropzone } from "./paper-page.js";
 import { computeEdges, computeEdgesForNewPaper, getDefaultConfig, setTagVocab, getTagVocab } from "./similarity.js";
 import { loadProjects, onProjectSwitch } from "./projects.js";
@@ -579,6 +579,35 @@ function rebuildEdgeRefs() {
     targetNode: state.nodes.find(n => n.id === e.target),
   }));
   _rebuildConnectedPairs();
+  applyPseudoEntries();
+}
+
+// ── Pseudo nodes (arXiv discovery) ────────────────────────────────────────────
+// Pseudo papers/edges live in cache.js (client-only). We mirror them into
+// state.nodes / state.edges with `isPseudo:true` so the existing force-layout,
+// hit-testing and draw loop pick them up. Drawing branches on `isPseudo`
+// (dashed border, dotted edges); selection branches in the mouseup handler
+// to open an abstract popover instead of the detail panel.
+function applyPseudoEntries() {
+  state.nodes = state.nodes.filter(n => !n.isPseudo);
+  state.edges = state.edges.filter(e => !e.isPseudo);
+
+  const pseudo = getPseudoPapers();
+  for (const pp of pseudo) {
+    state.nodes.push({ ...pp });
+  }
+  for (const pe of getPseudoEdges()) {
+    const sourceNode = state.nodes.find(n => n.id === pe.source_id);
+    const targetNode = state.nodes.find(n => n.id === pe.target_id);
+    if (!sourceNode || !targetNode) continue;
+    state.edges.push({
+      source: pe.source_id, target: pe.target_id,
+      similarity: pe.similarity,
+      type: "pseudo",
+      isPseudo: true,
+      sourceNode, targetNode,
+    });
+  }
 }
 
 // Set of "minId|maxId" strings for node pairs that share at least one edge.
@@ -609,6 +638,14 @@ function resizeCanvas() {
   draw();
 }
 window.addEventListener("resize", resizeCanvas);
+
+// Re-sync the canvas pixel buffer whenever the container's CSS-driven
+// dimensions finish animating (sidebar collapse, detail panel toggle, etc.).
+document.getElementById("canvas-container")?.addEventListener("transitionend", (e) => {
+  if (e.target.id === "canvas-container" && (e.propertyName === "left" || e.propertyName === "right")) {
+    resizeCanvas();
+  }
+});
 
 // ── Graph init ────────────────────────────────────────────────────────────────
 function nodeRadius(p) {
@@ -844,7 +881,7 @@ function draw() {
   const connectedIds = new Set();
   if (sel) {
     state.edges.forEach(e => {
-      if (e.similarity < simThreshold) return;
+      if (!e.isPseudo && e.similarity < simThreshold) return;
       if (e.sourceNode?.id === sel) connectedIds.add(e.targetNode?.id);
       if (e.targetNode?.id === sel) connectedIds.add(e.sourceNode?.id);
     });
@@ -861,8 +898,8 @@ function draw() {
   state.edges.forEach(e => {
     const a = e.sourceNode, b = e.targetNode;
     if (!a || !b) return;
-    if (e.similarity < simThreshold) {
-      return;  // threshold filter
+    if (!e.isPseudo && e.similarity < simThreshold) {
+      return;  // threshold filter — pseudo edges always render
     }
     let alpha;
     if (q) {
@@ -933,7 +970,11 @@ function drawEdge(e, alpha) {
   ctx.save();
   ctx.globalAlpha = hov ? 1 : alpha;
 
-  if (hov) {
+  if (e.isPseudo) {
+    ctx.strokeStyle = hov ? "#c8ff00" : "rgba(150,170,200,.55)";
+    ctx.lineWidth   = hov ? 3 : 1.2;
+    ctx.setLineDash([4, 4]);
+  } else if (hov) {
     ctx.strokeStyle = "#c8ff00";
     ctx.lineWidth   = 4;
   } else if (isHf) {
@@ -963,7 +1004,7 @@ function drawEdge(e, alpha) {
 function drawNode(n, edgeHighlight = false) {
   const sel   = state.selectedNode?.id === n.id;
   const hov   = state.hoveredNode?.id  === n.id || edgeHighlight;
-  const color = colorForPaper(n);
+  const color = n.isPseudo ? "#7a8aa6" : colorForPaper(n);
   const r     = n.radius;
 
   if (sel || hov) {
@@ -975,11 +1016,20 @@ function drawNode(n, edgeHighlight = false) {
   }
 
   ctx.beginPath(); ctx.arc(n.x, n.y, r, 0, Math.PI*2);
-  ctx.fillStyle   = (sel || edgeHighlight) ? color : color + "22";
+  ctx.fillStyle   = (sel || edgeHighlight) ? color : color + (n.isPseudo ? "18" : "22");
   ctx.fill();
-  ctx.strokeStyle = (sel || edgeHighlight) ? "#fff" : color;
-  ctx.lineWidth   = (sel || edgeHighlight) ? 2.5 : 1.5;
-  ctx.stroke();
+  if (n.isPseudo) {
+    ctx.save();
+    ctx.setLineDash([3, 3]);
+    ctx.strokeStyle = (sel || edgeHighlight) ? "#fff" : color;
+    ctx.lineWidth   = 1.5;
+    ctx.stroke();
+    ctx.restore();
+  } else {
+    ctx.strokeStyle = (sel || edgeHighlight) ? "#fff" : color;
+    ctx.lineWidth   = (sel || edgeHighlight) ? 2.5 : 1.5;
+    ctx.stroke();
+  }
 
   const display = n.alias || n.title;
   const label = display.length > 18 ? display.slice(0, 16) + "…" : display;
@@ -1020,7 +1070,7 @@ function nodeAt(sx, sy) {
 function edgeAt(sx, sy) {
   const { x, y } = toWorld(sx, sy);
   for (const e of state.edges) {
-    if (e.similarity < simThreshold) continue;  // invisible edges are not interactive
+    if (!e.isPseudo && e.similarity < simThreshold) continue;  // invisible edges are not interactive
     const a = e.sourceNode, b = e.targetNode;
     if (!a || !b) continue;
     const cpx = (a.x+b.x)/2 - (b.y-a.y)*0.13;
@@ -1179,10 +1229,14 @@ canvas.addEventListener("mouseup", e => {
 
   if (wasDrag && _mouseDownPos) {
     const dx = pos.x - _mouseDownPos.x, dy = pos.y - _mouseDownPos.y;
-    if (dx*dx + dy*dy < 25) selectNode(wasDrag);
+    if (dx*dx + dy*dy < 25) {
+      if (wasDrag.isPseudo) window.LitAtlas?.openPseudoPopover?.(wasDrag);
+      else                  selectNode(wasDrag);
+    }
   } else if (!wasDrag) {
     const node = nodeAt(pos.x, pos.y);
-    if (node) selectNode(node);
+    if (node?.isPseudo)     window.LitAtlas?.openPseudoPopover?.(node);
+    else if (node)          selectNode(node);
     else if (!edgeAt(pos.x, pos.y)) deselectNode();
   }
   _mouseDownNode = null; _mouseDownPos = null;
@@ -1208,6 +1262,7 @@ export function selectNode(node) {
   setCurrentPaperCache(node);
   state.selectedNode = node;
   document.getElementById("detail-panel").classList.add("open");
+  resizeCanvas();
   document.getElementById("detail-tag").textContent     = `— ${node.venue} ${node.year}`;
   document.getElementById("detail-title").textContent   = node.title;
   document.getElementById("detail-authors").textContent = node.authors.join(", ");
@@ -1390,6 +1445,7 @@ export function selectNode(node) {
 export function deselectNode() {
   state.selectedNode = null;
   document.getElementById("detail-panel").classList.remove("open");
+  resizeCanvas();
 }
 
 export function getConnected(node) {
@@ -1704,4 +1760,7 @@ window.LitAtlas = {
   setUiFontSize,
   getUiFontSize_MAX,
   getUiFontSize_MIN,
+  // arXiv discovery hooks (openPseudoPopover is filled in by arxiv.js).
+  applyPseudoNodes: () => { applyPseudoEntries(); draw(); },
+  openPseudoPopover: () => {},
 };

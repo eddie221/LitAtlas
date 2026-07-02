@@ -351,6 +351,10 @@
     }
     #detail-panel.open { transform: translateX(0); }
 
+    /* Shrink the canvas viewport when the detail panel is open so the
+       graph never draws under it. */
+    body:has(#detail-panel.open) #canvas-container { right: 500px; }
+
     .dp-close {
       position: absolute; top: 24px; right: 24px;
       background: none; border: none; color: var(--text-secondary);
@@ -1414,6 +1418,266 @@
     }
     #project-new-btn:hover { color: var(--accent); }
 
+    /* ── RIGHT TOOLBAR (mirrors #project-sidebar on the right edge) ── */
+    #right-toolbar {
+      position: fixed;
+      right: 0; top: 80px; bottom: 0;
+      width: 200px;
+      background: var(--surface);
+      border-left: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+      z-index: 90;
+      transition: width 0.25s cubic-bezier(0.16,1,0.3,1);
+      overflow: hidden;
+    }
+    #right-toolbar.collapsed { width: 0px; }
+    #right-toolbar.collapsed .right-tool-btn,
+    #right-toolbar.collapsed .proj-sidebar-title {
+      opacity: 0; pointer-events: none;
+    }
+    #right-toolbar-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 12px 10px 10px;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    .right-tool-btn {
+      background: none; border: none; border-bottom: 1px solid var(--border);
+      color: var(--text-secondary); font-family: 'Space Mono', monospace;
+      font-size: 0.66rem; letter-spacing: 0.09em; text-transform: uppercase;
+      padding: 12px 14px; cursor: pointer; text-align: left;
+      display: flex; align-items: center; gap: 8px;
+      transition: color 0.13s, background 0.13s;
+      white-space: nowrap;
+    }
+    .right-tool-btn i { font-size: 0.85rem; }
+    .right-tool-btn:hover { color: var(--accent); background: rgba(200,255,0,0.05); }
+
+    /* ── Right toolbar edge toggle ── */
+    #right-toolbar-toggle {
+      position: fixed;
+      right: 209px;
+      top: 50%;
+      transform: translateY(-50%) translateX(50%);
+      z-index: 95;
+      width: 18px; height: 48px;
+      background: var(--surface2);
+      border: 1px solid var(--border2);
+      border-right: 0;
+      border-radius: 3px 0 0 3px;
+      color: var(--text-secondary);
+      font-size: 0.65rem;
+      cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      transition:
+        right 0.25s cubic-bezier(0.16,1,0.3,1),
+        opacity 0.2s, color 0.15s, border-color 0.15s, background 0.15s;
+      padding: 0; line-height: 1;
+    }
+    #right-toolbar-toggle:hover {
+      color: var(--accent);
+      border-color: var(--accent);
+      background: rgba(200,255,0,0.08);
+    }
+    body.right-collapsed #right-toolbar-toggle {
+      right: 8px;
+      border-right: 1px solid var(--border2);
+      border-radius: 3px;
+    }
+
+    /* ── arXiv Discover modal ── */
+    .arxiv-modal-backdrop {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.55);
+      z-index: 800; display: none;
+    }
+    .arxiv-modal-backdrop.open { display: block; }
+    .arxiv-modal {
+      position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+      width: 960px; max-width: calc(100vw - 40px);
+      max-height: calc(100vh - 60px);
+      background: rgba(14,17,24,0.98); border: 1px solid var(--border);
+      border-radius: 8px; z-index: 810;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.6);
+      display: none; flex-direction: column;
+    }
+    .arxiv-modal.open { display: flex; }
+    .arxiv-modal-header {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 12px 14px; border-bottom: 1px solid var(--border);
+      font-family: 'Space Mono', monospace; font-size: 0.72rem;
+      letter-spacing: 0.1em; text-transform: uppercase; color: var(--accent);
+    }
+    .arxiv-modal-header .btn {
+      background: none; border: none; color: var(--text-secondary); cursor: pointer;
+      padding: 2px 6px; font-size: 0.9rem;
+    }
+    .arxiv-modal-body { padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+    .arxiv-field { display: flex; flex-direction: column; gap: 4px; font-size: 0.62rem;
+      letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-secondary); }
+    .arxiv-field select,
+    .arxiv-field input {
+      background: var(--bg-code, #161922); color: var(--text-primary, #d8dae5);
+      border: 1px solid var(--border); border-radius: 4px;
+      padding: 6px 8px; font-family: 'Space Mono', monospace; font-size: 0.72rem;
+      min-width: 0;
+    }
+    .arxiv-field input[type="date"] {
+      color-scheme: dark;   /* themes the native calendar popup for dark UI */
+      padding: 7px 10px;
+      cursor: pointer;
+    }
+    .arxiv-field input[type="date"]::-webkit-calendar-picker-indicator {
+      filter: invert(1) opacity(0.65);
+      cursor: pointer;
+    }
+    .arxiv-field input[type="date"]:hover::-webkit-calendar-picker-indicator {
+      filter: invert(1) opacity(1);
+    }
+    .arxiv-field input[type="date"]:focus {
+      border-color: var(--accent);
+      outline: none;
+    }
+    .arxiv-toolbar {
+      display: flex; gap: 10px; align-items: flex-end;
+      padding-bottom: 10px; border-bottom: 1px solid var(--border);
+    }
+    .arxiv-field-grow { flex: 1 1 auto; min-width: 200px; }
+    .arxiv-field-date { flex: 0 0 180px; position: relative; }
+    .arxiv-field-num  { flex: 0 0 80px;  }
+    .arxiv-fetch-btn  { flex: 0 0 auto; padding: 7px 18px; }
+    .arxiv-secondary-actions { padding: 0; flex-wrap: wrap; align-items: center; }
+    .arxiv-page-label { font-size: 0.62rem; color: var(--text-secondary); letter-spacing: 0.08em; }
+
+    /* Date-picker trigger button (looks like the other inputs) */
+    .arxiv-date-btn {
+      background: var(--bg-code, #161922); color: var(--text-primary, #d8dae5);
+      border: 1px solid var(--border); border-radius: 4px;
+      padding: 7px 10px; font-family: 'Space Mono', monospace; font-size: 0.72rem;
+      text-align: left; cursor: pointer;
+    }
+    .arxiv-date-btn:hover { border-color: var(--accent); }
+
+    /* Standalone centered calendar popup — sits above the arXiv modal
+       so its size is not constrained by that modal. */
+    .arxiv-cal-backdrop {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.55);
+      z-index: 900; display: none;
+    }
+    .arxiv-cal-backdrop.open { display: block; }
+    .arxiv-cal-popover {
+      display: none;
+      position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+      z-index: 910;
+      background: rgba(14,17,24,0.99); border: 1px solid var(--border);
+      border-radius: 10px; padding: 20px;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.7);
+      width: 520px; max-width: calc(100vw - 40px);
+    }
+    .arxiv-cal-popover.open { display: block; }
+    .arxiv-cal-header {
+      display: flex; justify-content: space-between; align-items: center;
+      gap: 8px; margin-bottom: 12px;
+    }
+    .arxiv-cal-nav {
+      background: none; border: 1px solid var(--border); color: var(--text-primary, #d8dae5);
+      border-radius: 4px; width: 38px; height: 38px; cursor: pointer;
+      font-size: 1.15rem; padding: 0; line-height: 1;
+    }
+    .arxiv-cal-nav:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+    .arxiv-cal-nav:disabled { opacity: 0.35; cursor: default; }
+    .arxiv-cal-title {
+      flex: 1 1 auto; text-align: center;
+      font-family: 'Space Mono', monospace; font-size: 1rem; font-weight: 700;
+      color: var(--accent); letter-spacing: 0.06em;
+    }
+    .arxiv-cal-dow {
+      display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px;
+      font-size: 0.68rem; color: var(--text-dim, #888);
+      text-align: center; text-transform: uppercase; letter-spacing: 0.1em;
+      margin-bottom: 6px;
+    }
+    .arxiv-cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; }
+    .arxiv-cal-day {
+      background: rgba(20,24,32,0.55); border: 1px solid transparent;
+      border-radius: 6px; padding: 14px 0; text-align: center;
+      font-family: 'Space Mono', monospace; font-size: 0.95rem;
+      color: var(--text-primary, #d8dae5); cursor: pointer;
+      transition: background 0.1s, border-color 0.1s;
+    }
+    .arxiv-cal-day:hover { background: rgba(0,212,255,0.15); border-color: var(--accent); }
+    .arxiv-cal-day.other-month { opacity: 0.28; }
+    .arxiv-cal-day.today       { border-color: var(--accent2, #00d4ff); }
+    .arxiv-cal-day.selected    { background: var(--accent); color: #0b0d12; font-weight: 700; }
+    .arxiv-cal-day.disabled    { opacity: 0.22; cursor: not-allowed; pointer-events: none; }
+    .arxiv-modal-actions { display: flex; gap: 8px; margin-top: 4px; flex-wrap: wrap; }
+    .arxiv-modal-status { font-size: 0.62rem; color: var(--text-dim, #666); min-height: 1em; }
+    .arxiv-modal-status.ok  { color: var(--accent); }
+    .arxiv-modal-status.err { color: var(--accent3, #ff6b6b); }
+
+    /* Body itself doesn't clip — otherwise the calendar popover gets cut off.
+       The results list has its own scroller below. */
+    .arxiv-modal-body { overflow: visible; }
+    .arxiv-results-list {
+      display: flex; flex-direction: column; gap: 8px;
+      max-height: 45vh; overflow-y: auto;
+      margin-top: 4px;
+    }
+    .arxiv-result {
+      border: 1px solid var(--border); border-radius: 6px;
+      padding: 8px 10px; display: flex; flex-direction: column; gap: 4px;
+      background: rgba(20,24,32,0.55);
+    }
+    .arxiv-result-title { font-size: 0.76rem; font-weight: 600; color: var(--text-primary, #d8dae5); }
+    .arxiv-result-meta  { font-size: 0.58rem; color: var(--text-dim, #777); }
+    .arxiv-result-abs {
+      font-size: 0.66rem; color: var(--text-secondary); line-height: 1.5;
+      max-height: 3.5em; overflow: hidden; position: relative;
+      cursor: pointer;
+    }
+    .arxiv-result-abs.expanded { max-height: none; }
+    .arxiv-result-row {
+      display: flex; justify-content: space-between; align-items: flex-start;
+      gap: 12px;
+    }
+    .arxiv-result-row .arxiv-result-title { flex: 1 1 auto; }
+    .arxiv-add-one { flex: 0 0 auto; padding: 7px 18px; }
+    .arxiv-result.added { opacity: 0.55; }
+    .arxiv-result.added .arxiv-result-title::after {
+      content: "  ✓ on graph";
+      color: var(--accent); font-weight: 400; font-size: 0.55rem; letter-spacing: 0.08em;
+    }
+
+    .arxiv-popover {
+      position: fixed; top: 100px; left: 50%; transform: translateX(-50%);
+      width: 420px; max-width: calc(100vw - 40px);
+      background: rgba(14,17,24,0.97); border: 1px solid var(--border);
+      border-radius: 8px; z-index: 700;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+      padding: 14px; display: none; flex-direction: column; gap: 8px;
+    }
+    .arxiv-popover.open { display: flex; }
+    .arxiv-pop-header {
+      display: flex; justify-content: space-between; align-items: center;
+      font-family: 'Space Mono', monospace; font-size: 0.6rem;
+      letter-spacing: 0.1em; text-transform: uppercase; color: var(--accent2);
+    }
+    .arxiv-pop-header .btn {
+      background: none; border: none; color: var(--text-secondary); cursor: pointer;
+      padding: 0 4px;
+    }
+    .arxiv-pop-title { font-size: 0.85rem; font-weight: 600; color: var(--text-primary, #d8dae5); }
+    .arxiv-pop-meta  { font-size: 0.62rem; color: var(--text-dim, #777); }
+    .arxiv-pop-summary {
+      font-size: 0.7rem; color: var(--text-secondary); line-height: 1.55;
+      max-height: 220px; overflow-y: auto;
+      border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);
+      padding: 8px 0;
+    }
+    .arxiv-pop-actions { display: flex; gap: 8px; }
+    .arxiv-pop-actions .btn { padding: 6px 10px; }
+
     #project-new-row {
       flex-direction: column;
       gap: 6px;
@@ -1438,13 +1702,18 @@
     .proj-confirm:hover { border-color: var(--accent); color: var(--accent); }
     .proj-cancel:hover  { border-color: var(--accent3); color: var(--accent3); }
 
-    /* Shift canvas + header based on sidebar width */
+    /* Shift canvas + header based on left sidebar width */
     #canvas-container, #header {
       left: 200px;
-      transition: left 0.25s cubic-bezier(0.16,1,0.3,1);
+      transition: left 0.25s cubic-bezier(0.16,1,0.3,1),
+                  right 0.25s cubic-bezier(0.16,1,0.3,1);
     }
     body.sidebar-collapsed #canvas-container,
     body.sidebar-collapsed #header { left: 0px; }
+
+    /* Shift canvas based on right toolbar width. Header spans full width. */
+    #canvas-container { right: 200px; }
+    body.right-collapsed #canvas-container { right: 0px; }
 
     /* ═══════════════════════════════════════════════════════════
        SIDEBAR PDF VIEWER (quick detail panel)

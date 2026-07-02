@@ -113,6 +113,16 @@ fn trunc(s: &str, max: usize) -> &str {
 /// Returns true when a non-2xx body looks like the server is still loading its model.
 /// LM Studio and llama.cpp both return 500 with "loading" or "model" in the body
 /// during the cold-start window.
+/// OpenAI's reasoning-style / next-gen chat models (gpt-5*, o1*, o3*, o4*)
+/// removed `max_tokens` in favor of `max_completion_tokens`. Detect by prefix.
+fn uses_max_completion_tokens(model: &str) -> bool {
+    let m = model.trim().to_lowercase();
+    m.starts_with("gpt-5")
+        || m.starts_with("o1")
+        || m.starts_with("o3")
+        || m.starts_with("o4")
+}
+
 fn looks_like_loading(status: u16, body: &str) -> bool {
     if status != 500 && status != 503 { return false; }
     let b = body.to_lowercase();
@@ -288,9 +298,16 @@ async fn openai_generate(
     max_tokens: u32,
 ) -> Result<String, String> {
     let client  = reqwest::Client::new();
+    // Newer OpenAI reasoning-style models (gpt-5*, o1*, o3*, o4*) reject
+    // `max_tokens` and require `max_completion_tokens`. Pick per model.
+    let token_key = if uses_max_completion_tokens(model) {
+        "max_completion_tokens"
+    } else {
+        "max_tokens"
+    };
     let payload = serde_json::json!({
-        "model":      model,
-        "max_tokens": max_tokens,
+        "model":  model,
+        token_key: max_tokens,
         "messages": [
             { "role": "system", "content": system },
             { "role": "user",   "content": user },
@@ -585,46 +602,108 @@ pub async fn list_models(api_key: &str, base_url: &str) -> Result<Vec<String>, S
     Err(err)
 }
 
-/// Convert a PDF to Markdown using the markitdown CLI.
-/// Looks for `.venv/bin/markitdown` inside `data_dir` (app data directory),
-/// then falls back to `markitdown` on the system PATH.
+/// Convert a PDF to Markdown using the marker CLI.
+/// Looks for `.venv/bin/marker_single` inside `data_dir` (app data directory),
+/// then falls back to `marker_single` on the system PATH.
+///
+/// `marker_single` writes to `<output_dir>/<stem>/<stem>.md`, so we route output
+/// to a per-call temp dir, read the produced file, then clean up.
 pub fn convert_pdf_to_markdown(path: &str, data_dir: &std::path::Path) -> Result<String, String> {
-    let bin = find_markitdown_bin(data_dir);
+    let bin = find_marker_bin(data_dir);
 
-    let output = std::process::Command::new(&bin)
-        .arg(path)
+    let stem = std::path::Path::new(path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| format!("Cannot derive file stem from '{path}'"))?;
+
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let out_dir = std::env::temp_dir().join(format!("litatlas_marker_{nanos}"));
+    std::fs::create_dir_all(&out_dir)
+        .map_err(|e| format!("marker temp dir create failed: {e}"))?;
+
+    let device = resolve_torch_device(data_dir);
+    crate::logger::log_info("marker", &format!("using TORCH_DEVICE={device}"));
+
+    let mut cmd = std::process::Command::new(&bin);
+    cmd.arg(path)
+        .args(["--output_dir"]).arg(&out_dir)
+        .args(["--output_format", "markdown"])
+        .env("TORCH_DEVICE", &device);
+    if device == "mps" {
+        cmd.env("PYTORCH_ENABLE_MPS_FALLBACK", "1");
+    }
+    let output = cmd
         .output()
         .map_err(|e| {
+            let _ = std::fs::remove_dir_all(&out_dir);
             if e.kind() == std::io::ErrorKind::NotFound {
                 format!(
-                    "markitdown not found (looked at '{}').\n\
+                    "marker not found (looked at '{}').\n\
                      The Python environment may still be setting up on first launch — \
                      wait a moment and try again, or restart the app.",
                     bin.display()
                 )
             } else {
-                format!("markitdown launch failed: {e}")
+                format!("marker launch failed: {e}")
             }
         })?;
 
     if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+        let err = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let _ = std::fs::remove_dir_all(&out_dir);
+        return Err(err);
     }
-    String::from_utf8(output.stdout).map_err(|e| format!("markitdown output decode: {e}"))
+
+    let md_path = out_dir.join(stem).join(format!("{stem}.md"));
+    let text = std::fs::read_to_string(&md_path)
+        .map_err(|e| format!("marker output read failed at '{}': {e}", md_path.display()));
+
+    let _ = std::fs::remove_dir_all(&out_dir);
+    text
 }
 
-fn find_markitdown_bin(data_dir: &std::path::Path) -> std::path::PathBuf {
+/// Resolve the torch device to pass to marker via `TORCH_DEVICE`.
+/// Reads `pdf_extract_device` from app_config.json (values: `auto`, `mps`, `cuda`, `cpu`).
+/// `auto` picks `mps` on macOS, `cuda` if `nvidia-smi` is callable, else `cpu`.
+fn resolve_torch_device(data_dir: &std::path::Path) -> String {
+    let cfg: serde_json::Value = std::fs::read_to_string(data_dir.join("app_config.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    let setting = cfg["pdf_extract_device"].as_str().unwrap_or("auto").trim().to_lowercase();
+    match setting.as_str() {
+        "mps" | "cuda" | "cpu" => return setting,
+        _ => {}
+    }
+    // Auto-detect.
+    #[cfg(target_os = "macos")]
+    { return "mps".to_string(); }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let nvidia_ok = std::process::Command::new("nvidia-smi")
+            .arg("-L")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if nvidia_ok { "cuda".to_string() } else { "cpu".to_string() }
+    }
+}
+
+fn find_marker_bin(data_dir: &std::path::Path) -> std::path::PathBuf {
     #[cfg(target_os = "windows")]
-    let rel = ".venv/Scripts/markitdown.exe";
+    let rel = ".venv/Scripts/marker_single.exe";
     #[cfg(not(target_os = "windows"))]
-    let rel = ".venv/bin/markitdown";
+    let rel = ".venv/bin/marker_single";
 
     let candidate = data_dir.join(rel);
     if candidate.exists() { return candidate; }
 
     // Fall back to whatever is on PATH.
     #[cfg(target_os = "windows")]
-    return std::path::PathBuf::from("markitdown.exe");
+    return std::path::PathBuf::from("marker_single.exe");
     #[cfg(not(target_os = "windows"))]
-    std::path::PathBuf::from("markitdown")
+    std::path::PathBuf::from("marker_single")
 }

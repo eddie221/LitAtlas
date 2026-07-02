@@ -1147,8 +1147,18 @@ fn embed_pdf_in_background(
 
         let has_pdf = paper.pdf_path.as_deref().map(|p| !p.is_empty()).unwrap_or(false);
 
+        // OpenAI embeddings → embed the paper's abstract attribute only (cheap,
+        // already-distilled signal). All other providers keep the full
+        // PDF-summary embedding path.
+        let embed_fields: Vec<&str> = if model.starts_with("openai:") {
+            vec!["abstract"]
+        } else {
+            PDF_EMBED_FIELDS.to_vec()
+        };
+        println!("{:?}", embed_fields);
+
         let mut field_vectors: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
-        for &field in PDF_EMBED_FIELDS.iter()
+        for &field in embed_fields.iter()
             .filter(|&&f| has_pdf || (f != "pdf" && !f.starts_with("md_")))
         {
             let text = match field_text(field, &paper, &pdf_dir) {
@@ -1611,4 +1621,99 @@ pub fn get_papers_ai_status(s: State<'_, AppState>) -> CmdResult<serde_json::Val
             "missing_summary":       total - n_summary,
         }
     }))
+}
+
+/// Fetch recent arXiv papers in `category` submitted on `date` (YYYY-MM-DD).
+/// Returns up to `max` entries, newest first. No DB writes — pseudo nodes
+/// live in the client until explicitly imported.
+#[tauri::command]
+pub async fn arxiv_fetch(
+    category: String,
+    date:     String,
+    max:      Option<u32>,
+    start:    Option<u32>,
+) -> CmdResult<Vec<crate::arxiv::ArxivPaper>> {
+    logger::log_call("arxiv_fetch");
+    let limit = max.unwrap_or(50).clamp(1, 200);
+    let offset = start.unwrap_or(0);
+    crate::arxiv::fetch(&category, &date, limit, offset).await
+        .map_err(map_log_err!("arxiv_fetch"))
+}
+
+/// Download a PDF from a URL and return its base64 contents. Used by the
+/// arXiv import flow so the webview doesn't have to do a cross-origin fetch.
+#[tauri::command]
+pub async fn arxiv_download_pdf(url: String) -> CmdResult<String> {
+    logger::log_call("arxiv_download_pdf");
+    crate::arxiv::download_pdf_base64(&url).await
+        .map_err(map_log_err!("arxiv_download_pdf"))
+}
+
+/// Embed an arXiv abstract with the current sim-config model and return the
+/// top matches against existing project papers' abstract embeddings.
+///
+/// Uses the *same* embedding path a locally-uploaded PDF's abstract goes
+/// through, so pseudo-node placement is consistent with real papers.
+#[tauri::command]
+pub async fn arxiv_score_abstract(
+    s:         State<'_, AppState>,
+    r#abstract: String,
+) -> CmdResult<Vec<serde_json::Value>> {
+    logger::log_call("arxiv_score_abstract");
+
+    let sim_cfg: serde_json::Value = std::fs::read_to_string(
+            s.data_dir.join("similarity_config.json")
+        )
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    let model = sim_cfg["model"]
+        .as_str()
+        .unwrap_or("openai:text-embedding-3-small")
+        .to_string();
+
+    let keys = crate::api_client::ApiKeys::load(&s.data_dir);
+    let query = crate::api_client::embed(&keys, &model, &r#abstract).await
+        .map_err(map_log_err!("arxiv_score_abstract"))?;
+
+    let papers = crate::db::get_all_papers(&s.pool()).await
+        .map_err(map_log_err!("arxiv_score_abstract"))?;
+
+    let mut scored: Vec<(i64, f32)> = Vec::new();
+    for paper in papers {
+        let path = embedding_path_for_paper(&s, paper.id);
+        let Some(cache) = read_embedding_cache(&path) else { continue };
+        let Some(entry) = get_model_entry(&cache, &model) else { continue };
+        // Prefer the abstract field vector; fall back to any other cached
+        // field so papers embedded pre-change still get scored.
+        let fv = &entry["field_vectors"];
+        let vec_field = fv["abstract"].as_array()
+            .or_else(|| fv["pdf"].as_array())
+            .or_else(|| fv["title"].as_array());
+        let Some(arr) = vec_field else { continue };
+        let paper_vec: Vec<f32> = arr.iter()
+            .map(|v| v.as_f64().unwrap_or(0.0) as f32)
+            .collect();
+        if paper_vec.len() != query.len() { continue; }
+        let sim = cosine_f32(&query, &paper_vec);
+        scored.push((paper.id, sim));
+    }
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    scored.truncate(5);
+    Ok(scored.into_iter()
+        .map(|(id, sim)| serde_json::json!({ "paper_id": id, "similarity": sim }))
+        .collect())
+}
+
+fn cosine_f32(a: &[f32], b: &[f32]) -> f32 {
+    let mut dot = 0.0f32;
+    let mut na  = 0.0f32;
+    let mut nb  = 0.0f32;
+    for (x, y) in a.iter().zip(b.iter()) {
+        dot += x * y;
+        na  += x * x;
+        nb  += y * y;
+    }
+    let denom = na.sqrt() * nb.sqrt();
+    if denom == 0.0 { 0.0 } else { dot / denom }
 }
